@@ -2,6 +2,25 @@
 #
 # 网络定位。**这台机器的容器端口对谁开放，只在这里定一次。**
 #
+# @command      safe network
+# @name         网络定位（公网 / 内网）
+# @group        security
+# @order        40
+# @privilege    root
+# @requires_lib >= 1.26
+# @provides_unit ext:docker.service
+# @args         [--network-mode=<公网|内网>] [--confirm-internal=<y|n>] [--restart-docker=<y|n>]
+# @description  定下容器端口绑本机还是对局域网开放
+#
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 027
+
+source /opt/oneserver/lib/bootstrap.sh
+
 # 它同时决定两件必须一致的事，而这正是它存在的理由 —— 分成两个开关的话，
 # 用户每建一个容器都要想「绑哪个地址」还要再去改一次防火墙，两边对不上时
 # 现场表现是「端口明明发布了却连不上」，而两处看起来都是对的：
@@ -29,24 +48,6 @@
 # 容器端口走的是转发不是入站：包一进来就被 DNAT 成容器地址，不再是本机地址，
 # 于是走 FORWARD 链。所以 `ufw allow <端口>` 那种入站规则对容器一个字都不管用。
 #
-# @command      safe network
-# @name         网络定位（公网 / 内网）
-# @group        security
-# @order        40
-# @privilege    root
-# @requires_lib >= 1.26
-# @provides_unit ext:docker.service
-# @args         [--network-mode=<公网|内网>] [--confirm-internal=<y|n>] [--restart-docker=<y|n>]
-# @description  定下容器端口绑本机还是对局域网开放
-#
-
-set -Eeuo pipefail
-IFS=$'\n\t'
-PATH='/usr/sbin:/usr/bin:/sbin:/bin'
-export PATH
-umask 027
-
-source /opt/oneserver/lib/bootstrap.sh
 
 readonly UFW_DEFAULTS='/etc/default/ufw'
 # ufw 的输出在不同 locale 下措辞不同，而下面要靠文本判定结果

@@ -743,6 +743,20 @@ for f in "${files[@]}"; do
     grep -qE '^#[[:space:]]*@command[[:space:]]' "${f}" || continue
     meta_checked=$((meta_checked + 1))
 
+    # 元数据必须整段落在**前 40 行**内 —— registry::_meta 只读那么多（规范 §6）。
+    # 下面各项检查读的是整份文件，所以写在 41 行之后的字段这里条条都过，装到机器上
+    # 才发现少了半截：@command 掉出窗口是「这条命令莫名其妙不存在」，@order 掉出去
+    # 是 doctor --selftest 报「@order 缺失」。头注释写长一点就会把它们挤出去，
+    # 只有专门查一次行号才拦得住。
+    # 只看**文件头那一段注释**（`set -Eeuo` 之前）：正文里解释某个字段的注释也以
+    # `# @order …` 开头，连它一起数就会把 doctor.sh 这类脚本误报成元数据超窗
+    meta_code=$(grep -nE '^set -Eeuo' "${f}" | head -n1 | cut -d: -f1)
+    meta_last=$(head -n "$((${meta_code:-41} - 1))" "${f}" \
+        | grep -nE '^#[[:space:]]*@[a-z_]+[[:space:]]' | tail -n1 | cut -d: -f1)
+    if [[ -n "${meta_last}" ]] && ((meta_last > 40)); then
+        report_fail "${f}：元数据写到了第 ${meta_last} 行，超出 registry 只读的前 40 行——把长说明挪到 source 之后"
+    fi
+
     while IFS= read -r v; do
         [[ -n "${v}" ]] || continue
         meta_commands+=("${v}")

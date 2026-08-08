@@ -2,6 +2,26 @@
 #
 # SSH 加固：端口 · 公钥 · 关密码登录 · root 登录策略
 #
+# @command      safe ssh
+# @name         SSH 加固
+# @group        security
+# @order        20
+# @privilege    root
+# @requires_lib >= 1.26
+# @provides_unit ext:ssh.service
+# @provides_unit ext:ssh.socket
+# @args         [--add-pubkey=<y|n>] [--user=<用户名>] [--pubkey=<公钥内容>] [--pubkey-file=<路径>] [--port=<端口>] [--password-auth=<keep|no|yes>] [--permit-root-login=<keep|prohibit-password|no|yes>]
+# @description  改端口、装公钥、关密码登录、限制 root 登录
+#
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 027
+
+source /opt/oneserver/lib/bootstrap.sh
+
 # ## 为什么整份配置写 sshd_config.d/00-oneserver.conf
 #
 # 只写自己的一个片段文件，删掉它即回到发行版默认；不去遍历别人的
@@ -49,25 +69,6 @@
 # 改配置前确认当前 SSH 端口在放行清单里 —— 这条命令跑完往往紧接着就是断开重连，
 # 到那一刻才发现被自己的防火墙挡住就晚了。装卸启停与规则全归 `oneserver firewall`。
 #
-# @command      safe ssh
-# @name         SSH 加固
-# @group        security
-# @order        20
-# @privilege    root
-# @requires_lib >= 1.26
-# @provides_unit ext:ssh.service
-# @provides_unit ext:ssh.socket
-# @args         [--add-pubkey=<y|n>] [--user=<用户名>] [--pubkey=<公钥内容>] [--pubkey-file=<路径>] [--port=<端口>] [--password-auth=<keep|no|yes>] [--permit-root-login=<keep|prohibit-password|no|yes>]
-# @description  改端口、装公钥、关密码登录、限制 root 登录
-#
-
-set -Eeuo pipefail
-IFS=$'\n\t'
-PATH='/usr/sbin:/usr/bin:/sbin:/bin'
-export PATH
-umask 027
-
-source /opt/oneserver/lib/bootstrap.sh
 
 readonly SSHD_CONFIG='/etc/ssh/sshd_config'
 readonly SSHD_DROPIN_DIR='/etc/ssh/sshd_config.d'
