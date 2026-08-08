@@ -362,6 +362,27 @@ main() {
         os::info "${REGISTRIES_CONF} 启用了 short-name 搜索 —— 建议镜像写全名（docker.io/library/nginx:latest），本工具不替你改它"
     fi
 
+    # --- compose 的 docker 兼容 socket ---
+    #
+    # **装了 compose 就得顺手开它。** provider 的挑选顺序是 v2 > podman-compose
+    # （D203），而机器上只要有 Docker 的 Compose v2 插件，被挑中的就是它 ——
+    # Compose v2 说的是 Docker API，要通过这个 socket 才够得着 podman。
+    # 不开的话表现是「装完 compose，菜单里那一项仍然不出现」（`@requires
+    # compose-usable` 判的正是这条路通不通），而用户完全想不到问题出在一个 socket。
+    #
+    # podman-compose 自己不需要它。开着的代价是多一个 root 的 unix socket
+    # （不监听网络），换来的是两种 provider 都能用
+    if [[ ${want_compose} == y ]]; then
+        probe::unit_exists 'podman.socket'
+        if [[ ${OS_PROBE_VALUE} == yes ]]; then
+            # ext:：包自带的 unit，卸载时只停止禁用，禁止删文件（D36）
+            os::systemd_enable --now 'podman.socket' ext
+            os::ok 'podman.socket 已启用 —— Compose v2 当 provider 时要通过它跟 podman 说话'
+        else
+            os::warn '这个 podman 版本没有 podman.socket，Compose v2 将无法作为 provider（podman-compose 不受影响）'
+        fi
+    fi
+
     # --- 自动更新 timer ---
     local autoupdate_unit='podman-auto-update.timer'
     if [[ ${want_autoupdate} == y ]]; then
