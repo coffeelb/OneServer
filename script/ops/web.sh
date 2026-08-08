@@ -3,9 +3,9 @@
 # 只读 Web面板
 #
 # @command      web
-# @name         面板与告警
+# @name         Web 面板
 # @group        monitor
-# @order        40
+# @order        5
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides     web
@@ -13,7 +13,7 @@
 # @provides_unit own:oneserver-web-fast.timer
 # @provides_unit own:oneserver-web-slow.service
 # @provides_unit own:oneserver-web-slow.timer
-# @args         [--action=<enable|disable|status|report|telegram|refresh>] [--telegram-chat-id=<chat_id>] [--caddy-import=<y|n>] [--caddy-unimport=<y|n>]
+# @args         [--action=<enable|disable|status|report|telegram|refresh>] [--basic-auth=<y|n>] [--allow-from=<CIDR>] [--telegram-chat-id=<chat_id>] [--caddy-import=<y|n>] [--caddy-unimport=<y|n>] [--firewall-allow=<y|n>] [--firewall-revoke=<y|n>]
 # @description  开关只读面板，异常时 Telegram 通知
 #
 
@@ -33,12 +33,19 @@ source /opt/oneserver/lib/bootstrap.sh
 # 页面上没有任何按钮能改服务器状态，连刷新按钮也只是重新拉取已落盘的
 # 数据，不触发服务端探测。
 #
-# 只读不等于不用认证——那是两件独立的事。早期版本把面板锁在 127.0.0.1、
-# 逼所有人开 SSH 隧道，图的是不用维护一套密码；但公网服务器上，你和它压根
-# 不在一个局域网，隧道是唯一绕不开的路，对着一个只想看看状态的人这个门槛
-# 不成立。所以监听所有网卡，用 basic_auth 挡：密码存进凭据库（键名
-# web.basic_auth），要不要再套 HTTPS/域名/反代，跟这台机器上其他任何站点
-# 一样走 oneserver caddy 自己决定，面板不替你做这个选择。
+# 只读不等于不用门——那是两件独立的事（§1）。但**门有两种形态**，二选一：
+#
+#   密码（默认）  监听所有网卡，basic_auth 挡，密码进凭据库（键名 web.basic_auth）。
+#                 公网服务器上你和它不在一个局域网，密码是唯一不逼人开隧道的门。
+#   来源限制      内网机器上密码只是负担。选否时监听收窄到 127.0.0.1，或只对
+#                 指定网段应答、其余 403。
+#
+# **关掉密码时那句来源限制必须当场落实**，不能只打一行警告 —— §15 点名禁止
+# 「先开放，稍后提示用户自行加固」。所以这两个问题是同一步里的一问一答，
+# 而不是「关掉密码」加「记得自己去限制来源」。
+#
+# 要不要再套 HTTPS/域名/反代，跟这台机器上其他任何站点一样走 oneserver caddy
+# 自己决定，面板不替你做这个选择。
 #
 # 不去改用户的 Caddyfile：那是他的主配置，§11 也禁止就地修改。片段落在
 # incoming/，最后那行 import 由人自己决定 —— enable 时问一句加不加，disable
@@ -60,6 +67,14 @@ readonly CADDY_IMPORT_RE='^[[:space:]]*import[[:space:]]+incoming/\*\.caddy[[:sp
 readonly WEB_PORT='8730'
 readonly WEB_AUTH_KEY='web.basic_auth'
 readonly COMPONENT='web'
+# ufw 的措辞随 locale 变，而下面要按文本判定「放行了没有」。与 ufw_manager.sh
+# 同一个常量：从这里调它的脚本会死锁（本命令持全局锁，子进程 flock 同一个文件
+# 要等到超时），所以那几条 ufw 只能在本脚本里直接发
+readonly UFW_ENV='LC_ALL=C'
+
+# 面板的门。二选一，不能都没有。
+GUARD_AUTH='yes' # 用密码挡
+GUARD_FROM=''    # 不用密码时允许的来源网段；空＝只允许本机
 
 readonly -a WEB_UNITS=(
     'oneserver-web-fast.timer'
@@ -125,6 +140,143 @@ web_enabled() {
     [[ ${OS_PROBE_VALUE} == enabled ]]
 }
 
+# 问一次「要不要密码」，答案连同来源限制一起进 state。
+#
+# **默认 y**：关掉密码是降低安全性的选项，§15 要求这类默认必须为否。
+# 关掉的那一步里当场把来源限制问出来（留空＝只听 127.0.0.1），补偿控制与
+# 放宽写进同一份片段 —— 而不是打一行「记得自己去限制来源」。
+#
+# 已经启用过的机器拿 state 当默认值：重复 enable 是 update 之后的例行动作，
+# 不该每次把人问一遍，更不该悄悄把他关掉的密码打开。
+resolve_guard() {
+    # os::state_get 取不到时返回默认值且退出码 0，不必再兜一次
+    local def='y'
+    [[ $(os::state_get "${COMPONENT}" auth 'yes') == no ]] && def='n'
+
+    if os::confirm --arg basic-auth \
+        '面板用密码保护？选否就改用来源限制（只有本机或你指定的网段能打开）' "${def}"; then
+        GUARD_AUTH='yes'
+        GUARD_FROM=''
+        return 0
+    fi
+
+    GUARD_AUTH='no'
+    local cur
+    cur=$(os::state_get "${COMPONENT}" from '')
+    # 空串是合法答案（「只允许本机」），所以正则里带一个空分支，而默认值
+    # 必须显式给出 —— 否则非交互下这条调用会被当成「没给默认值」而以 2 停下
+    os::ask --match '^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})?$' \
+        --hint '例 192.168.1.0/24；留空＝只允许本机 127.0.0.1' --arg allow-from \
+        '允许哪个网段访问面板？' GUARD_FROM "${cur}"
+    if [[ -n ${GUARD_FROM} ]]; then
+        os::warn "面板不设密码，只有来源限制挡着：${GUARD_FROM} 之外的请求一律 403"
+    else
+        os::warn "面板不设密码，监听收窄到 127.0.0.1 —— 只能从这台机器上打开（或经 SSH 隧道）"
+    fi
+    return 0
+}
+
+# UFW 里放行过面板端口的 TCP 没有。probe::ufw_rules 的每行形如
+# `[ 1] 8730/tcp   ALLOW IN  Anywhere`，按序号加端口认，不做子串匹配 ——
+# `*8730*` 会被 18730 或某条注释蒙混过去。
+#
+# **协议后面那个锚点不能省。** 少了它，`(/tcp)?` 匹配空串就算数，于是一条
+# `8730/udp` 的规则会被读成「TCP 已放行」，enable 时那句放行提示再也不出现，
+# 而面板照样打不开。真机上第一次跑就撞上了。
+web_port_allowed() {
+    probe::ufw_rules
+    local line
+    while IFS= read -r line; do
+        [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${WEB_PORT}(/tcp)?([[:space:]]|$) ]] \
+            && return 0
+    done <<<"${OS_PROBE_VALUE}"
+    return 1
+}
+
+# 放行范围跟着门走。给了网段就只放行那个网段 —— 放成 Anywhere 的话，挡在
+# 外面的就只剩 Caddy 那条 remote_ip，少一层。结果写进 FW_RULE / FW_SCOPE。
+FW_RULE=()
+FW_SCOPE=''
+
+firewall_rule_for() {
+    local from=${1}
+    if [[ -n ${from} ]]; then
+        FW_RULE=(from "${from}" to any port "${WEB_PORT}" proto tcp)
+        FW_SCOPE=${from}
+    else
+        FW_RULE=("${WEB_PORT}/tcp")
+        FW_SCOPE='所有来源'
+    fi
+    return 0
+}
+
+# enable 收尾：UFW 开着但没放行面板端口时问一句。
+#
+# **默认否**（§15：放宽访问来源默认必须为否）。install_caddy 对 80/443、
+# install_mariadb 对 3306 都是「只提示不代劳」；这里多问一句而不是只提示，
+# 是因为 8730 是本命令自己开出来的端口，不是用户建站时的选择。
+#
+# **只听回环时压根不问**：Caddy 绑在 127.0.0.1 上，包到不了网卡，一条 ufw
+# 规则不会让任何人多打开一个页面，问了只是噪声。
+#
+# 无密码但限了网段则照问不误，而且**只放行那个网段**。曾经在这里一刀切成
+# 「没密码就拒绝放行」，把「无密码 + 仅本机」和「无密码 + 限网段」当成了
+# 同一件事 —— 后者的门（remote_ip）根本没被防火墙动到，而放行恰恰是它能用
+# 的前提，于是那台机器上永远等不到提示，面板也永远打不开。
+offer_firewall_allow() {
+    probe::ufw_active
+    [[ ${OS_PROBE_VALUE} == yes ]] || return 0
+    [[ ${GUARD_AUTH} == no && -z ${GUARD_FROM} ]] && return 0
+    web_port_allowed && return 0
+
+    firewall_rule_for "${GUARD_FROM}"
+    os::confirm --arg firewall-allow \
+        "UFW 已启用，但没放行面板端口 ${WEB_PORT}/tcp，外面现在打不开。放行给 ${FW_SCOPE}？" n || {
+        os::info "留着了。自己放行：oneserver firewall allow --ports=${WEB_PORT}"
+        return 0
+    }
+
+    os::record_change "在 UFW 里放行 ${WEB_PORT}/tcp，来源 ${FW_SCOPE}"
+    os::run --env "${UFW_ENV}" '放行面板端口' -- ufw allow "${FW_RULE[@]}" || return 1
+    os::run --env "${UFW_ENV}" '重载 UFW 使规则生效' -- ufw reload || return 1
+    os::ok "已放行 ${WEB_PORT}/tcp（来源 ${FW_SCOPE}）"
+    return 0
+}
+
+# disable 收尾：面板都关了，那条放行就是个没人守的洞。
+#
+# **默认是**，与 drop_caddy_import 的「默认否」相反：那一行 import 管的是整个
+# incoming/ 目录，可能还有别的片段在用；而 8730 只有面板用，收回它不会影响
+# 任何别的东西。方向也不同 —— 收紧不受 §15 约束，留着开口才是。
+revoke_firewall() {
+    probe::ufw_active
+    [[ ${OS_PROBE_VALUE} == yes ]] || return 0
+    web_port_allowed || return 0
+
+    os::confirm --arg firewall-revoke \
+        "UFW 里还留着 ${WEB_PORT}/tcp 的放行，而面板已经关了。收回？" y || {
+        os::info "留着了。要自己收回：oneserver firewall delete --ports=${WEB_PORT}"
+        return 0
+    }
+
+    # 按当初放行的那个范围删。ufw 认的是规则全文，拿 `8730/tcp` 去删一条
+    # `from <网段> to any port 8730` 是删不掉的 —— 这一步排在 state_del 之前
+    # 就是为了还能读到 from
+    firewall_rule_for "$(os::state_get "${COMPONENT}" from '')"
+    os::record_change "从 UFW 收回 ${WEB_PORT}/tcp 的放行"
+    os::run_out --allow-fail --env "${UFW_ENV}" '收回面板端口的放行' \
+        -- ufw delete allow "${FW_RULE[@]}" || true
+    # 删不掉不能报成功：规则可能是手工加的，范围和我们记的对不上，
+    # 而一句「已收回」会让人以为端口关了
+    if ((OS_RUN_STATUS != 0)); then
+        os::warn "没能自动收回 ${WEB_PORT}/tcp —— 规则范围与记录的不一致，自己看一眼 oneserver firewall status"
+        return 0
+    fi
+    os::run --env "${UFW_ENV}" '重载 UFW 使变更生效' -- ufw reload || return 1
+    os::ok "已收回 ${WEB_PORT}/tcp（来源 ${FW_SCOPE}）"
+    return 0
+}
+
 install_units() {
     local u
     for u in oneserver-web-fast.service oneserver-web-fast.timer \
@@ -149,6 +301,24 @@ write_caddy_snippet() {
         os::run '创建 Caddy 配置投放目录' -- mkdir -p "${CADDY_INBOX}"
         os::run '让 Caddy 用户能读投放目录' -- chown root:caddy "${CADDY_INBOX}"
         os::run '收紧 Caddy 投放目录权限' -- chmod 0750 "${CADDY_INBOX}"
+    fi
+
+    # --- 不设密码：门是来源限制，那条路上一个密码都不用生成 ---
+    #
+    # 站点地址与 guard 两处配合：给了网段就仍监听所有网卡、由 remote_ip 拒掉
+    # 其余来源；没给就把监听本身收窄到 127.0.0.1，一行 Caddy 指令都不用。
+    if [[ ${GUARD_AUTH} == no ]]; then
+        local addr=":${WEB_PORT}" guard=''
+        if [[ -n ${GUARD_FROM} ]]; then
+            guard=$'\t@blocked not remote_ip '"${GUARD_FROM}"$'\n\trespond @blocked 403'
+        else
+            addr="127.0.0.1:${WEB_PORT}"
+        fi
+        os::install_template --mode 0644 \
+            "${OS_TEMPLATE_DIR}/caddy-dashboard.conf" "${CADDY_SNIPPET}" \
+            "SITE_ADDR=${addr}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" "GUARD=${guard}" || return 1
+        os::state_resource_add "${COMPONENT}" file "${CADDY_SNIPPET}" || true
+        return 0
     fi
 
     # 面板登录密码。**复用已有的**：反复走这条路径（比如 update 后重装
@@ -198,7 +368,8 @@ write_caddy_snippet() {
 
     os::install_template --mode 0644 \
         "${OS_TEMPLATE_DIR}/caddy-dashboard.conf" "${CADDY_SNIPPET}" \
-        "PORT=${WEB_PORT}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" "AUTH_HASH=${hash}" || return 1
+        "SITE_ADDR=:${WEB_PORT}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" \
+        "GUARD=$(printf '\tbasic_auth {\n\t\tadmin %s\n\t}' "${hash}")" || return 1
     os::state_resource_add "${COMPONENT}" file "${CADDY_SNIPPET}" || true
     return 0
 }
@@ -279,18 +450,21 @@ offer_caddy_import() {
 }
 
 do_enable() {
+    resolve_guard
+
     if web_enabled; then
         install_units || return 1
         link_page || return 1
         write_caddy_snippet || return 1
         local snippet_changed=${OS_TEMPLATE_CHANGED}
+        save_guard
         if ((snippet_changed == 1)); then
-            os::ok 'Caddy 面板片段已补齐'
+            os::ok '面板片段已更新'
         else
             os::ok '面板已启用，无需变更'
         fi
-        print_access
         offer_caddy_import "${snippet_changed}"
+        offer_firewall_allow
         return 0
     fi
 
@@ -322,9 +496,19 @@ do_enable() {
         "${OS_SCRIPT_DIR}/ops/web_collect.sh" --tier=all --non-interactive || true
 
     os::state_set "${COMPONENT}" "port=${WEB_PORT}" || true
+    save_guard
     os::ok '面板已启用'
     print_access
     offer_caddy_import "${snippet_changed}"
+    offer_firewall_allow
+    return 0
+}
+
+# 门的选择进 state：下次 enable 拿它当默认值，而 do_status 拿它决定
+# 概览上那几行访问信息怎么写（有没有密码、从哪儿能打开）
+save_guard() {
+    os::state_set "${COMPONENT}" "auth=${GUARD_AUTH}" || true
+    os::state_set "${COMPONENT}" "from=${GUARD_FROM}" || true
     return 0
 }
 
@@ -399,6 +583,7 @@ do_disable() {
         os::run '移除 Caddy 片段' -- rm -f -- "${CADDY_SNIPPET}" || true
     fi
     drop_caddy_import
+    revoke_firewall
 
     os::secure_del "${WEB_AUTH_KEY}" || true
     os::secure_del 'web.telegram_token' || true
@@ -408,23 +593,44 @@ do_disable() {
     return 0
 }
 
+# 怎么打开面板 —— **概览里也要有**，不只在 enable 的输出里。
+#
+# 从前这几行只在 enable 那一次打出来，随后被菜单刷掉。真正需要它的时刻是
+# 「下次想登录」，那时它早已不在屏幕上，而没人会为了看一眼地址再 enable 一遍。
+#
+# 门的形态从 state 读，不从片段里猜：概览每进一次菜单就跑一遍，去 grep
+# 一份 Caddy 配置来反推「有没有密码」既慢又脆。
 print_access() {
-    os::kv '数据目录' "${OS_PUBLIC_DIR}"
-    if [[ -f ${CADDY_SNIPPET} ]]; then
-        os::box '如何查看' -- \
-            "Caddy 片段已生成：${CADDY_SNIPPET}" \
-            '让它生效：在 /etc/caddy/Caddyfile 顶层加一行 import incoming/*.caddy' \
-            '然后 oneserver caddy reload' \
-            "浏览器打开 http://<这台机器的地址>:${WEB_PORT}，用户名 admin" \
-            '取密码：oneserver secure get web.basic_auth' \
-            '安全提示：面板使用 HTTP 明文传输，请经 HTTPS 反代访问，不要直接暴露到公网。'
-    else
+    if [[ ! -f ${CADDY_SNIPPET} ]]; then
+        os::kv '数据目录' "${OS_PUBLIC_DIR}"
         os::box '如何查看（未装 Caddy）' -- \
             '页面与数据已就位，但这台机器上没有 HTTP 服务' \
             "取回：scp -r <这台机器>:${OS_PUBLIC_DIR} ./os-panel" \
             '本地起任意静态服务再打开 index.html' \
             '直接双击打不开：浏览器不允许 file:// 页面读同目录的数据文件'
+        return 0
     fi
+
+    local auth from
+    auth=$(os::state_get "${COMPONENT}" auth 'yes')
+    from=$(os::state_get "${COMPONENT}" from '')
+
+    if [[ ${auth} == no && -z ${from} ]]; then
+        os::kv '访问地址' "http://127.0.0.1:${WEB_PORT}"
+        os::kv '登录' '不设密码 · 监听收窄到本机，外面打不开（要远程就开 SSH 隧道）'
+        # 只走回环，明文那句在这里不成立，说了反而是噪声
+        return 0
+    fi
+
+    os::kv '访问地址' "http://<这台机器的地址>:${WEB_PORT}"
+    if [[ ${auth} == no ]]; then
+        os::kv '登录' "不设密码 · 只有 ${from} 能打开，其余来源一律 403"
+    else
+        os::kv '登录' '用户名 admin · 取密码：oneserver secure get web.basic_auth'
+    fi
+    # **不用 warn 样式**：它消不掉，而概览里一条永远亮着的黄色叹号会把真正
+    # 需要处理的那些一起拉低成背景噪声
+    os::info "面板走 HTTP 明文，密码与页面内容在链路上可见 —— 经 HTTPS 反代访问，别直接把 ${WEB_PORT} 暴露到公网"
     return 0
 }
 
@@ -485,6 +691,10 @@ do_status() {
         os::info "启用后在本机 ${WEB_PORT} 端口提供一个只读页面：组件、服务、端口、防火墙、日志一屏看完，页面不做任何变更"
         return 0
     fi
+
+    # 访问信息排在最前：这一屏里被读得最多的就是它，而下面那些 timer / 采集
+    # 状态是「出事时才看」的东西
+    print_access
 
     local u
     for u in "${WEB_UNITS[@]}"; do
