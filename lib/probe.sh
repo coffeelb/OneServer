@@ -819,7 +819,7 @@ probe::container_inventory() {
 # probe::ssh_port   sshd 实际监听的端口
 #
 # SSH 端口。**两个以上地方需要同一事实就必须是 probe**——
-# `ufw` 删规则时要拦住它（删了就把自己锁在门外），`safe.sh` 改端口时也要读它。
+# `ufw` 删规则时要拦住它（删了就把自己锁在门外），SSH 加固改端口时也要读它。
 # 两处各写一份 grep 的话，迟早一处认得 sshd_config.d 里的覆盖、另一处不认。
 #
 # 读主配置 + Include 进来的片段。只认第一条 Port：sshd 本身就是这个语义。

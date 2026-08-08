@@ -1,25 +1,64 @@
 #!/bin/bash
 #
-# 主机加固：SSH 加固 · 系统更新 · 自动安全更新 · 网络定位
+# SSH 加固：端口 · 公钥 · 关密码登录 · root 登录策略
 #
-# 防火墙**整体归 `oneserver firewall`** —— 装卸、启停、规则全在那一个命令里。
-# 这里只在体检中报告 UFW 状态（只读）。分成两处的后果试过了：同一件事有两个
-# 入口，用户得先猜自己要的在哪一边，而「装 ufw」「启用防火墙」两边各有一份
-# 实现，改一处就漂一处。
+# ## 为什么整份配置写 sshd_config.d/00-oneserver.conf
 #
-# @command      safe
+# 只写自己的一个片段文件，删掉它即回到发行版默认；不去遍历别人的
+# sshd_config.d/*.conf 改 `PasswordAuthentication` —— 那是别的包
+# （cloud-init、systemd-userdb）或用户自己的文件，改它就是「工具悄悄替你改了
+# 你不知道的配置」，而且下次那个包升级就还原了。
+#
+# **文件名以 00- 开头是有意的**（模板里也写了理由）：sshd 的取值规则是「第一次
+# 出现的值生效」，片段按文件名字典序读入 —— Ubuntu 云镜像自带的
+# 50-cloud-init.conf 里写着 `PasswordAuthentication yes`，用 99- 命名的加固片段
+# 会被它整个盖掉，而表现是「工具说已关闭密码登录，实际还开着」。
+#
+# ## 为什么改完必须问 `sshd -T`，而不是相信自己写了什么
+#
+# 同上：真正生效的值取决于哪个文件先被读到。写完文件就宣布成功，等于把「我打算
+# 做什么」当成「系统现在是什么」。所以每次改完都：
+#
+#   sshd -t     语法过不过（不过就整个回滚，服务一步都不动）
+#   sshd -T     有效值是不是我要的（不是就报出哪个文件在抢，并回滚）
+#   probe::port_listening   端口真的在听吗（不在就回滚 + 恢复原样重启）
+#
+# ## socket 激活：Ubuntu 上改 Port 是不生效的
+#
+# 在两台真机上实测：
+#   Ubuntu 24.04   ssh.socket enabled  · ssh.service disabled
+#   Debian 13      ssh.socket disabled · ssh.service enabled
+#
+# socket 激活时监听由 systemd 完成，端口写在 ssh.socket 的 ListenStream，
+# sshd 拿到的是一个已经连上的 fd —— sshd_config 里的 `Port` 完全不起作用。
+# 把 ssh.socket 停掉禁用换回 ssh.service 是把发行版的默认形态改掉，用户下次
+# apt 升级 openssh 时两边打架。这里**顺着发行版**：socket 激活的机器写一个
+# ssh.socket 的 drop-in 覆盖 ListenStream，非 socket 的机器就只改 sshd_config。
+# 两条路都验证监听。
+#
+# ## 卸载时**不**还原 SSH 配置（所以不登记 file 资源）
+#
+# 规范要求安装类把创建的文件登记进 state 供 uninstall 反向执行。这里有意不登记
+# 00-oneserver.conf 与 ssh.socket 的 drop-in：卸载一个管理工具就把 SSH 端口还原
+# 成 22、把密码登录打开，是**在卸载动作里降低安全性**，而且很可能直接把人锁在
+# 门外（防火墙只放行了新端口）。规范的「永不自动删除」一栏里，用户配置本来就在
+# 其中。`oneserver safe status` 会打出这两个文件在哪，要还原的人删掉它们即可。
+#
+# ## 碰 UFW 的那一处不是防火墙管理
+#
+# 改配置前确认当前 SSH 端口在放行清单里 —— 这条命令跑完往往紧接着就是断开重连，
+# 到那一刻才发现被自己的防火墙挡住就晚了。装卸启停与规则全归 `oneserver firewall`。
+#
+# @command      safe ssh
 # @name         SSH 加固
 # @group        security
-# @order        10
+# @order        20
 # @privilege    root
 # @requires_lib >= 1.26
-# @provides     auto-updates
 # @provides_unit ext:ssh.service
 # @provides_unit ext:ssh.socket
-# @provides_unit ext:unattended-upgrades.service
-# @provides_unit ext:docker.service
-# @args         [--action=<status|ssh|updates|network>] [--add-pubkey=<y|n>] [--user=<用户名>] [--pubkey=<公钥内容>] [--pubkey-file=<路径>] [--port=<端口>] [--password-auth=<keep|no|yes>] [--permit-root-login=<keep|prohibit-password|no|yes>] [--upgrade=<y|n>] [--auto-security=<y|n>] [--network-mode=<公网|内网>] [--confirm-internal=<y|n>] [--restart-docker=<y|n>]
-# @description  SSH 加固、系统更新与网络定位
+# @args         [--add-pubkey=<y|n>] [--user=<用户名>] [--pubkey=<公钥内容>] [--pubkey-file=<路径>] [--port=<端口>] [--password-auth=<keep|no|yes>] [--permit-root-login=<keep|prohibit-password|no|yes>]
+# @description  改端口、装公钥、关密码登录、限制 root 登录
 #
 
 set -Eeuo pipefail
@@ -30,91 +69,14 @@ umask 027
 
 source /opt/oneserver/lib/bootstrap.sh
 
-# ==================================================================
-# 这个脚本为什么长这样
-# ==================================================================
-#
-# ## 一、它管什么，不管什么
-#
-# 旧 safe.sh 是「一路回车走完三件事」：apt upgrade → 改 SSH → 配 UFW。
-# 三件事各自都有道理，但捆在一条直线上的后果是：想只改 SSH 端口的人
-# 得先陪着跑一遍 apt upgrade。
-#
-# 所以这里是四个动作，各自可单独执行：
-#
-#   safe status    体检：把「现在到底安不安全」一屏说清，并给出下一条命令
-#   safe ssh       SSH 加固：端口 · 公钥 · 关密码登录 · root 登录策略
-#   safe updates   系统更新 + 打开自动安全更新
-#   safe network   网络定位：公网 / 内网，决定容器端口绑哪个地址
-#
-# **防火墙一件都不管**，装卸启停与规则全归 `oneserver firewall`。
-# 本脚本仍有两处碰 UFW，都不是防火墙管理：
-#   1. SSH 加固时确认当前 SSH 端口在放行清单里 —— 不确认的话，这条命令跑完
-#      紧接着就是断开重连，到那一刻才发现被自己的防火墙挡住就晚了
-#   2. status 里报一句防火墙开没开，并把该敲的命令打出来
-#
-# ## 二、为什么整份配置写 sshd_config.d/00-oneserver.conf
-#
-# 旧脚本用 `sed -i.bak` 就地改 /etc/ssh/sshd_config，还会遍历
-# sshd_config.d/*.conf 把别人的 `PasswordAuthentication` 一个个改掉 ——
-# 那是别的包（cloud-init、systemd-userdb）或用户自己的文件，改它就是
-# 「工具悄悄替你改了你不知道的配置」，而且下次那个包升级就还原了。
-#
-# 现在的做法是只写自己的一个片段文件，删掉它即回到发行版默认。
-# **文件名以 00- 开头是有意的**（模板里也写了理由）：sshd 的取值规则是
-# 「第一次出现的值生效」，片段按文件名字典序读入 —— Ubuntu 云镜像自带的
-# 50-cloud-init.conf 里写着 `PasswordAuthentication yes`，用 99- 命名的
-# 加固片段会被它整个盖掉，而表现是「工具说已关闭密码登录，实际还开着」。
-#
-# ## 三、为什么改完必须问 `sshd -T`，而不是相信自己写了什么
-#
-# 同上：真正生效的值取决于哪个文件先被读到。写完文件就宣布成功，
-# 等于把「我打算做什么」当成「系统现在是什么」。所以每次改完都：
-#
-#   sshd -t     语法过不过（不过就整个回滚，服务一步都不动）
-#   sshd -T     有效值是不是我要的（不是就报出哪个文件在抢，并回滚）
-#   probe::port_listening   端口真的在听吗（不在就回滚 + 恢复原样重启）
-#
-# ## 四、socket 激活：Ubuntu 上改 Port 是不生效的
-#
-# 在两台真机上实测：
-#   Ubuntu 24.04   ssh.socket enabled  · ssh.service disabled
-#   Debian 13      ssh.socket disabled · ssh.service enabled
-#
-# socket 激活时监听由 systemd 完成，端口写在 ssh.socket 的 ListenStream，
-# sshd 拿到的是一个已经连上的 fd —— sshd_config 里的 `Port` 完全不起作用。
-# 旧脚本的处理是把 ssh.socket 停掉禁用，换回 ssh.service：那是把发行版的
-# 默认形态改掉，用户下次 apt 升级 openssh 时两边打架。
-# 这里改成**顺着发行版**：socket 激活的机器写一个 ssh.socket 的 drop-in
-# 覆盖 ListenStream，非 socket 的机器就只改 sshd_config。两条路都验证监听。
-#
-# ## 五、卸载时**不**还原 SSH 配置（所以不登记 file 资源）
-#
-# 规范要求安装类把创建的文件登记进 state 供 uninstall 反向执行。
-# 这里有意不登记 00-oneserver.conf 与 ssh.socket 的 drop-in：卸载一个管理工具
-# 就把 SSH 端口还原成 22、把密码登录打开，是**在卸载动作里降低安全性**，
-# 而且很可能直接把人锁在门外（防火墙只放行了新端口）。
-# 规范的「永不自动删除」一栏里，用户配置本来就在其中。
-# status 会明确打出这两个文件在哪，要还原的人删掉它们即可。
-#
-# unattended-upgrades 不同：那是本工具装的一个包 + 一个新建的配置文件，
-# 卸载它不降低任何东西的可用性，所以照章登记进 `auto-updates` 组件。
-
 readonly SSHD_CONFIG='/etc/ssh/sshd_config'
 readonly SSHD_DROPIN_DIR='/etc/ssh/sshd_config.d'
 readonly SSHD_DROPIN='/etc/ssh/sshd_config.d/00-oneserver.conf'
 readonly SOCKET_DROPIN_DIR='/etc/systemd/system/ssh.socket.d'
 readonly SOCKET_DROPIN='/etc/systemd/system/ssh.socket.d/00-oneserver-port.conf'
-readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/20auto-upgrades'
-readonly UFW_DEFAULTS='/etc/default/ufw'
 # ufw 的输出在不同 locale 下措辞不同，而「这条规则是本次新增的还是本来就有」
 # 只能靠输出文本判定（退出码两种情况都是 0）。所有 ufw 调用统一注入它
 readonly UFW_ENV='LC_ALL=C'
-readonly DAEMON_JSON='/etc/docker/daemon.json'
-# 网络定位落在 state 的这个组件下 —— 两个容器引擎都读它决定端口绑哪个地址
-readonly NETWORK_ID='network'
-readonly DOCKER_ID='docker'
-readonly AUTO_UPDATES_ID='auto-updates'
 
 # ------------------------------------------------------------------
 # 辅助
@@ -136,7 +98,8 @@ safe_ssh_unit() {
     return 0
 }
 
-# 这台机器是不是 socket 激活的 SSH
+# 这台机器是不是 socket 激活的 SSH。与 safe_status.sh 里那份是同一段，
+# **两处相似不提取**（那边的注释里写了取舍）。
 safe_socket_activated() {
     probe::unit_exists 'ssh.socket'
     [[ ${OS_PROBE_VALUE} == yes ]] || return 1
@@ -152,8 +115,7 @@ safe_socket_activated() {
 # **Debian 13 的 `sshd -T` 打的是 `without-password`**（容器实测），
 # 那是 `prohibit-password` 在 openssh 6.x 时代的旧名字，两者语义完全相同。
 # 不归一的话有两个后果：① 把当前有效值原样当成「用户想要的值」再写回配置时，
-# 会被自己的取值校验拦下（第一次容器验收就是这么全线失败的）；
-# ② 写 `prohibit-password` 之后读回 `without-password`，
+# 会被自己的取值校验拦下；② 写 `prohibit-password` 之后读回 `without-password`，
 # 「有效值核对」会判成没生效，然后**回滚一次本来完全正确的加固**。
 safe_norm_rootlogin() {
     local __safe_out=${1} __safe_val=${2}
@@ -175,7 +137,6 @@ safe_require_sshd() {
     # 把它删掉**。也就是说，SSH 当前没在跑的机器（刚被中断打断、或用户先停了
     # 服务再来改配置），我们连自己写的配置能不能用都校验不了，
     # 于是每一次都以「sshd 拒绝了新配置」收场并回滚，而真正的原因在别处。
-    # 容器验收的 SIGTERM 那一步与 socket 切换那一步都是这么撞上的。
     #
     # 它在 tmpfs 上、重启即消失、systemd 自己也会重建，因此不进变更清单、
     # 不进资源清单 —— 这不是一处需要撤销的副作用。
@@ -194,122 +155,6 @@ safe_who_wins() {
         grep -rniE "^[[:space:]]*${key}[[:space:]]" "${SSHD_CONFIG}" "${SSHD_DROPIN_DIR}/" || true
     return 0
 }
-
-# ------------------------------------------------------------------
-# safe status
-# ------------------------------------------------------------------
-
-action_status() {
-    probe::ssh_port
-    local port=${OS_PROBE_VALUE}
-    local port_src
-    port_src=$(probe::describe)
-
-    local socket='no'
-    safe_socket_activated && socket='yes'
-
-    probe::sshd_effective passwordauthentication
-    local pw=${OS_PROBE_VALUE:-未知}
-    probe::sshd_effective kbdinteractiveauthentication
-    local kbd=${OS_PROBE_VALUE:-未知}
-    probe::sshd_effective pubkeyauthentication
-    local pubkey=${OS_PROBE_VALUE:-未知}
-    probe::sshd_effective permitrootlogin
-    local rootlogin=${OS_PROBE_VALUE:-未知}
-
-    # root 的公钥数。**不问用户看谁**：status 不该有交互点，
-    # 而 root 是这个工具的运行身份，也是绝大多数 VPS 的登录身份
-    probe::ssh_authkeys root
-    local rootkeys=${OS_PROBE_VALUE}
-
-    probe::ufw_active
-    local ufw=${OS_PROBE_VALUE}
-
-    probe::apt_upgrade_stats
-    local upgradable security
-    IFS=$'\t' read -r upgradable security <<<"${OS_PROBE_VALUE}"
-    # 探测超时或 apt 不可用时值是空的。**空串不能直接进 (( ))** ——
-    # 文件头是 `set -u`，算术里的空/非数字会当变量名解析，直接把脚本带走
-    [[ ${upgradable} =~ ^[0-9]+$ ]] || upgradable=0
-    [[ ${security} =~ ^[0-9]+$ ]] || security=0
-    probe::auto_upgrades
-    local auto=${OS_PROBE_VALUE}
-    local auto_txt='未开启'
-    [[ ${auto} =~ ^[1-9] ]] && auto_txt='已开启'
-    probe::reboot_required
-    local reboot=${OS_PROBE_VALUE:-no}
-
-    local dropin='未使用'
-    [[ -f ${SSHD_DROPIN} ]] && dropin=${SSHD_DROPIN}
-
-    os::section 'SSH'
-    os::kv '监听端口' "${port}" \
-        'socket 激活' "${socket}" \
-        '密码登录' "${pw}" \
-        'PAM 交互式登录' "${kbd}" \
-        '公钥登录' "${pubkey}" \
-        'root 登录' "${rootlogin}" \
-        'root 的公钥数' "${rootkeys}" \
-        '本工具的配置片段' "${dropin}" \
-        '数据来源' "${port_src}"
-
-    os::section '防火墙与更新'
-    os::kv 'UFW' "$([[ ${ufw} == yes ]] && printf '已启用' || printf '未启用')" \
-        '可升级的包' "${upgradable}" \
-        '其中安全更新' "${security}" \
-        '自动安全更新' "${auto_txt}" \
-        '需要重启' "${reboot}"
-
-    # --- 待办：每一条都带上下一步该敲什么 ---
-    #
-    # 「体检报告只报数」等于把判断全推给用户。这里每条风险都跟一条可直接
-    # 复制的命令，因为看得懂「passwordauthentication yes」意味着什么的人，
-    # 本来也不需要这个工具
-    local -i todo=0
-    os::section '建议'
-    if [[ ${pw} == yes ]]; then
-        todo+=1
-        if ((rootkeys > 0)); then
-            os::warn '密码登录开着 —— 公网机器上被暴力破解的主要入口。已有公钥，可以关：oneserver safe ssh --password-auth=no'
-        else
-            os::warn '密码登录开着，而 root 还没有任何公钥。先装公钥：oneserver safe ssh --pubkey="ssh-ed25519 AAAA..." --password-auth=no'
-        fi
-    fi
-    if [[ ${rootlogin} == yes && ${pw} == yes ]]; then
-        todo+=1
-        os::warn 'root 可以直接用密码登录，这是最坏的一档：oneserver safe ssh --permit-root-login=prohibit-password'
-    fi
-    if [[ ${ufw} != yes ]]; then
-        todo+=1
-        os::warn "防火墙没启用，所有监听中的端口都对公网开着：oneserver firewall enable"
-    fi
-    if ((security > 0)); then
-        todo+=1
-        os::warn "有 ${security} 个安全更新待安装：oneserver safe updates"
-    fi
-    if [[ ${auto_txt} == 未开启 ]]; then
-        todo+=1
-        os::info '没开自动安全更新 —— 装完就不用惦记的一件事：oneserver safe updates --auto-security=y'
-    fi
-    if [[ ${reboot} == yes ]]; then
-        todo+=1
-        os::warn '有更新要重启才生效：reboot'
-    fi
-    if ((todo == 0)); then
-        os::ok '没有发现需要处理的项'
-    fi
-
-    os::output 0 port="${port}" socket_activated="${socket}" \
-        password_auth="${pw}" permit_root_login="${rootlogin}" \
-        pubkey_auth="${pubkey}" root_authkeys="${rootkeys}" \
-        ufw_active="${ufw}" upgradable="${upgradable}" security_upgradable="${security}" \
-        auto_updates="${auto_txt}" reboot_required="${reboot}" todo="${todo}"
-    return 0
-}
-
-# ------------------------------------------------------------------
-# safe ssh
-# ------------------------------------------------------------------
 
 # 把一把公钥装进 <user>/.ssh/authorized_keys。
 #
@@ -605,7 +450,9 @@ safe_ufw_allow() {
     return 0
 }
 
-action_ssh() {
+# ------------------------------------------------------------------
+
+main() {
     safe_require_sshd
 
     probe::ssh_port
@@ -686,8 +533,6 @@ action_ssh() {
             "禁用 root 登录之前，用户 ${SAFE_KEY_USER} 必须先有公钥 —— 否则两条路一起断了"
     fi
     # `prohibit-password` 同样是「从此只能拿钥匙进门」，只不过只约束 root。
-    # **这一档此前完全没有检查**：选「仅允许密钥」而 root 一把公钥都没有，配置
-    # 照写、服务照重启，root 这条路当场断掉，脚本一声不吭。
     # 这里是告警而不是拒绝：密码登录还开着的话别的用户仍进得来，硬拒绝会拦掉
     # 「先给普通用户配钥匙、root 只留给控制台」这种完全合理的用法；两条路一起
     # 关的情形由上面 want_pw == no 那条拦下
@@ -702,8 +547,7 @@ action_ssh() {
     # **不改端口时这一步也要做。** 当前 SSH 端口未必在放行清单里 —— 端口可能是
     # 在防火墙启用之后才改的，规则也可能被人删过 —— 而这条命令跑完往往紧接着
     # 就是断开重连，到那一刻才发现被自己的防火墙挡住就晚了。
-    # ufw 加一条已存在的规则是幂等的，本来就放行着的话只多打一行「未重复添加」。
-    # 启用防火墙不在这里做，那是 `safe firewall`
+    # ufw 加一条已存在的规则是幂等的，本来就放行着的话只多打一行「未重复添加」
     probe::ufw_active
     if [[ ${OS_PROBE_VALUE} == yes ]]; then
         # SSH 端口**永不注册回滚**：防火墙此刻是启用着的，回滚删掉刚放行的规则
@@ -717,7 +561,7 @@ action_ssh() {
             os::info "旧端口 ${cur_port} 的规则保留着 —— 等你用新端口连上之后再删：oneserver firewall delete --ports=${cur_port} --proto=tcp --confirm-delete"
         fi
     else
-        os::warn '这台机器没有启用防火墙，所有监听中的端口都对公网开着：oneserver safe firewall'
+        os::warn '这台机器没有启用防火墙，所有监听中的端口都对公网开着：oneserver firewall enable'
     fi
     if [[ ${new_port} != "${cur_port}" ]]; then
         os::warn "云服务器在机器外面还有一层安全组：${new_port} 要在厂商控制台放行，否则改完就连不上"
@@ -846,365 +690,6 @@ action_ssh() {
         permit_root_login="${want_root}" user="${SAFE_KEY_USER}" \
         changed="$([[ ${SAFE_SSHD_CHANGED} -eq 1 ]] && printf yes || printf no)"
     return 0
-}
-
-# ------------------------------------------------------------------
-# safe updates
-# ------------------------------------------------------------------
-
-action_updates() {
-    # 先刷索引再数数：拿着三个月前的索引报「0 个可升级」，
-    # 是这条命令最容易给出的错误结论
-    os::pkg_refresh || os::warn '刷新软件包索引失败，下面的数字来自现有索引'
-
-    probe::apt_upgrade_stats
-    local upgradable security
-    IFS=$'\t' read -r upgradable security <<<"${OS_PROBE_VALUE}"
-    [[ ${upgradable} =~ ^[0-9]+$ ]] || upgradable=0
-    [[ ${security} =~ ^[0-9]+$ ]] || security=0
-
-    os::section '系统更新'
-    os::kv '可升级的包' "${upgradable}" \
-        '其中安全更新' "${security}" \
-        '数据来源' "$(probe::describe)"
-
-    if ((upgradable > 0)); then
-        if os::confirm --arg upgrade "现在升级这 ${upgradable} 个包？" y; then
-            # apt 装的东西属「禁止自动回滚」类（规范第二类）：
-            # 降级回旧版本比留在新版本破坏更大
-            os::record_change 'apt 升级了已安装的软件包'
-            os::critical_begin '升级软件包'
-            os::run --env 'DEBIAN_FRONTEND=noninteractive' --env 'NEEDRESTART_MODE=a' \
-                '升级已安装的软件包' -- apt-get upgrade -y -qq
-            os::critical_end
-            # dry-run 下 os::run 被跳过，一个包都没升——不看 OS_RUN_SKIPPED
-            # 就打「已升级」，是 D15 说的「会撒谎的 dry-run」
-            if [[ ${OS_RUN_SKIPPED} -eq 1 ]]; then
-                os::info "[dry-run] 将升级 ${upgradable} 个包"
-            else
-                os::ok '软件包已升级'
-            fi
-        else
-            os::info '已跳过升级'
-        fi
-    else
-        os::ok '没有可升级的包，已是目标状态'
-    fi
-
-    # --- 自动安全更新 ---
-    #
-    # **这是这条命令里最值钱的一项。** 手工升级依赖人记得来跑，
-    # 而绝大多数被入侵的机器，用的都是一个几个月前就有补丁的漏洞。
-    if os::confirm --arg auto-security '开启自动安全更新（每天自动装安全补丁）？' y; then
-        os::pkg_install unattended-upgrades || os::die 1 '安装 unattended-upgrades 失败'
-
-        local -i conf_existed=0
-        [[ -f ${AUTO_UPGRADES_CONF} ]] && conf_existed=1
-        os::install_template --backup "${OS_TEMPLATE_DIR}/20auto-upgrades" "${AUTO_UPGRADES_CONF}" \
-            || os::die 1 "写入 ${AUTO_UPGRADES_CONF} 失败"
-
-        os::systemd_enable --now 'unattended-upgrades.service' ext
-
-        # state：装了什么就记什么，卸载时才有原料。
-        # **只记本次真正装上的包**（规范两层过滤），也只在文件是本次新建时
-        # 才把它记成 file —— Ubuntu 出厂就带着这个文件（实测值就是 1;1），
-        # 把它记成「我们创建的」会让卸载删掉发行版自己的配置
-        probe::package_version unattended-upgrades
-        os::state_set "${AUTO_UPDATES_ID}" version="${OS_PROBE_VALUE}" method=apt
-        local pkg
-        while IFS= read -r pkg; do
-            [[ -n ${pkg} ]] || continue
-            os::state_resource_add "${AUTO_UPDATES_ID}" pkg "${pkg}"
-        done < <(os::pkg_installed_names)
-        if [[ ${conf_existed} -eq 0 ]]; then
-            os::state_resource_add "${AUTO_UPDATES_ID}" file "${AUTO_UPGRADES_CONF}"
-        fi
-
-        if [[ ${OS_TEMPLATE_CHANGED} -eq 0 ]]; then
-            os::ok '自动安全更新已是开启状态'
-        else
-            os::ok "自动安全更新已开启（配置在 ${AUTO_UPGRADES_CONF}）"
-        fi
-        os::info '看它都干了什么：less /var/log/unattended-upgrades/unattended-upgrades.log'
-    else
-        os::info '已跳过自动安全更新'
-    fi
-
-    probe::reboot_required
-    if [[ ${OS_PROBE_VALUE} == yes ]]; then
-        os::warn '有更新要重启才生效。挑个合适的时间：reboot'
-    fi
-
-    probe::apt_upgrade_stats
-    local upgradable_now
-    IFS=$'\t' read -r upgradable_now _ <<<"${OS_PROBE_VALUE}"
-    os::output 0 upgradable="${upgradable_now:-0}" security="${security}"
-    return 0
-}
-
-# ------------------------------------------------------------------
-
-# 网络定位。**这台机器的容器端口对谁开放，只在这里定一次。**
-#
-# 它同时决定两件必须一致的事，而这正是它存在的理由 —— 分成两个开关的话，
-# 用户每建一个容器都要想「绑哪个地址」还要再去改一次防火墙，两边对不上时
-# 现场表现是「端口明明发布了却连不上」，而两处看起来都是对的：
-#
-#            容器端口绑定           ufw 转发策略
-#   公网     127.0.0.1（只本机）    DROP
-#   内网     0.0.0.0（局域网可达）  ACCEPT
-#
-# **两个引擎落实这张表的方式不同，而这不是实现细节，是安全边界本身：**
-#
-#   podman —— 绑定地址在建容器时写进 Quadlet（`oneserver podman run` 补的），
-#             防火墙那一半由下面的 DEFAULT_FORWARD_POLICY 兜底。
-#   docker —— 绑定地址写进 `/etc/docker/daemon.json` 的 `"ip"`，此后每一条
-#             `docker run` 都算数。**防火墙那一半对它完全不成立** ——
-#             dockerd 启动时把自己的跳转插在 FORWARD 链最前面，发布出去的
-#             端口在 ufw 的任何规则之前就被 ACCEPT 了。把 Docker 的防护
-#             寄托在 ufw 上，得到的是一个看起来两边都对、实际毫无防护的状态。
-#
-# 为什么防火墙那一半是 DEFAULT_FORWARD_POLICY 而不是按网桥或网段放行：
-# 网桥不止一个也不固定 —— 默认网络是 podman0，`podman network create` 与
-# compose 项目各自建网络会得到 podman1、podman2…，网桥名还能自定义；网段同理
-# （默认 10.88.0.0/16，新建的从 default_subnet_pool 里分）。写死网桥或网段的
-# 规则，用户建第二个网络那天就失效，**而失效是静默的**。
-#
-# 容器端口走的是转发不是入站：包一进来就被 DNAT 成容器地址，不再是本机地址，
-# 于是走 FORWARD 链。所以 `ufw allow <端口>` 那种入站规则对容器一个字都不管用。
-action_network() {
-    local current
-    current=$(os::state_get "${NETWORK_ID}" mode '')
-
-    os::section '网络定位'
-    probe::ufw_active
-    os::kv '当前定位' "${current:-（未设置，按公网处理）}" \
-        'UFW' "$([[ ${OS_PROBE_VALUE} == yes ]] && printf '已启用' || printf '未启用')" \
-        '转发策略' "$(forward_policy)"
-
-    local mode=''
-    os::select --arg network-mode '这台机器怎么用？' mode \
-        '公网=公网服务器 —— 容器端口只绑本机，一律走 Caddy 反代' \
-        '内网=内网机器 —— 容器端口直接对局域网开放'
-
-    if [[ ${mode} == 内网 ]]; then
-        os::warn '内网定位会放开 ufw 的转发策略 —— 等于让本机转发它能路由的一切，不只是容器'
-        if ! os::confirm --arg confirm-internal '确认这台机器在可信内网？' n; then
-            os::info '已取消，定位未改变'
-            os::output 0 mode="${current}" changed=no
-            return 0
-        fi
-    fi
-
-    local want_policy='DROP'
-    [[ ${mode} == 内网 ]] && want_policy='ACCEPT'
-    apply_forward_policy "${want_policy}"
-    apply_docker_bind_ip "${mode}"
-
-    os::state_set "${NETWORK_ID}" mode="${mode}" forward_policy="${want_policy}"
-    os::ok "网络定位：${mode}"
-    if [[ ${mode} == 内网 ]]; then
-        os::info '此后新建容器发布的端口直接对局域网可达，不用再动防火墙'
-    else
-        os::info '此后新建容器发布的端口只绑 127.0.0.1，对外请用 oneserver caddy 反代'
-    fi
-
-    [[ ${mode} == 公网 ]] && list_forward_rules
-    list_mismatched_containers "${mode}"
-    os::output 0 mode="${mode}" policy="${want_policy}" changed=yes
-    return 0
-}
-
-# 转发策略只是**兜底**：显式的 `ufw route allow` 规则排在它前面，命中即放行，
-# 默认策略根本轮不到。所以公网定位光把 DEFAULT_FORWARD_POLICY 设成 DROP 不够 ——
-# 已有的 ALLOW FWD 规则会让容器端口照样可达，而界面上写着「只绑本机」。
-# 不列出来的话，这句话就是假的。
-#
-# **只列不删**：删防火墙规则不可逆，而且这些规则未必都是入站放行 ——
-# 「From 是容器网段」的那条是容器出网，删了所有容器连不上网。哪条该留只有人知道。
-list_forward_rules() {
-    probe::ufw_rules
-    [[ -n ${OS_PROBE_VALUE} ]] || return 0
-
-    local line
-    local -a fwd=()
-    while IFS= read -r line; do
-        [[ ${line} == *'ALLOW FWD'* ]] || continue
-        fwd+=("${line}")
-    done <<<"${OS_PROBE_VALUE}"
-    [[ ${#fwd[@]} -gt 0 ]] || return 0
-
-    os::warn '下列转发放行规则会绕过上面的转发策略 —— 命中它们的容器端口仍然可达：'
-    for line in "${fwd[@]}"; do
-        os::info "    ${line}"
-    done
-    os::info '读法是「目标 ALLOW FWD 来源」：来源为容器网段的那条是容器出网，删了容器断网；'
-    os::info '目标为容器网段的那条才是外部进容器的放行'
-    os::info '要关掉用 oneserver firewall 删，本命令不替你删'
-    return 0
-}
-
-# /etc/default/ufw 里当前的转发策略，读不到按发行版默认的 DROP 算
-forward_policy() {
-    local p='DROP'
-    if os::query --timeout 5 -- grep -oE '^DEFAULT_FORWARD_POLICY="[A-Z]+"' "${UFW_DEFAULTS}"; then
-        p=${OS_RUN_OUTPUT#*\"}
-        p=${p%\"}
-    fi
-    printf '%s' "${p}"
-}
-
-apply_forward_policy() {
-    local want=${1}
-    # 系统事实只出自 probe::（§3），不绕开它自己判 command -v
-    probe::package_installed ufw
-    if [[ ${OS_PROBE_VALUE} != yes ]]; then
-        os::info '本机没有 ufw，转发不受限制，只记录定位'
-        return 0
-    fi
-    [[ $(forward_policy) == "${want}" ]] && return 0
-
-    # 「先备份再改」类：/etc/default/ufw 是发行版的 conffile，不可重建
-    os::record_change "把 ${UFW_DEFAULTS} 的 DEFAULT_FORWARD_POLICY 改成 ${want}"
-    os::replace_line --backup "${UFW_DEFAULTS}" '^DEFAULT_FORWARD_POLICY=' \
-        "DEFAULT_FORWARD_POLICY=\"${want}\"" \
-        || os::die 1 "${UFW_DEFAULTS} 里找不到 DEFAULT_FORWARD_POLICY 行，配置文件可能已被大改"
-
-    # 未启用时 reload 是空操作：ufw 打「Firewall not enabled (skipping reload)」
-    # 并返回 0 —— 那时说「已生效」是假话
-    probe::ufw_active
-    if [[ ${OS_PROBE_VALUE} == yes ]]; then
-        os::run --env "${UFW_ENV}" '重载 UFW 使转发策略生效' -- ufw reload
-    else
-        os::warn "UFW 当前未启用，转发策略要等启用后才生效（oneserver firewall）"
-    fi
-    return 0
-}
-
-# Docker 那一半的定位。**它与 ufw 那一半不是同一个机制**，理由见上面表格下的
-# 说明：防火墙管不住 Docker 发布的端口，能管住的只有绑定地址本身。
-#
-# 只动**本工具放下的那一份** daemon.json（安装时登记在 docker 组件的 file
-# 清单里）。用户自己的配置不覆盖（§12），那时只能明说这一半没落实 ——
-# 装作落实了才是真正危险的。
-apply_docker_bind_ip() {
-    local mode=${1}
-
-    probe::component_version docker
-    [[ -n ${OS_PROBE_VALUE} ]] || return 0
-
-    # 与 install_docker.sh 是同一张表
-    local bind_ip='127.0.0.1'
-    [[ ${mode} == 内网 ]] && bind_ip='0.0.0.0'
-
-    local f
-    local -i owns=1 created=0
-    if [[ -f ${DAEMON_JSON} ]]; then
-        owns=0
-        while IFS= read -r f; do
-            if [[ ${f} == "${DAEMON_JSON}" ]]; then
-                owns=1
-                break
-            fi
-        done < <(os::state_resources "${DOCKER_ID}" file)
-    else
-        created=1
-    fi
-
-    if ((owns == 0)); then
-        os::warn "${DAEMON_JSON} 是你自己的配置，本命令不改它 —— Docker 这一半的定位没有落实"
-        os::info "要落实：在里面写 \"ip\": \"${bind_ip}\"，然后 systemctl restart docker"
-        return 0
-    fi
-
-    if ! os::install_template --backup --mode 0644 \
-        "${OS_TEMPLATE_DIR}/docker-daemon.json" "${DAEMON_JSON}" "BIND_IP=${bind_ip}"; then
-        os::warn "写入 ${DAEMON_JSON} 失败 —— Docker 这一半的定位没有落实"
-        return 0
-    fi
-    ((created == 1)) && os::state_resource_add "${DOCKER_ID}" file "${DAEMON_JSON}"
-    [[ ${OS_TEMPLATE_CHANGED} -eq 1 ]] || return 0
-
-    # 不重启就是「写进去了但没生效」，而界面上看不出这个区别。
-    # 有容器在跑时才问：那时重启是一次真实的服务中断
-    probe::docker_running
-    local running=${OS_PROBE_VALUE:-0}
-    [[ ${running} =~ ^[0-9]+$ ]] || running=0
-    local -i do_restart=1
-    if ((running > 0)); then
-        os::warn "重启 dockerd 会中断正在跑的 ${running} 个容器（带重启策略的会自己起回来）"
-        os::confirm --arg restart-docker '现在重启 dockerd 让新的绑定地址生效' y || do_restart=0
-    fi
-    if ((do_restart == 1)); then
-        os::systemd_restart docker.service
-        os::ok "Docker 新建容器的端口默认绑 ${bind_ip}"
-    else
-        os::warn "${DAEMON_JSON} 已写入但尚未生效 —— dockerd 重启之前，新建容器仍按旧的默认地址绑"
-    fi
-    return 0
-}
-
-# 已有容器的绑定地址是**建的时候就定死的**，改定位不会追溯 —— podman 写在
-# Quadlet 里，Docker 写在容器自身的配置里。不列出来的话，用户以为切完就生效了，
-# 而那几个容器还是老样子。
-# **只列不改**：改绑定要重建容器，那是实打实的服务中断，得由人挑时间。
-list_mismatched_containers() {
-    local mode=${1}
-    probe::podman_ports
-    check_ports_against_mode "${mode}" 'oneserver podman'
-    probe::docker_ports
-    check_ports_against_mode "${mode}" 'oneserver docker'
-    return 0
-}
-
-# 读 OS_PROBE_VALUE 里的「名字<制表符>映射」，挑出与定位不符的那些。
-# 两个引擎的探测输出是同一种格式，所以判断只写一遍
-check_ports_against_mode() {
-    local mode=${1} how=${2}
-    [[ -n ${OS_PROBE_VALUE} ]] || return 0
-
-    local line name ports
-    local -a bad=()
-    while IFS=$'\t' read -r name ports; do
-        [[ -n ${name} && -n ${ports} ]] || continue
-        if [[ ${mode} == 内网 && ${ports} == *'127.0.0.1:'* ]]; then
-            bad+=("${name}  ${ports}  —— 绑在本机，局域网连不上")
-        elif [[ ${mode} == 公网 && ${ports} == *'0.0.0.0:'* ]]; then
-            bad+=("${name}  ${ports}  —— 绑在 0.0.0.0，对外暴露")
-        fi
-    done <<<"${OS_PROBE_VALUE}"
-
-    [[ ${#bad[@]} -gt 0 ]] || return 0
-    os::warn "下列容器的端口绑定与新定位不符（绑定地址在建容器时定死，本命令不会改它）："
-    for line in "${bad[@]}"; do
-        os::info "    ${line}"
-    done
-    os::info "要让它们跟上，用 ${how} 删掉后按同一条 run 命令重建"
-    return 0
-}
-
-main() {
-    local action=${1-}
-    if [[ -n ${action} ]]; then
-        dispatch "${action}"
-        return 0
-    fi
-
-    # `status` 在这里占一项而不是只当总览：体检要跑一整轮探测（sshd 有效配置、
-    # apt 统计、公钥数），改完一项想复看结果时，得有个地方能主动再跑一次
-    os::action_menu --overview action_status --arg action '操作' dispatch \
-        'ssh=SSH 加固' 'updates=系统更新与自动安全更新' \
-        'network=网络定位（公网 / 内网）' 'status=重新体检'
-}
-
-dispatch() {
-    case ${1} in
-        status) action_status ;;
-        ssh) action_ssh ;;
-        updates) action_updates ;;
-        network) action_network ;;
-        *) os::die 2 "未知操作「${1}」，可用：status ssh updates network" ;;
-    esac
 }
 
 main "$@"

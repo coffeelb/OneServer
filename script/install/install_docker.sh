@@ -38,7 +38,7 @@ source /opt/oneserver/lib/bootstrap.sh
 #   `--compose`              装不装 docker-compose-plugin（默认 y）
 #   `--purge-podman-docker`  撞上 podman-docker 时才问（默认 n）
 #   `--watchtower`           部署不部署 Watchtower（默认 n，见下）
-#   端口默认绑哪个地址**不在这里问**：它由 `oneserver safe` 的网络定位一次决定，
+#   端口默认绑哪个地址**不在这里问**：它由 `oneserver safe network` 一次决定，
 #   两处各问一半正是「端口发布了却连不上」与「以为只绑了本机」的成因。
 #
 # **查**：装没装、什么版本 —— 经 `probe::component_version docker`，判据是
@@ -57,7 +57,7 @@ source /opt/oneserver/lib/bootstrap.sh
 # 为什么公网定位这一半必须落在 daemon.json，而不是防火墙
 # ==================================================================
 #
-# `oneserver safe` 的网络定位对 podman 是靠 ufw 的 `DEFAULT_FORWARD_POLICY`
+# `oneserver safe network` 的定位对 podman 是靠 ufw 的 `DEFAULT_FORWARD_POLICY`
 # 实现的：容器端口走 FORWARD 链，策略设成 DROP 就进不来。
 #
 # **这一套对 Docker 完全不成立。** dockerd 启动时把自己的 `DOCKER-USER` /
@@ -298,7 +298,7 @@ main() {
 
     # --- 网络定位决定 dockerd 默认把 -p 绑到哪个地址 ---
     #
-    # 与 safe.sh 的 action_network 是同一张表（D206）：公网 → 127.0.0.1，
+    # 与 safe_network.sh 是同一张表（D206）：公网 → 127.0.0.1，
     # 内网 → 0.0.0.0。没设过按公网处理 —— `docker run -p 8080:80` 的原义是
     # 绑 0.0.0.0，粘一条网上抄来的命令就把服务挂在公网端口上，
     # 而用户根本不知道自己做过这个决定。
@@ -306,7 +306,7 @@ main() {
     netmode=$(os::state_get network mode '')
     if [[ -z ${netmode} ]]; then
         netmode='公网'
-        os::info '这台机器还没设过网络定位，按公网处理（oneserver safe 里设一次）'
+        os::info '这台机器还没设过网络定位，按公网处理（oneserver safe network 里设一次）'
     fi
     local bind_ip='127.0.0.1'
     [[ ${netmode} == 内网 ]] && bind_ip='0.0.0.0'
@@ -322,7 +322,7 @@ main() {
         own_daemon_json=0
         if [[ ${bind_ip} == 127.0.0.1 ]] \
             && ! os::query --timeout 5 -- grep -qE '"ip"[[:space:]]*:[[:space:]]*"127\.0\.0\.1"' "${DAEMON_JSON}"; then
-            os::die 2 "${DAEMON_JSON} 是你自己的配置，本工具不覆盖它；而公网定位要求容器端口默认只绑本机 —— 请在里面加一条 \"ip\": \"127.0.0.1\" 后重跑，或把网络定位改成内网（oneserver safe）"
+            os::die 2 "${DAEMON_JSON} 是你自己的配置，本工具不覆盖它；而公网定位要求容器端口默认只绑本机 —— 请在里面加一条 \"ip\": \"127.0.0.1\" 后重跑，或把网络定位改成内网（oneserver safe network）"
         fi
         os::info "${DAEMON_JSON} 已存在且不是本工具放的，保持原样"
     fi

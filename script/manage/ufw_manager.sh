@@ -5,7 +5,7 @@
 # @command      firewall
 # @name         防火墙
 # @group        security
-# @order        20
+# @order        50
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides     firewall
@@ -529,7 +529,7 @@ action_delete() {
     local port
     for port in "${ports[@]}"; do
         if [[ ${port} == "${ssh_port}" ]]; then
-            os::die 2 "端口 ${port} 是当前的 SSH 管理端口，拒绝删除（改端口请用「SSH 加固」）"
+            os::die 2 "端口 ${port} 是当前的 SSH 管理端口，拒绝删除（改端口用 oneserver safe ssh）"
         fi
     done
 
@@ -572,8 +572,8 @@ action_delete() {
 }
 
 # 启用防火墙。规则加在一个没启用的 ufw 上一条都不生效，所以「把它打开」
-# 必须是这个界面里的一个动作。防火墙整体归本命令，`oneserver safe` 那边
-# 只读它的状态（见 script/ops/safe.sh 的头部说明）。
+# 必须是这个界面里的一个动作。防火墙整体归本命令，`oneserver safe status`
+# 那边只报一句开没开。
 #
 # 三条硬要求：
 #   1. **SSH 端口自动进放行清单**，不问 —— 启用一个不放行 SSH 的防火墙，

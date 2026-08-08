@@ -5,7 +5,7 @@
 # @command      secure
 # @name         凭据库
 # @group        security
-# @order        30
+# @order        60
 # @privilege    root
 # @requires_lib >= 1.26
 # @args         [--action=<list|get|del>] [--key=<凭据 key>] [--confirm-del=<y|n>]
