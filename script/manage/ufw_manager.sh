@@ -5,7 +5,7 @@
 # @command      firewall
 # @name         防火墙
 # @group        security
-# @order        50
+# @order        15
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides     firewall
