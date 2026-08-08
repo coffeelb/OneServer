@@ -1074,7 +1074,7 @@ function renderOvLog(){
   const seen=new Map();
   for(const r of S.logs){
     if(r.level!=='error'&&r.level!=='warn') continue;
-    const k=`${r.level} ${r.command} ${r.msg}`;
+    const k=`${r.level}\u0000${r.command}\u0000${r.msg}`;
     const e=seen.get(k);
     if(e){ e.n++; if(Date.parse(r.ts)>=Date.parse(e.ts)) e.ts=r.ts; }
     else seen.set(k,{...r,n:1});

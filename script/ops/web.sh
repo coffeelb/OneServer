@@ -85,6 +85,41 @@ readonly -a WEB_FILES=(
 )
 
 # ------------------------------------------------------------------
+# 面板页面是**指向模板的符号链接**，不是模板的副本。
+#
+# 副本会过期：`oneserver update` 整目录换掉 templates/，而副本停在拷过去
+# 那一刻 —— 升级完面板还是旧版，用户没有任何迹象能看出来。为此曾加过一条
+# 「页面与当前版本不一致」的检查，代价是每次升级都要有人记得再跑一次 enable
+# 才能把它消掉。链接把这一串整个删掉：路径不变，指向的文件跟着升级换。
+#
+# Caddy 跟随符号链接，而模板是 0644、templates/ 是 0755，跑 Caddy 的用户读得到。
+page_source() {
+    local override="${OS_ETC_DIR}/templates/dashboard.html"
+    # /etc 下的同名文件优先，与 os::install_template 的覆盖规则一致 —— 两边
+    # 不一致的话，「我在 /etc 放了定制页面却不生效」会变成查不出来的问题
+    if [[ -f ${override} ]]; then
+        printf '%s' "${override}"
+    else
+        printf '%s' "${OS_TEMPLATE_DIR}/dashboard.html"
+    fi
+}
+
+# 已经指对了就不动：否则每次 enable 都是一次变更，「第二次执行零变更」失效。
+# 上一版留下的**普通文件** index.html 会被 ln -f 直接换掉，不需要迁移代码。
+link_page() {
+    local src dst="${OS_PUBLIC_DIR}/index.html"
+    src=$(page_source)
+    [[ -f ${src} ]] || os::die 1 "面板页面模板不在：${src}"
+
+    if [[ ! -d ${OS_PUBLIC_DIR} ]]; then
+        os::run '创建面板数据目录' -- \
+            mkdir -m "${OS_PUBLIC_DIR_MODE}" "${OS_PUBLIC_DIR}" || return 1
+    fi
+    os::query -- readlink -- "${dst}" || true
+    [[ ${OS_RUN_OUTPUT} == "${src}" ]] && return 0
+    os::run '把面板页面指向当前模板' -- ln -sfn -- "${src}" "${dst}"
+}
+
 web_enabled() {
     probe::service_enabled 'oneserver-web-fast.timer'
     [[ ${OS_PROBE_VALUE} == enabled ]]
@@ -244,20 +279,12 @@ offer_caddy_import() {
 }
 
 do_enable() {
-    # 已启用时也要走一遍页面就位：`oneserver update` 换的是 templates/ 下的
-    # 模板，public/index.html 是安装那次拷过去的副本，不重新放的话升级完
-    # 面板还是旧版，而用户没有任何迹象能看出来。
-    # install_template 本身幂等（内容一致就不写），所以这里重复跑无代价。
     if web_enabled; then
         install_units || return 1
-        os::install_template --mode 0644 \
-            "${OS_TEMPLATE_DIR}/dashboard.html" "${OS_PUBLIC_DIR}/index.html" || return 1
-        local page_changed=${OS_TEMPLATE_CHANGED}
+        link_page || return 1
         write_caddy_snippet || return 1
         local snippet_changed=${OS_TEMPLATE_CHANGED}
-        if ((page_changed == 1)); then
-            os::ok '面板页面已更新到当前版本'
-        elif ((snippet_changed == 1)); then
+        if ((snippet_changed == 1)); then
             os::ok 'Caddy 面板片段已补齐'
         else
             os::ok '面板已启用，无需变更'
@@ -269,8 +296,7 @@ do_enable() {
 
     install_units || return 1
 
-    os::install_template --mode 0644 \
-        "${OS_TEMPLATE_DIR}/dashboard.html" "${OS_PUBLIC_DIR}/index.html" || return 1
+    link_page || return 1
     os::state_resource_add "${COMPONENT}" file "${OS_PUBLIC_DIR}/index.html" || true
 
     local u
@@ -362,9 +388,11 @@ do_disable() {
     os::systemd_remove 'own:oneserver-web-fast.service' || true
     os::systemd_remove 'own:oneserver-web-slow.service' || true
 
+    # `-L` 不能省：index.html 是符号链接，模板已经没了（卸载途中）时 `-e`
+    # 答否，那条断链就会被留在原地
     local f
     for f in "${WEB_FILES[@]}"; do
-        [[ -e "${OS_PUBLIC_DIR}/${f}" ]] || continue
+        [[ -e "${OS_PUBLIC_DIR}/${f}" || -L "${OS_PUBLIC_DIR}/${f}" ]] || continue
         os::run '移除面板数据文件' -- rm -f -- "${OS_PUBLIC_DIR}/${f}" || true
     done
     if [[ -e ${CADDY_SNIPPET} ]]; then
@@ -410,10 +438,11 @@ print_access() {
 # `&lt;` 会被第二步的 `&` 替换二次编码成 `&amp;lt;`，页面上就会显示出实体源码。
 do_report() {
     local out="${OS_PUBLIC_DIR}/report.html"
-    local html
-    html=$(<"${OS_TEMPLATE_DIR}/dashboard.html") || {
-        os::die 1 '读不到面板模板'
-    }
+    local html src
+    # 走 page_source：在线页面认 /etc 覆盖而报告不认的话，同一台机器上两份
+    # 页面长得不一样
+    src=$(page_source)
+    html=$(<"${src}") || os::die 1 "读不到面板模板：${src}"
 
     local blocks='' f body
     for f in "${WEB_FILES[@]}"; do
@@ -467,67 +496,62 @@ do_status() {
         os::kv "${u}" "${en} / ${act}${OS_PROBE_VALUE:+ · 下次 ${OS_PROBE_VALUE}}"
     done
 
-    # 页面本身是启用时装的静态文件，**不该报「N 秒前」**：那会让人以为它
-    # 也在被刷新，于是把一个正常的旧时间戳当成故障
+    # 页面是指向模板的链接，永远等于当前版本，所以**不问版本、也不报「N 秒前」**
+    # ——后者会让人以为它也在被刷新，于是把一个正常的旧时间戳当成故障。
+    # `-f` 跟随链接：断链答否，正是这里要抓的
     if [[ -f "${OS_PUBLIC_DIR}/index.html" ]]; then
-        # 装出去的是模板的副本，`oneserver update` 只换模板不换副本。
-        # 比一下，不然升级完面板还是旧版而没有任何迹象
-        if os::query --timeout 5 -- \
-            cmp -s "${OS_TEMPLATE_DIR}/dashboard.html" "${OS_PUBLIC_DIR}/index.html"; then
-            os::kv '面板页面' '已就位（与当前版本一致）'
-        else
-            os::warn '面板页面与当前版本不一致，跑 oneserver web --action=enable 更新'
-        fi
+        os::kv '面板页面' '已就位'
     else
-        os::warn '面板页面缺失，跑 oneserver web --action=enable 重装'
+        os::warn '面板页面缺失或链接已断，跑 oneserver web --action=enable 重建'
     fi
 
-    # 采集产物只报**一行汇总**，出问题才点名。阈值取采集周期的 3 倍：偶尔错过
-    # 一轮是正常的，连着错过三轮才说明 timer 或采集本身出了问题。
+    # 采集产物分两问：**齐不齐**查全部，**新不新鲜**只看两份档位快照。
     #
-    # **components.tsv / containers.tsv / backups.tsv 不看时间**：
     # `os::write_public` 内容没变就不重写（避免换 inode 让正在读的客户端拿到
-    # 半截），而这三份数据只在装卸组件、容器起停、跑备份时才变。拿 mtime 判断
-    # 它们，一台稳定运行的机器上会天天报「已过期」——一个每天误报的检查，
-    # 等于没有检查。
-    local f now mtime age limit
-    local -i total=0 missing=0 stale=0 freshest=-1
-    local -a bad=()
-    printf -v now '%(%s)T' -1
+    # 半截），所以别的产物 mtime 停在「内容上次变化」那一刻 —— 防火墙规则、
+    # 告警、组件清单在一台稳定运行的机器上可以几天不动，拿 mtime 判它们就是
+    # 天天误报「采集器没在跑」，而且刷新多少遍也消不掉。两份快照首行是
+    # `#ts <epoch>`，每轮必变，才是「采集器还活着」的唯一可信信号。
+    #
+    # telegram-alerts.tsv 不算采集产物：它是通知器的告警基线，没配 Telegram
+    # 就永远不存在，报它「缺失」是拿一个没开的功能当故障。
+    local f
+    local -i total=0
+    local -a missing=()
     for f in "${WEB_FILES[@]}"; do
         case ${f} in
-            index.html | report.html) continue ;;
+            index.html | report.html | telegram-alerts.tsv) continue ;;
         esac
         total+=1
-        if [[ ! -f "${OS_PUBLIC_DIR}/${f}" ]]; then
-            missing+=1
-            bad+=("${f}：缺失")
-            continue
-        fi
-        case ${f} in
-            components.tsv | containers.tsv | backups.tsv) continue ;;
-            probe-slow.tsv | firewall.tsv) limit=900 ;;
-            history.tsv) limit=90 ;;
-            *) limit=30 ;;
-        esac
-        mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${f}" 2>/dev/null || printf '0')
+        [[ -f "${OS_PUBLIC_DIR}/${f}" ]] || missing+=("${f}")
+    done
+
+    # 阈值取采集周期的 3 倍：偶尔错过一轮是正常的，连着错过三轮才说明 timer
+    # 或采集本身出了问题
+    local spec name limit label mtime now age fresh='' lag=''
+    printf -v now '%(%s)T' -1
+    for spec in 'probe-fast.tsv 30 快档' 'probe-slow.tsv 900 慢档'; do
+        IFS=' ' read -r name limit label <<<"${spec}"
+        [[ -f "${OS_PUBLIC_DIR}/${name}" ]] || continue
+        mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${name}" 2>/dev/null || printf '0')
         age=$((now - mtime))
-        if ((freshest < 0 || age < freshest)); then
-            freshest=${age}
-        fi
         if ((age > limit)); then
-            stale+=1
-            bad+=("${f}：${age} 秒前，超过 ${limit} 秒的容忍上限")
+            lag+="${lag:+，}${label} ${age} 秒前（上限 ${limit} 秒）"
+        else
+            fresh+="${fresh:+ · }${label} ${age} 秒前"
         fi
     done
 
-    if ((missing == 0 && stale == 0)); then
-        os::kv '采集数据' "${total} 份都在，最近一次 ${freshest} 秒前"
-    else
-        os::warn "${total} 份采集数据里 ${missing} 份缺失、${stale} 份过期 —— 采集器可能没在跑"
-        for f in "${bad[@]}"; do
+    if ((${#missing[@]} > 0)); then
+        os::warn "${total} 份采集数据缺了 ${#missing[@]} 份，跑「刷新面板数据」补齐"
+        for f in "${missing[@]}"; do
             os::info "    ${f}"
         done
+    fi
+    if [[ -n ${lag} ]]; then
+        os::warn "采集器可能没在跑：${lag}"
+    elif ((${#missing[@]} == 0)); then
+        os::kv '采集数据' "${total} 份都在 · ${fresh}"
     fi
 
     if [[ -f ${CADDY_SNIPPET} ]]; then
