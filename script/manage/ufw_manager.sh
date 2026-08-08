@@ -441,7 +441,9 @@ split_nums_and_ports() {
         # **必须 --required**：不加的话非交互下会默默取第一项，
         # 于是 `--ports=22` 在规则够多的机器上删掉的是第 22 条而不是端口 22，
         # 而且不会有任何提示。两可的值没有安全的默认答案。
-        os::select --required --arg ambiguous "「${maybe[*]}」按哪种理解？" answer \
+        # `--keep-screen`：上面逐条打出的「第 N 条是：<规则原文>」就是判断依据，
+        # 清屏之后用户面对的是一个没有任何线索的二选一
+        os::select --keep-screen --required --arg ambiguous "「${maybe[*]}」按哪种理解？" answer \
             'num=规则序号' 'port=端口号'
         for p in "${maybe[@]}"; do
             [[ ${answer} == num ]] && nums+=("${p}") || ports+=("${p}")

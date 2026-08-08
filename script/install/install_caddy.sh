@@ -729,7 +729,9 @@ main() {
             if [[ ${round} -ge 3 ]]; then
                 os::die 2 '连续三次都被官方拒绝，请核对插件名后重新执行'
             fi
-            os::select --arg on-build-error '接下来怎么办' choice \
+            # `--keep-screen`：上面那三行（被拒绝、多半是什么原因、当前组合）
+            # 是选「重试还是换预构建」的全部依据，清屏就等于什么都没说
+            os::select --keep-screen --arg on-build-error '接下来怎么办' choice \
                 'retry=改插件名，再试一次官方' 'prebuilt=改用仓库预构建' 'abort=放弃'
             case ${choice} in
                 retry)

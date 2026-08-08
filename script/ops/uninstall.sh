@@ -157,7 +157,9 @@ resolve_id() {
     if [[ ${#__un_hit[@]} -gt 1 ]]; then
         os::warn "「${__un_want}」下有 ${#__un_hit[@]} 个实例，挑一个"
         local __un_pick=''
-        os::select --required --reask --arg id '要卸载哪一个' __un_pick "${__un_hit[@]}"
+        # `--keep-screen`：上一行说清了「为什么在问你」，清屏之后这个选单
+        # 看起来像凭空冒出来的
+        os::select --keep-screen --required --reask --arg id '要卸载哪一个' __un_pick "${__un_hit[@]}"
         printf -v "${__un_out}" '%s' "${__un_pick}"
         return 0
     fi
@@ -165,7 +167,7 @@ resolve_id() {
     # 名字对不上：也列出来让人挑，别让他退出去重来一遍
     os::warn "state 里没有「${__un_want}」"
     local __un_pick=''
-    os::select --required --reask --arg id '已登记的组件，挑一个' __un_pick "${__un_all[@]}"
+    os::select --keep-screen --required --reask --arg id '已登记的组件，挑一个' __un_pick "${__un_all[@]}"
     printf -v "${__un_out}" '%s' "${__un_pick}"
     return 0
 }

@@ -155,9 +155,12 @@ main() {
     os::kv 'php.ini 模板' "$(effective_template php.ini)" \
         '进程池模板' "$(effective_template www.conf)"
 
+    # **`--keep-screen` 不能省。** 不加的话 os::select 会清屏，上面刚打出来的
+    # 「用哪两份模板、它们在哪」当场被冲掉，用户面对的是一个光秃秃的「模板」
+    # 二选一 —— 而那正是他需要那两行才答得上来的问题。
     local tpl_choice=''
-    os::select --arg template '模板' tpl_choice \
-        'apply=就用当前模板，直接更新' 'edit=先编辑模板，改完再更新'
+    os::select --keep-screen --arg template '这两份模板直接用，还是先改？' tpl_choice \
+        'apply=就用上面这两份，直接更新' 'edit=先编辑它们，改完再更新'
     if [[ ${tpl_choice} == edit ]]; then
         os::info '共 2 个文件，一个接一个来：先 php.ini，再 www.conf；每个打开前都会先停下来说明'
         edit_template php.ini '[1/2]' 'PHP 主配置'

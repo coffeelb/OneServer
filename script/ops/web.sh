@@ -444,14 +444,27 @@ do_report() {
 }
 
 do_status() {
+    # **先答「这功能开没开」，再谈别的。** 采集产物（那十几份 .tsv）是面板的
+    # 内部数据，没启用时全部缺失是必然结果 —— 把它们逐个当告警摊在屏幕上，
+    # 用户读到的是「一堆看不懂的东西坏了」，而真相只有一句「面板还没开」。
+    local -i enabled=0
+    probe::unit_exists "${WEB_UNITS[0]}"
+    [[ ${OS_PROBE_VALUE} == yes ]] && enabled=1
+
+    if ((enabled == 0)); then
+        os::kv '面板' '未启用'
+        os::info "启用后在本机 ${WEB_PORT} 端口提供一个只读页面：组件、服务、端口、防火墙、日志一屏看完，页面不做任何变更"
+        return 0
+    fi
+
     local u
     for u in "${WEB_UNITS[@]}"; do
         probe::service_enabled "${u}"
         local en=${OS_PROBE_VALUE}
         probe::service_active "${u}"
-        os::kv "${u}" "${en} / ${OS_PROBE_VALUE}"
+        local act=${OS_PROBE_VALUE}
         probe::timer_next "${u}"
-        [[ -n ${OS_PROBE_VALUE} ]] && os::kv '  下次触发' "${OS_PROBE_VALUE}"
+        os::kv "${u}" "${en} / ${act}${OS_PROBE_VALUE:+ · 下次 ${OS_PROBE_VALUE}}"
     done
 
     # 页面本身是启用时装的静态文件，**不该报「N 秒前」**：那会让人以为它
@@ -469,8 +482,8 @@ do_status() {
         os::warn '面板页面缺失，跑 oneserver web --action=enable 重装'
     fi
 
-    # 采集产物才有新鲜度。阈值取采集周期的 3 倍：偶尔错过一轮是正常的，
-    # 连着错过三轮就说明 timer 或采集本身出了问题。
+    # 采集产物只报**一行汇总**，出问题才点名。阈值取采集周期的 3 倍：偶尔错过
+    # 一轮是正常的，连着错过三轮才说明 timer 或采集本身出了问题。
     #
     # **components.tsv / containers.tsv / backups.tsv 不看时间**：
     # `os::write_public` 内容没变就不重写（避免换 inode 让正在读的客户端拿到
@@ -478,34 +491,44 @@ do_status() {
     # 它们，一台稳定运行的机器上会天天报「已过期」——一个每天误报的检查，
     # 等于没有检查。
     local f now mtime age limit
+    local -i total=0 missing=0 stale=0 freshest=-1
+    local -a bad=()
     printf -v now '%(%s)T' -1
     for f in "${WEB_FILES[@]}"; do
         case ${f} in
             index.html | report.html) continue ;;
-            components.tsv | containers.tsv | backups.tsv)
-                if [[ -f "${OS_PUBLIC_DIR}/${f}" ]]; then
-                    os::kv "${f}" '已就位（内容变了才重写）'
-                else
-                    os::warn "${f}：缺失"
-                fi
-                continue
-                ;;
+        esac
+        total+=1
+        if [[ ! -f "${OS_PUBLIC_DIR}/${f}" ]]; then
+            missing+=1
+            bad+=("${f}：缺失")
+            continue
+        fi
+        case ${f} in
+            components.tsv | containers.tsv | backups.tsv) continue ;;
             probe-slow.tsv | firewall.tsv) limit=900 ;;
             history.tsv) limit=90 ;;
             *) limit=30 ;;
         esac
-        if [[ ! -f "${OS_PUBLIC_DIR}/${f}" ]]; then
-            os::warn "${f}：缺失"
-            continue
-        fi
         mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${f}" 2>/dev/null || printf '0')
         age=$((now - mtime))
-        if [[ ${age} -gt ${limit} ]]; then
-            os::warn "${f}：${age} 秒前（已过期，采集器可能没在跑）"
-        else
-            os::kv "${f}" "${age} 秒前"
+        if ((freshest < 0 || age < freshest)); then
+            freshest=${age}
+        fi
+        if ((age > limit)); then
+            stale+=1
+            bad+=("${f}：${age} 秒前，超过 ${limit} 秒的容忍上限")
         fi
     done
+
+    if ((missing == 0 && stale == 0)); then
+        os::kv '采集数据' "${total} 份都在，最近一次 ${freshest} 秒前"
+    else
+        os::warn "${total} 份采集数据里 ${missing} 份缺失、${stale} 份过期 —— 采集器可能没在跑"
+        for f in "${bad[@]}"; do
+            os::info "    ${f}"
+        done
+    fi
 
     if [[ -f ${CADDY_SNIPPET} ]]; then
         os::kv 'Caddy 片段' "${CADDY_SNIPPET}"

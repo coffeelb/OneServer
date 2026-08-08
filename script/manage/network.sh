@@ -251,8 +251,10 @@ main() {
         fi
     fi
 
+    # `--keep-screen`：上面那几行（当前定位、转发策略、以及可能的「登记值与
+    # 实际值对不上」告警）正是回答这个问题要看的东西，清屏就全没了
     local mode=''
-    os::select --arg network-mode '这台机器怎么用？' mode \
+    os::select --keep-screen --arg network-mode '这台机器怎么用？' mode \
         '公网=公网服务器 —— 容器端口只绑本机，一律走 Caddy 反代' \
         '内网=内网机器 —— 容器端口直接对局域网开放'
 
