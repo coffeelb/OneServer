@@ -800,3 +800,61 @@ EOF
     # 有值就必须是数字 —— 面板会拿它当端口显示，字符串会让人去连一个不存在的端口
     [[ -z ${OS_PROBE_VALUE} || ${OS_PROBE_VALUE} =~ ^[0-9]+$ ]]
 }
+
+# compose provider：注册表拿它决定「Compose 项目」这一条上不上菜单（@requires
+# compose-provider），podman_compose.sh 拿它决定用哪个 provider。**同一个事实
+# 两个消费者**，所以它必须在 probe 里而不是脚本里（§10）。
+@test "compose_provider 没有任何 provider 时是空值而不是失败" {
+    os_is_root || skip '非 root 走缓存路径'
+    command -v docker-compose >/dev/null 2>&1 && skip '本机有 docker-compose，不动它'
+    command -v podman-compose >/dev/null 2>&1 && skip '本机有 podman-compose，不动它'
+    [ ! -x /usr/lib/docker/cli-plugins/docker-compose ] || skip '本机有 compose 插件，不动它'
+    [ ! -x /usr/libexec/docker/cli-plugins/docker-compose ] || skip '本机有 compose 插件，不动它'
+
+    run probe::compose_provider
+    [ "${status}" -eq 0 ]
+    probe::compose_provider
+    [ -z "${OS_PROBE_VALUE}" ]
+    [ "${OS_PROBE_STATUS}" = 'ok' ]
+}
+
+# **有值就必须是完整三列。** 少一列的话，detect_provider 的 read 会把版本读进
+# 路径变量，然后 systemd wrapper 里写进一个不存在的 provider 路径 —— 项目起不来，
+# 而报错指向的是 compose 文件
+@test "compose_provider 有 provider 时给出「种类 版本 路径」三列" {
+    os_is_root || skip '非 root 走缓存路径'
+    probe::compose_provider
+    [ -n "${OS_PROBE_VALUE}" ] || skip '本机没有任何 compose provider'
+
+    local kind ver path
+    IFS=$'\t' read -r kind ver path <<<"${OS_PROBE_VALUE}"
+    case ${kind} in
+        compose-v2 | podman-compose | compose-v1) ;;
+        *) return 1 ;;
+    esac
+    [ -n "${path}" ]
+    [ -x "${path}" ]
+    # 版本可以探不到（老 podman-compose 不认 version --short），但探到就得是数字开头
+    [[ -z ${ver} || ${ver} =~ ^[0-9] ]]
+}
+
+# 挑选顺序 v2 > podman-compose > v1 是 D203 定的，不是 podman 的默认顺序 ——
+# v1 已停止维护，让它排前面等于默认用一个不认现代 compose 规范的实现
+@test "compose_provider 有 Compose v2 时不会挑成 v1" {
+    os_is_root || skip '非 root 走缓存路径'
+    probe::compose_provider
+    [ -n "${OS_PROBE_VALUE}" ] || skip '本机没有任何 compose provider'
+
+    local kind ver
+    IFS=$'\t' read -r kind ver _ <<<"${OS_PROBE_VALUE}"
+    [ "${kind}" = 'compose-v1' ] || skip '本机挑到的不是 v1，这条约束无从检验'
+    # 挑到 v1 就意味着一个 2.x 都没有；有的话上一段循环就先返回了
+    [[ ${ver} =~ ^(0|1)([.]|$) ]]
+}
+
+# 与其余探测同一条硬性要求：必须带超时（D18 / K14）。compose provider 的
+# 版本查询要执行外部二进制，一个挂住的 provider 会把菜单整个卡死
+@test "compose_provider 带超时" {
+    grep -A 4 'probe::compose_provider() {' "${OS_TEST_REPO_ROOT}/lib/probe.sh" \
+        | grep -q 'OS_DEFAULT_PROBE_TIMEOUT'
+}

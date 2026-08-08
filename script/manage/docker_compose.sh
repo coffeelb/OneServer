@@ -6,7 +6,7 @@
 # @name         Compose 项目
 # @group        container
 # @order        100
-# @requires     docker
+# @requires     docker,docker-compose-plugin
 # @privilege    root
 # @requires_lib >= 1.26
 # @args         [--action=<ls|add|up|down|rm>] [--name=<项目名>] [--dir=<目录>] [--with-volumes] [--confirm-rm=<项目名>]
@@ -101,8 +101,11 @@ require_docker() {
 
 # docker compose（v2 插件）装没装。**不像 podman 那边要挑最合适的实现**——
 # 这里只有一种真正的 provider，装了就能用，没装就是没装
+# 事实归 probe：注册表要靠同一件事决定菜单里显不显示这一项（@requires
+# docker-compose-plugin），这里再自己探一遍就是第二份实现
 require_compose() {
-    os::query --timeout 10 -- "${DOCKER_BIN}" compose version \
+    probe::component_version docker-compose-plugin
+    [[ -n ${OS_PROBE_VALUE} ]] \
         || os::die 3 '没有检测到 docker compose 插件。先 oneserver install docker --compose=y'
     return 0
 }

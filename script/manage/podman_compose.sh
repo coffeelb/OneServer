@@ -6,7 +6,7 @@
 # @name         Compose 项目
 # @group        container
 # @order        50
-# @requires     podman
+# @requires     podman,compose-provider
 # @privilege    root
 # @requires_lib >= 1.26
 # @args         [--action=<ls|add|up|down|rm>] [--name=<项目名>] [--dir=<目录>] [--with-volumes] [--confirm-rm=<项目名>]
@@ -98,15 +98,6 @@ readonly NAME_RE='^[a-z0-9][a-z0-9_-]{0,62}$'
 # compose 规范定义的文件搜索顺序，四个都认
 readonly -a COMPOSE_NAMES=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml)
 
-# podman 找 docker-compose 的系统级路径（`podman compose --help` 里列的那几条，
-# 去掉 ~/.docker —— root 的家目录不该参与决定一个系统服务跑什么）
-readonly -a PROVIDER_PATHS=(
-    /usr/local/lib/docker/cli-plugins/docker-compose
-    /usr/local/libexec/docker/cli-plugins/docker-compose
-    /usr/lib/docker/cli-plugins/docker-compose
-    /usr/libexec/docker/cli-plugins/docker-compose
-)
-
 # ------------------------------------------------------------------
 # 名字与路径
 # ------------------------------------------------------------------
@@ -153,66 +144,16 @@ PROVIDER_PATH=''
 PROVIDER_KIND=''
 PROVIDER_VERSION=''
 
-# 一个候选的版本号。`version --short` 两代 docker-compose 与 podman-compose
-# 都认，输出可能带 v 前缀
-provider_version_of() {
-    local __pk_out=${1} __pk_bin=${2}
-    local __pk_v=''
-    if os::query --timeout 10 -- "${__pk_bin}" version --short; then
-        __pk_v=${OS_RUN_OUTPUT%%$'\n'*}
-        __pk_v=${__pk_v#v}
-        __pk_v=${__pk_v%%[!0-9.]*}
-    fi
-    printf -v "${__pk_out}" '%s' "${__pk_v}"
-    return 0
-}
-
-# 挑 provider。**顺序是 v2 > podman-compose > v1，不是 podman 的默认顺序**（D203）
+# 挑 provider。候选清单与挑选顺序（v2 > podman-compose > v1，D203）都在
+# probe::compose_provider 里 —— 注册表也要靠同一个事实决定菜单里显不显示这一项，
+# 两处各探各的迟早出现「菜单里有、进去说没有」（§10：两个以上消费者就必须是 probe）
 detect_provider() {
     PROVIDER_PATH=''
     PROVIDER_KIND=''
     PROVIDER_VERSION=''
-
-    local -a candidates=()
-    local p
-    p=$(type -P docker-compose || true)
-    [[ -n ${p} ]] && candidates+=("${p}")
-    for p in "${PROVIDER_PATHS[@]}"; do
-        [[ -x ${p} ]] && candidates+=("${p}")
-    done
-
-    # 先看有没有 Compose v2
-    local ver=''
-    for p in ${candidates[@]+"${candidates[@]}"}; do
-        provider_version_of ver "${p}"
-        if [[ ${ver%%.*} =~ ^[0-9]+$ ]] && ((${ver%%.*} >= 2)); then
-            PROVIDER_PATH=${p}
-            PROVIDER_KIND='compose-v2'
-            PROVIDER_VERSION=${ver}
-            return 0
-        fi
-    done
-
-    # 再看 podman-compose
-    p=$(type -P podman-compose || true)
-    if [[ -n ${p} ]]; then
-        provider_version_of ver "${p}"
-        PROVIDER_PATH=${p}
-        PROVIDER_KIND='podman-compose'
-        PROVIDER_VERSION=${ver}
-        return 0
-    fi
-
-    # 最后才轮到 Compose v1
-    for p in ${candidates[@]+"${candidates[@]}"}; do
-        provider_version_of ver "${p}"
-        if [[ -n ${ver} ]]; then
-            PROVIDER_PATH=${p}
-            PROVIDER_KIND='compose-v1'
-            PROVIDER_VERSION=${ver}
-            return 0
-        fi
-    done
+    probe::compose_provider
+    [[ -n ${OS_PROBE_VALUE} ]] || return 0
+    IFS=$'\t' read -r PROVIDER_KIND PROVIDER_VERSION PROVIDER_PATH <<<"${OS_PROBE_VALUE}"
     return 0
 }
 

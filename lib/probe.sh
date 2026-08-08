@@ -492,6 +492,24 @@ probe::component_version() {
             probe::_probe 'component.docker.version' "${OS_DEFAULT_PROBE_TIMEOUT}" -- dockerd --version
             probe::_version_token
             ;;
+        # compose 两侧都要能被 @requires 判到，否则装了引擎没装 compose 时
+        # 菜单照样列出条目，选进去才被拒（§6：不满足要隐藏，不是进去再报）。
+        #
+        # podman 侧问 probe::compose_provider —— 判据必须是「有没有任何可用
+        # provider」，不能是「podman-compose 这个包装没装」：装了 Compose v2
+        # 的机器会被整块藏掉，而藏掉且不给提示比报错难查得多。
+        compose-provider)
+            probe::compose_provider
+            OS_PROBE_VALUE=${OS_PROBE_VALUE#*$'\t'}
+            OS_PROBE_VALUE=${OS_PROBE_VALUE%%$'\t'*}
+            ;;
+        # docker 侧是官方 Compose v2 插件，一条命令就答完（D218：这边没有
+        # podman 那种「三个 provider 要挑一个」的问题）
+        docker-compose-plugin)
+            probe::_probe 'component.docker_compose.version' "${OS_DEFAULT_PROBE_TIMEOUT}" \
+                -- docker compose version --short
+            probe::_version_token
+            ;;
         *) probe::package_version "${type}" ;;
     esac
 }
@@ -532,6 +550,55 @@ probe::php_fpm_versions() {
 probe::caddy_plugins() {
     probe::_probe 'caddy.plugins' "${OS_DEFAULT_PROBE_TIMEOUT}" \
         -- sh -c "caddy build-info 2>/dev/null | awk '\$1==\"dep\"||\$1==\"mod\"{print \$2}' | sort -u | paste -sd ' ' -"
+}
+
+# probe::compose_provider   compose provider：`种类<制表符>版本<制表符>路径`，没有则空
+#
+# `podman compose` 只是个转发壳，真正解析 compose 文件的是外部 provider，
+# 可以是 Compose v2、podman-compose 或 Compose v1 三者之一。**挑选顺序
+# v2 > podman-compose > v1 是 D203 定的**，不是 podman 自己的默认顺序。
+#
+# **为什么是 probe 而不是脚本里的 os::query**：两个消费者要同一个事实 ——
+# `podman compose` 那个脚本要知道用哪一个（还要路径，它得把 provider 钉住，
+# D204），注册表要知道有没有（没有就该把整个菜单条目藏掉，§6）。两处各探各的，
+# 迟早出现「菜单里有、进去说没有」，而那种不一致最难查。
+#
+# 三列一起给，不是只给版本：路径是钉住 provider 的依据，种类决定要不要提醒
+# 用户兼容度（v1 已停止维护）。只回版本号的话，脚本还得再探一次去找路径 ——
+# 那就又是两份实现。
+#
+# 候选路径是 `podman compose --help` 列的那几条，**去掉 ~/.docker**：
+# root 的家目录不该参与决定一个系统服务跑什么。
+probe::compose_provider() {
+    # 与 probe::caddy_plugins 同一种写法：脚本体走双引号 + 转义 `$`，
+    # 单引号里出现 `$` 会被 shellcheck 判成「表达式不会展开」（SC2016）
+    probe::_probe 'compose.provider' "${OS_DEFAULT_PROBE_TIMEOUT}" -- sh -c "
+        ver_of() { \"\$1\" version --short 2>/dev/null | head -n1 | sed 's/^v//; s/[^0-9.].*//'; }
+        paths=\$(command -v docker-compose 2>/dev/null)
+        for c in /usr/local/lib/docker/cli-plugins/docker-compose \
+                 /usr/local/libexec/docker/cli-plugins/docker-compose \
+                 /usr/lib/docker/cli-plugins/docker-compose \
+                 /usr/libexec/docker/cli-plugins/docker-compose; do
+            [ -x \"\$c\" ] && paths=\"\$paths \$c\"
+        done
+        for p in \$paths; do
+            v=\$(ver_of \"\$p\")
+            case \$v in
+                '' | 0 | 0.* | 1 | 1.*) ;;
+                *) printf 'compose-v2\t%s\t%s\n' \"\$v\" \"\$p\"; exit 0 ;;
+            esac
+        done
+        p=\$(command -v podman-compose 2>/dev/null)
+        if [ -n \"\$p\" ]; then
+            printf 'podman-compose\t%s\t%s\n' \"\$(ver_of \"\$p\")\" \"\$p\"
+            exit 0
+        fi
+        for p in \$paths; do
+            v=\$(ver_of \"\$p\")
+            [ -n \"\$v\" ] && { printf 'compose-v1\t%s\t%s\n' \"\$v\" \"\$p\"; exit 0; }
+        done
+        exit 0
+    "
 }
 
 # probe::port_listening <端口>   该 TCP 端口是否有进程监听

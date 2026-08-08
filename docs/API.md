@@ -85,6 +85,7 @@
 - `probe::component_version <组件类型>` —— 组件的运行版本
 - `probe::php_fpm_versions` —— 已装的 PHP-FPM 版本列表，空格分隔
 - `probe::caddy_plugins` —— 当前 Caddy 编进了哪些 Go 模块（模块路径，空格分隔）
+- `probe::compose_provider` —— compose provider：`种类<制表符>版本<制表符>路径`，没有则空
 - `probe::port_listening <端口>` —— 该 TCP 端口是否有进程监听
 - `probe::port_families <端口>` —— 该 TCP 端口正在监听的地址族，空格分隔（v4 / v6）
 - `probe::listening_ports` —— 全部监听中的 TCP 端口，空格分隔
