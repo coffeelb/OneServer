@@ -3,7 +3,7 @@
 # Docker 容器管理
 #
 # @command      docker
-# @name         容器管理
+# @name         Docker 容器
 # @self_name    容器列表与操作
 # @group        container
 # @order        60

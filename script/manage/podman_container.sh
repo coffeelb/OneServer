@@ -3,7 +3,7 @@
 # 容器管理
 #
 # @command      podman
-# @name         容器管理
+# @name         Podman 容器
 # @self_name    容器列表与操作
 # @group        container
 # @order        10

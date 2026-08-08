@@ -151,6 +151,21 @@ tokenize() {
     return 0
 }
 
+# 首词指名了别的引擎时怎么拒。
+#
+# 不能像从前那样把 `podman` 一起吃掉：按 D210 剩下的 flag 是**原样透传**给
+# docker 的，而 podman 独有的 `--userns=keep-id`、`--pod`、挂载的 `:Z`/`:z`
+# docker 不认 —— 最好的结果是 docker 报一句参数错误，最坏是被它按别的语义收下。
+# **拒绝必须给出下一步**，理由同 podman 侧：不然用户删掉首词再粘就绕过去了。
+reject_foreign_engine() {
+    local named=${1}
+    probe::component_version podman
+    if [[ ${named} == podman && -n ${OS_PROBE_VALUE} ]]; then
+        os::die 2 '这是一条 podman 命令，而你正在用 Docker 建容器 —— 照粘会建成 docker 容器，而 podman ps 看不见它。要建 Podman 容器请走「Podman 容器 › 创建容器」（oneserver podman run）；确实要建 docker 容器就把开头的 podman 改成 docker'
+    fi
+    os::die 2 "这是一条 ${named} 命令，不是 docker run。要用 Docker 建这个容器，把开头的 ${named} 改成 docker 再粘一次，其余参数原样保留"
+}
+
 validate_run_cmd() {
     local v=${1}
     [[ -n ${v} ]] || return 1
@@ -178,7 +193,8 @@ main() {
     local -i start=0
     [[ ${DC_TOKENS[start]} == sudo ]] && start=$((start + 1))
     case ${DC_TOKENS[start]-} in
-        docker | podman) start=$((start + 1)) ;;
+        docker) start=$((start + 1)) ;;
+        podman | nerdctl) reject_foreign_engine "${DC_TOKENS[start]}" ;;
         *) os::die 2 "命令要以 docker run 开头，收到「${DC_TOKENS[start]-}」" ;;
     esac
     [[ ${DC_TOKENS[start]-} == run ]] \

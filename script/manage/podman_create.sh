@@ -46,13 +46,18 @@ source /opt/oneserver/lib/bootstrap.sh
 # 建容器的输入是**一条完整的 run 命令**
 # ==================================================================
 #
-# 用户手上现成的东西是一条 `docker run ...`（镜像文档、别人的部署脚本、
-# 自己上一台机器的记录里躺着的都是它），不是十个拆开的字段。逐字段问的代价
-# 不是麻烦：**拆的过程本身会掉东西** —— `--cap-add`、`--device`、`--health-cmd`
-# 这些没有对应输入框的参数会被静默丢掉，而容器照样起得来，只是行为不对。
+# 用户手上现成的东西是一条完整的 run 命令，不是十个拆开的字段。逐字段问的
+# 代价不是麻烦：**拆的过程本身会掉东西** —— `--cap-add`、`--device`、
+# `--health-cmd` 这些没有对应输入框的参数会被静默丢掉，而容器照样起得来，
+# 只是行为不对。
 #
 # 于是这里收整条命令，自己翻译成 Quadlet。**不引入 podlet**：它是 GitHub
 # Releases 上的 Rust 二进制，引进来就要背一条免校验下载链（D191）。
+#
+# **但首词必须是 podman**（D223）。这里只读文本、不执行它，所以从前 `docker run`
+# 照样能翻译成 Quadlet —— 代价是两个引擎都装着时，一条本要给 Docker 的命令会
+# 无声无息地变成一个 podman 容器，而 `docker ps` 看不见它。首词是用户唯一
+# 表达过的意图，读得到就不该丢。
 #
 # 翻译要守住的三条：
 #
@@ -316,6 +321,20 @@ unknown_flag() {
     return 0
 }
 
+# 首词指名了别的引擎时怎么拒。
+#
+# **拒绝必须给出下一步**：只说「不接受」的话，用户手上那条命令还是没地方用，
+# 而他多半会回头把首词删掉再粘一次 —— 那就绕过了这道拦截，还什么都没提示。
+# 另一个引擎装着就指路过去，没装就明说改哪个词。
+reject_foreign_engine() {
+    local named=${1}
+    probe::component_version docker
+    if [[ ${named} == docker && -n ${OS_PROBE_VALUE} ]]; then
+        os::die 2 '这是一条 docker 命令，而你正在用 Podman 建容器 —— 照粘会建成 podman 容器，而 docker ps 看不见它。要建 Docker 容器请走「Docker 容器 › 创建容器」（oneserver docker run）；确实要建 podman 容器就把开头的 docker 改成 podman'
+    fi
+    os::die 2 "这是一条 ${named} 命令，而本机没有 ${named}。要用 Podman 建这个容器，把开头的 ${named} 改成 podman 再粘一次，其余参数原样保留"
+}
+
 # 解析整条 run 命令，结果落在 PC_* 里
 parse_run_cmd() {
     PC_NAME=''
@@ -329,12 +348,20 @@ parse_run_cmd() {
     local -i n=${#PC_TOKENS[@]} i=0 j clen
     local tok fname fval chars c rest
 
-    # 前缀：`sudo docker run …`、`podman run …`、光秃秃的 `run …` 都收。
-    # **必须找到 run/create**：找不到就说明粘错了东西（多半是 `docker ps`
-    # 或半条命令），此时继续解析只会得出一个像模像样却完全不对的容器
+    # 前缀：`sudo podman run …`、光秃秃的 `run …` 都收。
+    # **必须找到 run/create**：找不到就说明粘错了东西（多半是 `podman ps`
+    # 或半条命令），此时继续解析只会得出一个像模像样却完全不对的容器。
+    #
+    # **首词指名的引擎必须是 podman**，不匹配就拒（见 reject_foreign_engine）。
+    # 首词是用户唯一表达过的「这条命令给谁」，吃掉它等于把这个意图丢了。
+    local named=''
     while ((i < n)); do
         case ${PC_TOKENS[i]} in
-            sudo | docker | podman | nerdctl) i+=1 ;;
+            sudo) i+=1 ;;
+            podman | docker | nerdctl)
+                named=${PC_TOKENS[i]}
+                i+=1
+                ;;
             run | create)
                 i+=1
                 break
@@ -343,8 +370,9 @@ parse_run_cmd() {
         esac
     done
     if ((i == 0)) || [[ ${PC_TOKENS[i - 1]} != run && ${PC_TOKENS[i - 1]} != create ]]; then
-        os::die 2 '这不像一条 run 命令。要粘的是完整的 docker run … 或 podman run … ，不是 docker ps 这类查询命令，也不是半条'
+        os::die 2 '这不像一条 run 命令。要粘的是完整的 podman run … ，不是 podman ps 这类查询命令，也不是半条'
     fi
+    [[ -z ${named} || ${named} == podman ]] || reject_foreign_engine "${named}"
 
     while ((i < n)); do
         tok=${PC_TOKENS[i]}
