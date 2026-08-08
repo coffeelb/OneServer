@@ -98,7 +98,6 @@ show_panel() {
     while IFS= read -r one; do
         [[ -n ${one} ]] && state_ids+=("${one}")
     done < <(os::state_list)
-    registry::sort
     local -i i idx
     for ((i = 0; i < ${#OS_REG_SORTED[@]}; i++)); do
         idx=${OS_REG_SORTED[i]}
@@ -784,6 +783,11 @@ menu_loop() {
 main() {
     registry::groups_load
     registry::scan
+    # **必须排在 menu_stack_restore 之前。** 逐层验证里的 menu_group_has 遍历
+    # 的是 OS_REG_SORTED，那张表由 registry::sort 填；表空着时每个 g: 节点都
+    # 验不过，恢复出来的栈是空的 —— 表现是从分组里进去的命令一按回车就跳回
+    # 主屏，中间那层怎么都回不去。排序在一次 scan 之内不变，全程只需这一次。
+    registry::sort
     menu_index_tree
     menu_stack_restore
     menu_loop

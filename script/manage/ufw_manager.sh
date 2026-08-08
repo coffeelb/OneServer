@@ -10,7 +10,7 @@
 # @requires_lib >= 1.26
 # @provides     firewall
 # @provides_unit ext:ufw.service
-# @args         [--action=<status|allow|delete|reload|enable|disable|restart|uninstall>] [--ports=<端口或规则序号列表>] [--proto=<both|tcp|udp>] [--from=<CIDR>] [--ambiguous=<num|port>] [--confirm-delete] [--confirm-delete-rules] [--confirm-enable] [--disable-firewall=<y|n>] [--confirm-uninstall-firewall=<确认串>]
+# @args         [--action=<status|install|allow|delete|reload|enable|disable|restart|uninstall>] [--ports=<端口或规则序号列表>] [--proto=<both|tcp|udp>] [--from=<CIDR>] [--ambiguous=<num|port>] [--confirm-delete] [--confirm-delete-rules] [--confirm-enable] [--disable-firewall=<y|n>] [--confirm-uninstall-firewall=<确认串>]
 # @description  增删规则、启停与重启防火墙、装卸 UFW
 #
 
@@ -167,7 +167,19 @@ ufw_not_allowed() {
 
 # ------------------------------------------------------------------
 
+# 「没装」与「装了但没开」是两回事，必须分开说：ufw 不在时 `ufw status` 探不到
+# 任何东西，probe::ufw_active 一律给 no —— 照着它打「未运行」，用户会去按
+# 「启用防火墙」，然后收到一句找不到命令
 action_status() {
+    probe::package_installed ufw
+    if [[ ${OS_PROBE_VALUE} != yes ]]; then
+        os::section 'UFW 防火墙'
+        os::kv '运行状态' '未安装' '数据来源' "$(probe::describe)"
+        os::info '本机没有 ufw。选「安装 ufw」装上，装完再选「启用防火墙」才开始拦截'
+        os::output 0 installed=no active=no
+        return 0
+    fi
+
     probe::ufw_active
     local active=${OS_PROBE_VALUE}
     probe::ufw_rules
@@ -178,7 +190,7 @@ action_status() {
         '数据来源' "$(probe::describe)"
     warn_docker_bypass
     if [[ ${OS_OUTPUT} == json ]]; then
-        os::output 0 active="${active}"
+        os::output 0 installed=yes active="${active}"
         return 0
     fi
     printf '%s\n' "${rules}"
@@ -234,6 +246,41 @@ action_restart() {
         os::warn "${UFW_UNIT} 已重启，但 ufw 仍是未启用状态 —— 规则一条都不生效，选「启用防火墙」才会真的挡"
     fi
     os::output 0 active="${active}" changed=yes
+    return 0
+}
+
+# 安装。**装 ufw 是一次用户点头才发生的系统变更，不是进这个界面的门票** ——
+# 从前它在 main() 里，点开「防火墙」想看一眼状态就先被装了个包、还顺带
+# enable 了 ufw.service，没有任何人同意过。它现在跟启用、卸载排在一起。
+#
+# **装上了就登记**：uninstall 只认 state 里的资源清单，这一步不记账，
+# 本工具替用户装的这个包就再也卸不掉（§12）。
+# **本来就装着的不登记**：那是用户自己的东西，记一笔等于日后去 purge
+# 一个不属于自己的包 —— state 记的是「本工具装过什么」，不是「机器上有什么」。
+action_install() {
+    probe::package_installed ufw
+    if [[ ${OS_PROBE_VALUE} == yes ]]; then
+        probe::package_version ufw
+        os::ok "ufw ${OS_PROBE_VALUE} 已安装，无需变更"
+        os::output 0 installed=yes changed=no
+        return 0
+    fi
+
+    # 走 os::pkg_install 而不是裸 apt-get：needrestart 静默、universe 源探测、
+    # 幂等与临界区都在里面，装上的包也才会进 OS_PKG__INSTALLED。
+    # 变更清单由它自己按事后探测记，这里不重复记一笔
+    os::pkg_install ufw
+
+    probe::package_version ufw
+    os::state_set "${FIREWALL_ID}" version="${OS_PROBE_VALUE}" method=apt
+    local pkg
+    while IFS= read -r pkg; do
+        [[ -n ${pkg} ]] || continue
+        os::state_resource_add "${FIREWALL_ID}" pkg "${pkg}"
+    done < <(os::pkg_installed_names)
+
+    os::ok "ufw ${OS_PROBE_VALUE} 已安装 —— 此刻一条规则都不生效，选「启用防火墙」才开始拦截"
+    os::output 0 installed=yes changed=yes
     return 0
 }
 
@@ -482,7 +529,7 @@ action_delete() {
     local port
     for port in "${ports[@]}"; do
         if [[ ${port} == "${ssh_port}" ]]; then
-            os::die 2 "端口 ${port} 是当前的 SSH 管理端口，拒绝删除（改端口请用「服务器安全设置」）"
+            os::die 2 "端口 ${port} 是当前的 SSH 管理端口，拒绝删除（改端口请用「SSH 加固」）"
         fi
     done
 
@@ -524,10 +571,9 @@ action_delete() {
     return 0
 }
 
-# 启用防火墙。**在 F4 批次 4 补上的**：此前这个脚本能加规则、能删规则、
-# 能重载，唯独没有「把防火墙打开」——而规则加在一个没启用的 ufw 上，
-# 一条都不生效。旧 safe.sh 里那段 UFW 配置就是干这件事的，移植时按边界
-# 归到这里（安全设置那边只读它的状态，见 script/ops/safe.sh 的头部说明）。
+# 启用防火墙。规则加在一个没启用的 ufw 上一条都不生效，所以「把它打开」
+# 必须是这个界面里的一个动作。防火墙整体归本命令，`oneserver safe` 那边
+# 只读它的状态（见 script/ops/safe.sh 的头部说明）。
 #
 # 三条硬要求：
 #   1. **SSH 端口自动进放行清单**，不问 —— 启用一个不放行 SSH 的防火墙，
@@ -624,28 +670,16 @@ action_enable() {
 
 # ------------------------------------------------------------------
 
-main() {
-    # ufw 不在则装。改走 os::pkg_install：直接 apt-get 会绕开 needrestart
-    # 静默环境变量（Ubuntu 上无 TTY 时可能弹交互框，这条命令常跑在 cron 里）、
-    # universe 源探测、`-qq`，装上的包也不会进 OS_PKG__INSTALLED —— 资源
-    # 清单看不到它。os::pkg_install 自带幂等与临界区，不必再手写一遍。
-    #
-    # **装上了就登记**：uninstall 只认 state 里的资源清单，这一步不记账，
-    # 本工具替用户装的这个包就再也卸不掉（§12）。
-    # **本来就装着的不登记**：那是用户自己的东西，记一笔等于日后去 purge
-    # 一个不属于自己的包 —— state 记的是「本工具装过什么」，不是「机器上有什么」。
+# 真要调 ufw 命令的动作在这里挡一次。装不装现在由用户在菜单里决定，
+# 所以「ufw 在不在」不再是进入这个脚本时就成立的前提。
+# 退出码 3 而不是 1：缺的是依赖，不是执行失败（§8）
+require_ufw() {
     probe::package_installed ufw
-    if [[ ${OS_PROBE_VALUE} != yes ]]; then
-        os::pkg_install ufw
-        probe::package_version ufw
-        os::state_set "${FIREWALL_ID}" version="${OS_PROBE_VALUE}" method=apt
-        local pkg
-        while IFS= read -r pkg; do
-            [[ -n ${pkg} ]] || continue
-            os::state_resource_add "${FIREWALL_ID}" pkg "${pkg}"
-        done < <(os::pkg_installed_names)
-    fi
+    [[ ${OS_PROBE_VALUE} == yes ]] || os::die 3 'ufw 未安装，先选「安装 ufw」（或 oneserver firewall install）'
+    return 0
+}
 
+main() {
     # 位置参数优先；没给才走交互（--action=... 由 os::select 自己从命令行取）。
     # 不去碰 OS_ARG_MAP —— 那是框架内部的东西，脚本伸手进去就是越层了。
     local action=${1-}
@@ -654,25 +688,46 @@ main() {
         return 0
     fi
 
-    # 日常动作在前，生命周期动作在后：放行端口每周都可能按，卸载 ufw 一辈子按一次。
-    # 两类混排的话，最常用的那条每次都要在一串危险选项里找
+    # 日常动作在前，生命周期动作在后：放行端口每周都可能按，装卸 ufw 一辈子按一次。
+    # 两类混排的话，最常用的那条每次都要在一串危险选项里找。
+    # 「安装」始终列着而不是按装没装隐藏：菜单项跟着系统状态变的话，用户既记不住
+    # 编号，也没法从这一屏看出「这台机器还没装」——那件事由总览负责说
     os::action_menu --overview action_status --arg action '操作' dispatch \
         'allow=放行端口' 'delete=删除规则' 'reload=重载配置' \
-        'enable=启用防火墙' 'disable=停用防火墙' \
-        'restart=重启防火墙' 'uninstall=卸载 ufw'
+        'enable=启用防火墙' 'disable=停用防火墙' 'restart=重启防火墙' \
+        'install=安装 ufw' 'uninstall=卸载 ufw'
 }
 
 dispatch() {
     case ${1} in
         status) action_status ;;
-        allow) action_allow ;;
-        delete) action_delete ;;
-        reload) action_reload ;;
-        enable) action_enable ;;
-        disable) action_disable ;;
-        restart) action_restart ;;
+        install) action_install ;;
         uninstall) action_uninstall ;;
-        *) os::die 2 "未知操作「${1}」，可用：status allow delete reload enable disable restart uninstall" ;;
+        allow)
+            require_ufw
+            action_allow
+            ;;
+        delete)
+            require_ufw
+            action_delete
+            ;;
+        reload)
+            require_ufw
+            action_reload
+            ;;
+        enable)
+            require_ufw
+            action_enable
+            ;;
+        disable)
+            require_ufw
+            action_disable
+            ;;
+        restart)
+            require_ufw
+            action_restart
+            ;;
+        *) os::die 2 "未知操作「${1}」，可用：status install allow delete reload enable disable restart uninstall" ;;
     esac
 }
 

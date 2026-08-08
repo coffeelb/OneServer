@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# 服务器安全设置：SSH 加固 · 系统更新 · 自动安全更新 · 网络定位
+# 主机加固：SSH 加固 · 系统更新 · 自动安全更新 · 网络定位
 #
 # 防火墙**整体归 `oneserver firewall`** —— 装卸、启停、规则全在那一个命令里。
 # 这里只在体检中报告 UFW 状态（只读）。分成两处的后果试过了：同一件事有两个
@@ -8,7 +8,7 @@
 # 实现，改一处就漂一处。
 #
 # @command      safe
-# @name         安全设置
+# @name         SSH 加固
 # @group        security
 # @order        10
 # @privilege    root
