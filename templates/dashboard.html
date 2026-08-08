@@ -43,14 +43,25 @@ body{background:var(--bg);color:var(--text);font:15px/1.5 var(--ui);overflow:hid
    SSH 端口、开机于一起给全了。留在页头只是让同一批字跟着你翻每一页。 */
 .brand{display:flex;align-items:center;gap:7px;color:var(--dim);font-size:13.5px;
   white-space:nowrap}
-/* 指示灯在 #i-logo 里是 evenodd 挖出来的孔，不是第二种填充色：CSS 选择器进不去
-   <use> 的影子树，而 fill 又是继承属性 —— 想给灯单独上色只能把颜色写死在
-   symbol 里，那样它就不会跟着深浅主题走了。挖孔透出的正是页头底色。 */
-.brand .lg{width:17px;height:17px;flex:0 0 17px;fill:var(--accent)}
+/* 页头标记**直接内联**，不走 <use>：CSS 选择器进不了 <use> 的影子树，
+   那条路上双色只能写死在 symbol 里、跟不了深浅主题。内联之后三个部件各自
+   认自己的变量，切主题全都跟着走。
+   几何数字与 <head> 里的 favicon 逐个对齐（20×5 的条、1.5 圆角、r1.4 的灯），
+   viewBox 直接裁到内容框 —— 那块深色圆角底板是给浏览器标签页托底的，页头
+   本来就有面板底色，再叠一层就成了贴在栏上的贴纸。改一处记得改另一处。
+   类名不能叫 .lg：那是日志条目的类，它带 padding:7px 13px，落在一个二十来
+   像素的 svg 上会把内容区压成负数 —— 图标就是这么隐身的。 */
+.brand .logomark{width:20px;height:13px;flex:0 0 20px}
+.brand .logomark .b1{fill:var(--accent)}
+.brand .logomark .b2{fill:var(--ok)}
+.brand .logomark .d{fill:var(--panel)}
+/* 加粗上色的是产品名，不是主机名：页头第一眼该答「这是什么」。
+   主机名紧随其后，用正文色 —— 仍然一眼可读，但不跟品牌抢重音 */
+.brand i{font-size:17px;font-weight:700;color:var(--accent)}
 .brand b{font-family:var(--mono);font-weight:500;color:var(--dim2)}
 .brand i,.brand b{font-style:normal}
 .brand i::after,.brand b::after{content:"·";color:var(--dim2);margin-left:7px}
-.host{font-size:17px;font-weight:700;color:var(--accent);white-space:nowrap}
+.host{font-size:15px;font-weight:500;color:var(--text);white-space:nowrap}
 .grow{flex:1}
 .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font:inherit;font-size:14px;
   padding:4px 11px;border-radius:6px;cursor:pointer;white-space:nowrap}
@@ -379,16 +390,12 @@ tr.kindrow .dim2{margin-left:6px}
 <symbol id="i-sec" viewBox="0 0 16 16"><path d="M8 1.8l5.2 2v4.3c0 3.1-2.2 5.2-5.2 6.1-3-.9-5.2-3-5.2-6.1V3.8z"/><path d="M5.9 8.1l1.5 1.5 2.9-3.1"/></symbol>
 <symbol id="i-bk" viewBox="0 0 16 16"><rect x="1.8" y="2.6" width="12.4" height="3.2" rx="1"/><path d="M3.2 5.8v6.6a1 1 0 001 1h7.6a1 1 0 001-1V5.8"/><path d="M6.4 8.6h3.2"/></symbol>
 <symbol id="i-log" viewBox="0 0 16 16"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h6.5"/></symbol>
-<!-- 页头标记：与 <head> 里那个 favicon 同一个母题（两片机架 + 指示灯），但**不带**
-     深色圆角底板 —— 那块底板是给浏览器标签页当托底的，页头本来就有面板底色，
-     再叠一层会变成一个贴在栏上的贴纸。改了这里记得同步改 favicon，反之亦然。 -->
-<symbol id="i-logo" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2.7 3.2H13.3Q14.5 3.2 14.5 4.4V6Q14.5 7.2 13.3 7.2H2.7Q1.5 7.2 1.5 6V4.4Q1.5 3.2 2.7 3.2ZM12.7 5.2A.9.9 0 1 1 10.9 5.2A.9.9 0 1 1 12.7 5.2ZM2.7 8.8H13.3Q14.5 8.8 14.5 10V11.6Q14.5 12.8 13.3 12.8H2.7Q1.5 12.8 1.5 11.6V10Q1.5 8.8 2.7 8.8ZM12.7 10.8A.9.9 0 1 1 10.9 10.8A.9.9 0 1 1 12.7 10.8Z"/></symbol>
 </svg>
 
 <div id="top">
   <button id="burger" title="折叠侧边栏">☰</button>
   <!-- 每项各自成元素：flex 的 gap 只作用在元素之间，夹在中间的裸文本不算元素 -->
-  <span class="brand"><svg class="lg"><use href="#i-logo"/></svg><i>OneServer</i><b id="ver">—</b></span>
+  <span class="brand"><svg class="logomark" viewBox="6 8 20 13" aria-hidden="true"><rect x="6" y="8" width="20" height="5" rx="1.5" class="b1"/><rect x="6" y="16" width="20" height="5" rx="1.5" class="b2"/><circle cx="23" cy="10.5" r="1.4" class="d"/><circle cx="23" cy="18.5" r="1.4" class="d"/></svg><i>OneServer</i><b id="ver">—</b></span>
   <span class="host" id="hostname">—</span>
   <span class="grow"></span>
   <span class="age" id="gage">—</span>
