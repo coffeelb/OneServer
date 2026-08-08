@@ -53,15 +53,22 @@ readonly UPDATER_SRC="${OS_ROOT}/packaging/updater.sh"
 readonly UPDATER_RUN="${OS_RUN_DIR}/updater.sh"
 readonly IN_PROGRESS="${OS_ROOT}/.update-in-progress"
 
+# check 与 run 问的是同一个字段，说明只写一份：各写一句的结果是同一个东西
+# 在两处有两种解释。「清单」是本项目内部的词，用户屏幕上必须有人解释它
+readonly MANIFEST_HINT='清单＝版本号与文件校验码；平时不填，离线更新填本地路径 /tmp/manifest.txt'
+
 MF_SCHEMA='' MF_VERSION='' MF_COMMIT=''
 declare -a MF_SUM=() MF_MODE=() MF_PATH=()
 
 # ------------------------------------------------------------------
 
-current_version() {
-    local __up_out=${1}
+# 读某棵树的 VERSION，结果写进调用方给的变量（D135）。
+# 收一个路径参数是为了同时问「现在跑的是哪版」与「回滚会退回哪版」——
+# 后者是用户在按下确认之前唯一想知道的事，而它就在 .old/VERSION 里
+version_of() {
+    local __up_out=${1} __up_file=${2}
     local __up_v=''
-    [[ -r ${OS_VERSION_FILE} ]] && __up_v=$(tr -d ' \t\n\r' <"${OS_VERSION_FILE}")
+    [[ -r ${__up_file} ]] && __up_v=$(tr -d ' \t\n\r' <"${__up_file}")
     printf -v "${__up_out}" '%s' "${__up_v}"
     return 0
 }
@@ -284,9 +291,12 @@ warn_if_interrupted() {
 # ------------------------------------------------------------------
 
 action_status() {
-    local cur='' rollback='没有可回滚的上一版'
-    current_version cur
-    [[ -d "${OS_ROOT}/.old" ]] && rollback='可回滚到上一版'
+    local cur='' old='' rollback='没有可回滚的上一版'
+    version_of cur "${OS_VERSION_FILE}"
+    if [[ -d "${OS_ROOT}/.old" ]]; then
+        version_of old "${OS_ROOT}/.old/VERSION"
+        rollback="可回滚到 ${old:-上一版}"
+    fi
 
     os::section 'OneServer 更新'
     os::kv '当前版本' "${cur:-未知}" \
@@ -294,17 +304,21 @@ action_status() {
     if [[ -e ${IN_PROGRESS} ]]; then
         os::warn '检测到上一次更新没有走完；先检查或回滚，不要直接再次更新'
     fi
-    os::info '选择“检查有没有新版本”才会访问网络'
+    # check 与 run 都要去 GitHub 取清单，run 还要再取一份源码；只有 rollback
+    # 全程在本机。把联网范围说窄了，用户会以为选「更新」不动网络
+    os::info '「检查」与「更新」会联网访问 GitHub，「回滚」只用本机留下的上一版'
     return 0
 }
 
 action_check() {
     local ref='' manifest_src='' cur=''
-    os::ask --arg ref '要检查哪个版本（回车＝最新 release）' ref ''
-    os::ask --arg manifest '清单路径或 URL（回车＝按 --ref 取）' manifest_src ''
+    os::ask --hint '想看某个旧版本就填版本号，例：v0.1.1' \
+        --arg ref '检查哪个版本？回车＝最新版' ref ''
+    os::ask --hint "${MANIFEST_HINT}" \
+        --arg manifest '版本清单从哪来？回车＝自动取' manifest_src ''
 
     warn_if_interrupted
-    current_version cur
+    version_of cur "${OS_VERSION_FILE}"
 
     local mf=''
     obtain_manifest mf "${OS_RUN_DIR}/manifest.txt" "${ref}" "${manifest_src}"
@@ -322,25 +336,28 @@ action_check() {
         '文件数' "${#MF_PATH[@]}"
 
     if [[ ${cur} == "${MF_VERSION}" ]]; then
-        os::ok '已经是清单里的版本'
+        os::ok "当前已是 ${MF_VERSION}，没有新版本"
         os::output 0 current="${cur}" available="${MF_VERSION}" update=no
         return 0
     fi
-    os::info "可以更新：oneserver update run${ref:+ --ref=${ref}}"
+    os::info "有新版 ${MF_VERSION} 可装 —— 回操作列表选「更新到新版本」，或敲 oneserver update run${ref:+ --ref=${ref}}"
     os::output 0 current="${cur}" available="${MF_VERSION}" update=yes
     return 0
 }
 
 action_run() {
     local ref='' manifest_src='' from='' cur=''
-    os::ask --arg ref '要更新到哪个版本（回车＝最新 release）' ref ''
-    os::ask --arg manifest '清单路径或 URL（回车＝按 --ref 取）' manifest_src ''
-    os::ask --arg from '源码来源：本地目录或 tar.gz（回车＝按 commit 下载）' from ''
+    os::ask --hint '想装某个指定版本就填版本号，例：v0.1.1' \
+        --arg ref '更新到哪个版本？回车＝最新版' ref ''
+    os::ask --hint "${MANIFEST_HINT}" \
+        --arg manifest '版本清单从哪来？回车＝自动取' manifest_src ''
+    os::ask --hint '断网或本地测试时填已有的源码目录或安装包，例：/root/OneServer' \
+        --arg from '程序文件从哪来？回车＝自动下载' from ''
     local force=0
     os::flag --arg force && force=1
 
     warn_if_interrupted
-    current_version cur
+    version_of cur "${OS_VERSION_FILE}"
 
     local mf=''
     obtain_manifest mf "${OS_RUN_DIR}/manifest.txt" "${ref}" "${manifest_src}"
@@ -358,7 +375,9 @@ action_run() {
         '文件数' "${#MF_PATH[@]}"
 
     if [[ ${cur} == "${MF_VERSION}" && ${force} -eq 0 ]]; then
-        os::ok '已经是这个版本，无需更新（要强制重装加 --force）'
+        # 菜单里没有「强制」这一项，只能给出完整命令行 —— 说「加 --force」
+        # 的话，用户在这一屏找不到任何地方可以加
+        os::ok "当前已是 ${MF_VERSION}，无需更新（想按同一版本重装一遍：oneserver update run --force）"
         os::output 0 current="${cur}" changed=no
         return 0
     fi
@@ -400,7 +419,12 @@ action_rollback() {
     fi
     [[ -x ${UPDATER_SRC} ]] || os::die 3 "切换器不在或不可执行：${UPDATER_SRC}"
 
-    os::warn "将把 ${OS_ROOT} 退回上一版"
+    # 退回哪一版必须在确认之前说出来：只说「上一版」的话，用户按 y 时
+    # 并不知道自己要落到哪个版本号上
+    local cur='' old=''
+    version_of cur "${OS_VERSION_FILE}"
+    version_of old "${OS_ROOT}/.old/VERSION"
+    os::warn "将把 OneServer 从 ${cur:-未知} 退回 ${old:-上一版}（只换程序文件，凭据、组件登记与探测快照不动）"
     os::confirm --arg force '确认回滚？' n || os::die 130 '已取消'
 
     os::run '准备切换器的运行目录' -- mkdir -p "${OS_RUN_DIR}"
