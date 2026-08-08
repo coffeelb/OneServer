@@ -41,7 +41,7 @@ readonly FIREWALL_ID='firewall'
 warn_docker_bypass() {
     probe::component_version docker
     [[ -n ${OS_PROBE_VALUE} ]] || return 0
-    os::warn 'docker 发布的端口（-p）不经过 UFW 的 INPUT 链，这份规则表管不到它们。要收住这个口子，用 oneserver safe network 把容器端口绑定到指定地址（写的是 /etc/docker/daemon.json 的 "ip"）'
+    os::warn 'docker 发布的端口（-p）不经过 UFW 的 INPUT 链，这份规则表管不到它们。要收住这个口子，用 oneserver network 把容器端口绑定到指定地址（写的是 /etc/docker/daemon.json 的 "ip"）'
     return 0
 }
 
@@ -301,6 +301,7 @@ action_uninstall() {
     os::destroy_confirm --arg confirm-uninstall-firewall 'ufw' -- \
         '卸载 ufw 软件包（apt purge）' \
         '删除 /etc/ufw 下的全部规则与配置（purge 的一部分，不可恢复）' \
+        '/etc/default/ufw 一并删除 —— 网络定位的转发策略那一半随之作废，重装后要重跑 oneserver network 才恢复' \
         "$([[ ${active} == yes ]] && printf '先停用防火墙，此后所有监听端口对公网开放' || printf '防火墙当前未启用，卸载不改变暴露面')"
 
     if [[ ${active} == yes ]]; then

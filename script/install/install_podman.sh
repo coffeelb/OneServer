@@ -11,7 +11,7 @@
 # @provides     podman
 # @provides_unit ext:podman.socket
 # @provides_unit ext:podman-auto-update.timer
-# @args         [--compose=<y|n>] [--docker-alias=<y|n>] [--auto-update=<n|y>]
+# @args         [--compose=<y|n>] [--docker-alias=<y|n>] [--auto-update=<n|y>] [--network-mode=<公网|内网>] [--confirm-internal=<y|n>]
 # @description  从发行版源装 Podman 与 Quadlet 环境
 #
 
@@ -79,6 +79,11 @@ source /opt/oneserver/lib/bootstrap.sh
 
 readonly QUADLET_DIR='/etc/containers/systemd'
 readonly REGISTRIES_CONF='/etc/containers/registries.conf'
+readonly UFW_DEFAULTS='/etc/default/ufw'
+# ufw 的输出在不同 locale 下措辞不同，而下面要靠文本判定结果
+readonly UFW_ENV='LC_ALL=C'
+# 网络定位落在 state 的这个组件下，两个引擎共用一份
+readonly NETWORK_ID='network'
 readonly NODOCKER_MARKER='/etc/containers/nodocker'
 readonly DOCKER_SOCK='/run/docker.sock'
 readonly PODMAN_DOCKER_TMPFILES='/usr/lib/tmpfiles.d/podman-docker.conf'
@@ -88,6 +93,41 @@ readonly PODMAN_MIN_UBUNTU='24.04'
 readonly COMPONENT_ID='podman'
 
 # ------------------------------------------------------------------
+
+# 网络定位的**防火墙那一半**，只属于 podman：容器端口走 FORWARD 链，
+# DEFAULT_FORWARD_POLICY 是它的兜底（公网 DROP、内网 ACCEPT）。Docker 不需要
+# 这一半 —— dockerd 把自己的跳转插在 FORWARD 最前面，ufw 的任何规则都轮不到
+# （D206），所以这段只在这里与 script/manage/network.sh 各一份，两处不提取。
+#
+# 没装 ufw 就只记录定位、不报错：转发本来就不受限制，没有可落实的东西。
+apply_forward_policy() {
+    local want=${1}
+    probe::package_installed ufw
+    if [[ ${OS_PROBE_VALUE} != yes ]]; then
+        os::info '本机没有 ufw，转发不受限制，只记录定位'
+        return 0
+    fi
+    local cur='DROP'
+    if os::query --timeout 5 -- grep -oE '^DEFAULT_FORWARD_POLICY="[A-Z]+"' "${UFW_DEFAULTS}"; then
+        cur=${OS_RUN_OUTPUT#*\"}
+        cur=${cur%\"}
+    fi
+    [[ ${cur} == "${want}" ]] && return 0
+
+    # 「先备份再改」类：/etc/default/ufw 是发行版的 conffile，不可重建
+    os::record_change "把 ${UFW_DEFAULTS} 的 DEFAULT_FORWARD_POLICY 改成 ${want}"
+    os::replace_line --backup "${UFW_DEFAULTS}" '^DEFAULT_FORWARD_POLICY=' \
+        "DEFAULT_FORWARD_POLICY=\"${want}\"" \
+        || os::die 1 "${UFW_DEFAULTS} 里找不到 DEFAULT_FORWARD_POLICY 行，配置文件可能已被大改"
+
+    probe::ufw_active
+    if [[ ${OS_PROBE_VALUE} == yes ]]; then
+        os::run --env "${UFW_ENV}" '重载 UFW 使转发策略生效' -- ufw reload
+    else
+        os::warn 'UFW 当前未启用，转发策略要等启用后才生效（oneserver firewall enable）'
+    fi
+    return 0
+}
 
 # podman 的版本号。`podman --version` 打的是 "podman version 5.4.1"，
 # 取最后一个词；探不到时是空串。
@@ -197,6 +237,27 @@ main() {
     # 那是一次没人看着的变更 —— 想要的人显式开，不想要的人不该被默认卷进去
     os::select --arg auto-update '开启 podman-auto-update.timer（每天自动拉新镜像并重启容器）' want_autoupdate \
         'n=不开启' 'y=开启'
+
+    # --- 网络定位：容器端口对谁开放 ---
+    #
+    # **在这里问，不在装完之后提示。** 它是使用容器的前提，而「装完自己想起来
+    # 去设」的真实结果是永远没设 —— 那一档过去被静默当成公网处理，用户从头到尾
+    # 不知道自己做过这个决定。**一台机器只定一次**：另一个引擎装的时候可能已经
+    # 问过了，state 里有就沿用，要改走 oneserver network
+    local netmode
+    netmode=$(os::state_get "${NETWORK_ID}" mode '')
+    if [[ -n ${netmode} ]]; then
+        os::info "沿用已设定的网络定位：${netmode}（要改：oneserver network）"
+    else
+        os::select --arg network-mode '这台机器的容器端口对谁开放？' netmode \
+            '公网=公网服务器 —— 端口只绑本机，一律走 Caddy 反代' \
+            '内网=内网机器 —— 端口直接对局域网开放'
+        if [[ ${netmode} == 内网 ]]; then
+            os::warn '内网定位会放开 ufw 的转发策略 —— 等于让本机转发它能路由的一切，不只是容器'
+            os::confirm --arg confirm-internal '确认这台机器在可信内网？' n \
+                || os::die 130 '已取消'
+        fi
+    fi
 
     # --- docker 命令名的冲突检查：不给「你确认就装」的口子 ---
     if [[ ${docker_alias} == y && ${engine} == docker ]]; then
@@ -314,6 +375,15 @@ main() {
         fi
     fi
 
+    # --- 网络定位落实 ---
+    #
+    # **沿用已有定位时也要落实**：先装 docker 后装 podman 的机器上，转发策略
+    # 那一半从来没人做过 —— 它是 podman 独有的，docker 的安装路径不碰它
+    local want_policy='DROP'
+    [[ ${netmode} == 内网 ]] && want_policy='ACCEPT'
+    apply_forward_policy "${want_policy}"
+    os::state_set "${NETWORK_ID}" mode="${netmode}" forward_policy="${want_policy}"
+
     # --- state---
     os::state_set "${COMPONENT_ID}" version="${cur}" method=apt
 
@@ -341,11 +411,13 @@ main() {
         'compose' "$([[ ${want_compose} == y ]] && printf '已安装' || printf '未安装')" \
         'docker 命令' "$([[ ${docker_alias} == y ]] && printf '由 podman 接管' || printf '未接管')" \
         '自动更新' "$([[ ${want_autoupdate} == y ]] && printf '已开启' || printf '未开启')" \
+        '网络定位' "${netmode}" \
         'Quadlet 目录' "${QUADLET_DIR}"
     os::info '下一步：oneserver podman run 建容器；看日志、管镜像与卷见 oneserver podman'
 
     os::output 0 version="${cur}" compose="${want_compose}" \
-        docker_alias="${docker_alias}" auto_update="${want_autoupdate}"
+        docker_alias="${docker_alias}" auto_update="${want_autoupdate}" \
+        network_mode="${netmode}"
     return 0
 }
 

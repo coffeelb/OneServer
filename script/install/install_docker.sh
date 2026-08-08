@@ -12,7 +12,7 @@
 # @provides_unit ext:docker.service
 # @provides_unit ext:docker.socket
 # @provides_unit ext:containerd.service
-# @args         [--compose=<y|n>] [--purge-podman-docker=<y|n>] [--restart-daemon=<y|n>] [--watchtower=<n|y>]
+# @args         [--compose=<y|n>] [--purge-podman-docker=<y|n>] [--restart-daemon=<y|n>] [--watchtower=<n|y>] [--network-mode=<公网|内网>]
 # @description  从 Docker 官方源装 Docker CE，处理命令名冲突
 #
 
@@ -38,8 +38,8 @@ source /opt/oneserver/lib/bootstrap.sh
 #   `--compose`              装不装 docker-compose-plugin（默认 y）
 #   `--purge-podman-docker`  撞上 podman-docker 时才问（默认 n）
 #   `--watchtower`           部署不部署 Watchtower（默认 n，见下）
-#   端口默认绑哪个地址**不在这里问**：它由 `oneserver safe network` 一次决定，
-#   两处各问一半正是「端口发布了却连不上」与「以为只绑了本机」的成因。
+#   端口默认绑哪个地址由网络定位决定，**装的时候就问**（没设过才问，一台机器
+#   一次）。两处各问一半正是「端口发布了却连不上」与「以为只绑了本机」的成因。
 #
 # **查**：装没装、什么版本 —— 经 `probe::component_version docker`，判据是
 #   `dockerd --version`（见 probe.sh 里的理由：`docker --version` 会被
@@ -57,7 +57,7 @@ source /opt/oneserver/lib/bootstrap.sh
 # 为什么公网定位这一半必须落在 daemon.json，而不是防火墙
 # ==================================================================
 #
-# `oneserver safe network` 的定位对 podman 是靠 ufw 的 `DEFAULT_FORWARD_POLICY`
+# `oneserver network` 的定位对 podman 是靠 ufw 的 `DEFAULT_FORWARD_POLICY`
 # 实现的：容器端口走 FORWARD 链，策略设成 DROP 就进不来。
 #
 # **这一套对 Docker 完全不成立。** dockerd 启动时把自己的 `DOCKER-USER` /
@@ -298,15 +298,24 @@ main() {
 
     # --- 网络定位决定 dockerd 默认把 -p 绑到哪个地址 ---
     #
-    # 与 safe_network.sh 是同一张表（D206）：公网 → 127.0.0.1，
+    # 与 network.sh 是同一张表（D206）：公网 → 127.0.0.1，
     # 内网 → 0.0.0.0。没设过按公网处理 —— `docker run -p 8080:80` 的原义是
     # 绑 0.0.0.0，粘一条网上抄来的命令就把服务挂在公网端口上，
     # 而用户根本不知道自己做过这个决定。
+    # **在这里问，不在装完之后提示。** 装完自己想起来去设的真实结果是永远没设，
+    # 而那一档过去被静默当成公网 —— 一个用户不知道自己做过的决定。
+    # **一台机器只定一次**：podman 装的时候可能已经问过了，要改走 oneserver network。
+    #
+    # 这里不问「确认在可信内网」那一句：那道确认是给 ufw 转发策略的（放开它等于
+    # 让本机转发一切，不只是容器），而 Docker 这一半只改绑定地址，没有那个后果
     local netmode
     netmode=$(os::state_get network mode '')
-    if [[ -z ${netmode} ]]; then
-        netmode='公网'
-        os::info '这台机器还没设过网络定位，按公网处理（oneserver safe network 里设一次）'
+    if [[ -n ${netmode} ]]; then
+        os::info "沿用已设定的网络定位：${netmode}（要改：oneserver network）"
+    else
+        os::select --arg network-mode '这台机器的容器端口对谁开放？' netmode \
+            '公网=公网服务器 —— 端口只绑本机，一律走 Caddy 反代' \
+            '内网=内网机器 —— 端口直接对局域网开放'
     fi
     local bind_ip='127.0.0.1'
     [[ ${netmode} == 内网 ]] && bind_ip='0.0.0.0'
@@ -486,6 +495,12 @@ main() {
     fi
 
     # --- state 与资源清单 ---
+    #
+    # 网络定位**只记 mode，不记 forward_policy**：转发策略那一半是 podman 独有的
+    # （dockerd 的跳转排在 ufw 之前，D206），这条路径一步都没做，记下来就是一条
+    # 假事实 —— 而 network.sh 正是靠登记值与实际值的比对报「定位失效」
+    os::state_set network mode="${netmode}"
+
     os::state_set "${COMPONENT_ID}" version="${cur}" method="${method}" \
         compose="${want_compose}" bind_ip="${bind_ip}"
 

@@ -2,10 +2,10 @@
 #
 # 网络定位。**这台机器的容器端口对谁开放，只在这里定一次。**
 #
-# @command      safe network
+# @command      network
 # @name         网络定位（公网 / 内网）
-# @group        security
-# @order        40
+# @group        container
+# @order        110
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides_unit ext:docker.service
@@ -236,6 +236,20 @@ main() {
     os::kv '当前定位' "${current:-（未设置，按公网处理）}" \
         'UFW' "$([[ ${OS_PROBE_VALUE} == yes ]] && printf '已启用' || printf '未启用')" \
         '转发策略' "$(forward_policy)"
+
+    # **登记值与实际值可能对不上，必须当场说出来。** 最常见的成因是 ufw 被
+    # purge 过：/etc/default/ufw 是发行版 conffile，purge 连它一起删，重装后回到
+    # 默认 DROP，而 state 里那条记录没人去动。症状是内网定位下 podman 发布的
+    # 端口连不上（走 FORWARD 链被兜底 DROP），而这一屏只报当前值的话看起来
+    # 一切正常 —— 一个已经失效的设定伪装成生效的
+    if [[ -n ${current} ]]; then
+        local recorded actual
+        recorded=$(os::state_get "${NETWORK_ID}" forward_policy '')
+        actual=$(forward_policy)
+        if [[ -n ${recorded} && ${recorded} != "${actual}" ]]; then
+            os::warn "登记的转发策略是 ${recorded}，${UFW_DEFAULTS} 里实际是 ${actual} —— 防火墙那一半没生效（ufw 被重装过？）。下面重选一次定位即可修复"
+        fi
+    fi
 
     local mode=''
     os::select --arg network-mode '这台机器怎么用？' mode \

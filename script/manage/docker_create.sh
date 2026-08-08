@@ -41,7 +41,7 @@ source /opt/oneserver/lib/bootstrap.sh
 # 也只是 docker 自己报一句参数错误，语义不会被我们改写。
 #
 # **端口绑哪个地址不在这里管。** 它由 `/etc/docker/daemon.json` 的 `"ip"`
-# 决定，`oneserver install docker` 与 `oneserver safe network` 设好 ——
+# 决定，`oneserver install docker` 与 `oneserver network` 设好 ——
 # 一处设定，此后每一条 `docker run` 都算数，包括用户自己在终端里敲的、
 # 以及 docker compose 起的。逐条命令去改写端口反而只能管住走这个入口的那些。
 #

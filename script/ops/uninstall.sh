@@ -103,7 +103,7 @@ un_elsewhere() {
         wordpress:*) printf 'oneserver site delete\n' ;;
         container:*) printf 'oneserver podman rm（或 docker rm）\n' ;;
         backup-path:*) printf 'oneserver backup remove\n' ;;
-        network) printf 'oneserver safe network\n' ;;
+        network) printf 'oneserver network\n' ;;
         *) printf '\n' ;;
     esac
 }
