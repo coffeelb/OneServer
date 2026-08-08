@@ -251,6 +251,14 @@ tr.det>td{background:var(--panel2);padding:10px 13px 12px 31px}
 .chip .v{color:var(--dim);font-size:13px;font-variant-numeric:tabular-nums}
 .chip.bad{border-color:color-mix(in srgb,var(--err) 45%,transparent)}
 .chip.warn{border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+/* 分段标题（应用 / 实例 / 功能开关）。刻意做轻：它是给这一堆方块分组的，
+   不是又一层要读的信息；第一段不留上边距，否则卡片顶部凭空多一道空隙 */
+.kind{font-size:11.5px;letter-spacing:.04em;color:var(--dim);margin:13px 0 6px}
+.kind:first-child{margin-top:0}
+.kind .dim2{margin-left:6px}
+tr.kindrow td{font-size:11.5px;letter-spacing:.04em;color:var(--dim);
+  background:var(--panel2);padding:5px 11px}
+tr.kindrow .dim2{margin-left:6px}
 
 /* 小结论条 —— 卡片级的一句话判断，样式跟页头的 .verdict 同源但更轻 */
 .sv{display:flex;flex-direction:column;gap:2px;padding:8px 11px;border-radius:7px;margin-bottom:11px;
@@ -1126,22 +1134,44 @@ function renderOvCollect(){
     <div class="dim2" style="margin-top:9px;font-size:12px;line-height:1.55">
       时刻是服务端落盘的那一刻。点刷新数字不动，说明采集器还没到下一轮</div>`;
 }
-// 组件健康：每个组件一块，状态点取自「它登记的 unit 里最坏的那个」——
-// 组件是用户心里的单位（"mariadb 还好吗"），unit 是实现细节
+// 组件健康 —— 状态点取自「它登记的 unit 里最坏的那个」。组件是用户心里的
+// 单位（"mariadb 还好吗"），unit 是实现细节。
+//
+// **两个页面共用这一个判据。** 从前概览按 unit 算、组件表按「包在不在 + 版本
+// 漂没漂」算，于是同一个组件在两屏上给出两种颜色：服务挂了概览是红点，点进
+// 组件页却是绿点 —— 而那一页正是你为了看细节才点进去的。
+function compHealth(c){
+  const f=S.fast.m, s=S.slow.m;
+  let worst='ok';
+  for(const u of (c.res.unit||[])){
+    const n=u.replace(/^(own|ext):/,''), act=f[`unit.${n}.active`], en=s[`unit.${n}.enabled`];
+    if(oneshot(n)) continue;
+    if(isFailed(act)){ worst='err'; break; }
+    if(isEnabled(en) && act && !isActive(act)) worst='err';
+    else if(!act && worst==='ok') worst='off';
+  }
+  if((c.res.pkg||[]).some(p=>s[`pkg.${p}.version`]==='')) worst='err';
+  return worst;
+}
+
+// state 里的三类东西。字母序对它们毫无意义（`auto-updates` 会排在最前、
+// `backup` 夹在 `caddy` 前面），所以先按类分段、段内再字母序。
+// kind 由采集器按 @provides 元数据算好，前端不认识任何具体的组件名。
+const KINDS=[['app','应用'],['instance','实例'],['feature','功能开关']];
+function stateByKind(){
+  const g={app:[],instance:[],feature:[]};
+  for(const id of Object.keys(S.state).sort()) (g[S.state[id].kind]||g.feature).push(id);
+  return g;
+}
+
 function renderOvComp(){
-  const f=S.fast.m, s=S.slow.m, ids=Object.keys(S.state).sort();
+  const s=S.slow.m, g=stateByKind(), ids=Object.keys(S.state);
   if(!ids.length){ $('#ovComp').innerHTML=`<div class="empty">state 里还没有组件</div>`; return; }
-  $('#ovComp').innerHTML=`<div class="chips">`+ids.map(id=>{
+  $('#ovComp').innerHTML=KINDS.filter(([k])=>g[k].length).map(([k,label])=>
+    `<div class="kind">${label}<span class="dim2">${g[k].length}</span></div><div class="chips">`+
+    g[k].map(id=>{
     const c=S.state[id], [type,inst]=id.split(':');
-    let worst='ok';
-    for(const u of (c.res.unit||[])){
-      const n=u.replace(/^(own|ext):/,''), act=f[`unit.${n}.active`], en=s[`unit.${n}.enabled`];
-      if(oneshot(n)) continue;
-      if(isFailed(act)){ worst='err'; break; }
-      if(isEnabled(en) && act && !isActive(act)) worst='err';
-      else if(!act && worst==='ok') worst='off';
-    }
-    if((c.res.pkg||[]).some(p=>s[`pkg.${p}.version`]==='')) worst='err';
+    const worst=compHealth(c);
     const ver=c.version||s[`component.${type}.version`]||'';
     const nUnits=(c.res.unit||[]).length;
     const nRes=Object.values(c.res).reduce((a,b)=>a+b.length,0);
@@ -1157,7 +1187,7 @@ function renderOvComp(){
       <span class="n"><span class="dot ${worst}"></span><b>${esc(type)}${
         inst?`<span class="dim">:${esc(inst)}</span>`:''}</b></span>
       <span class="v">${sub}${up?` <span class="tag new">→ ${esc(up[1])}</span>`:''}</span></div>`;
-  }).join('')+`</div>`;
+  }).join('')+`</div>`).join('');
 }
 
 /* 加固检查 —— 把散在几张卡里的判断收成一张可以逐行核对的清单。
@@ -1238,9 +1268,18 @@ function renderSecinfo(){
 const oneshot=u=>!u.endsWith('.timer') && S.slow.m[`unit.${u.replace(/\.service$/,'')}.timer.exists`]==='yes';
 
 function renderComp(){
-  const s=S.slow.m, out=[];
-  for(const id of Object.keys(S.state).sort()){
-    const c=S.state[id], [type,inst]=id.split(':');
+  const s=S.slow.m, out=[], g=stateByKind();
+  // 先摊平成「分段标题 + 组件」一串，再一趟渲染 —— 嵌两层循环的话下面
+  // 那段本来就长的行会再缩进一级，读起来比这多出来的一个数组更费劲
+  const rows=[];
+  for(const [k,label] of KINDS){
+    if(!g[k].length) continue;
+    rows.push({head:`${label}<span class="dim2">${g[k].length}</span>`});
+    for(const id of g[k]) rows.push({id});
+  }
+  for(const r of rows){
+    if(r.head){ out.push(`<tr class="kindrow"><td colspan="5">${r.head}</td></tr>`); continue; }
+    const id=r.id, c=S.state[id], [type,inst]=id.split(':');
     // 同 computeAlerts:扁平的 component.<type>.version 对多实例无意义
     const live=id.includes(':')?'':s[`component.${type}.version`];
     const drift=drifted(c.version,live);
@@ -1249,8 +1288,11 @@ function renderComp(){
     const gone=(c.res.pkg||[]).filter(p=>s[`pkg.${p}.version`]==='');
     const n=Object.values(c.res).reduce((a,b)=>a+b.length,0);
     const at=c.installed_at?ymd(new Date(+c.installed_at*1000)):'—';
+    // 圆点＝服务活没活（compHealth），与概览同一个判据。版本漂移不进圆点：
+    // 它在「可更新」那一列已经写明了，混进健康色会把「装的版本和记的对不上」
+    // 说成「它坏了」
     out.push(`<tr class="exp" data-id="${esc(id)}">
-      <td><span class="dot ${gone.length?'err':drift?'warn':'ok'}"></span><b>${esc(type)}</b>${
+      <td><span class="dot ${compHealth(c)}"></span><b>${esc(type)}</b>${
         inst?`<span class="dim">:${esc(inst)}</span>`:''}</td>
       <td class="num">${esc(c.version||live||'—')}${
         drift?`<span class="tag warn" style="margin-left:6px">实际 ${esc(live)}</span>`:''}</td>

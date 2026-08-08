@@ -383,10 +383,57 @@ publish_log() {
 # 是给外部消费的，字段得是我们想公开的那些。凭据永不进 state，但
 # **公开一份 0644 的副本仍然是决定，不是顺手**——所以这里逐字段列，
 # 不用 `cat`。
+#
+# --- 为什么要多记一列 kind ---
+#
+# state 一视同仁地记着三类东西，而它们在用户心里是三件不同的事：
+#
+#   app       装上去的软件      caddy · mariadb · podman · php:8.3 · nodejs:22
+#   instance  用软件建出来的    db:blog · wordpress:shop · container:redis
+#   feature   本工具的功能开关  firewall · backup · web · auto-updates
+#
+# 面板从前按 id 字母序排，于是 `auto-updates` 排在最前、`backup` 夹在
+# `caddy` 前面 —— 看起来像随机，实际是一个对这三类毫无意义的序。
+#
+# **判据取自 @provides 元数据，不写死一张表**：`script/install/**` 声明过的
+# type 就是「应用」。新增一个 install_*.sh，面板上的分类自动跟上，前端一个字
+# 都不用改（同 install_apps.sh 从 @provides 推导可装列表的做法）。
+APP_TYPES=''
+
+load_app_types() {
+    APP_TYPES=''
+    # `@provides_unit` 不会被误收：这里要求 @provides 后面紧跟空白，而那个
+    # 字段接的是下划线
+    os::query -- grep -hE '^#[[:space:]]*@provides[[:space:]]' \
+        "${OS_SCRIPT_DIR}"/install/*.sh || return 0
+    local line t
+    while IFS= read -r line; do
+        t=${line##*@provides}
+        t=${t//[[:space:]]/}
+        # `php:<version>` 这类占位符只取 type 那一段
+        t=${t%%:*}
+        [[ -n ${t} ]] && APP_TYPES+=" ${t} "
+    done <<<"${OS_RUN_OUTPUT}"
+    return 0
+}
+
+component_kind() {
+    local id=${1} type=${1%%:*}
+    if [[ ${APP_TYPES} == *" ${type} "* ]]; then
+        printf 'app'
+    elif [[ ${id} == *:* ]]; then
+        printf 'instance'
+    else
+        printf 'feature'
+    fi
+}
+
 build_components() {
+    load_app_types
     local out='' id key val unit res kind
     while IFS= read -r id; do
         [[ -n ${id} ]] || continue
+        out+="${id}"$'\t'kind$'\t'"$(component_kind "${id}")"$'\n'
         for key in version installed_at domain; do
             val=$(os::state_get "${id}" "${key}" '') || val=''
             [[ -n ${val} ]] && out+="${id}"$'\t'"${key}"$'\t'"${val}"$'\n'
