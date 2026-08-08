@@ -1,0 +1,36 @@
+# OneServer · shellcheck 配置
+#
+# 规范的 disable 审计要求：
+#   - 全局禁用的规则必须逐条注明理由
+#   - 文件内每个 `# shellcheck disable=` 必须紧跟 `# 理由：...`
+#   - CI 统计 disable 总数，超 20 条需人工说明
+#
+# 全局禁用：1 条，理由见下。新增任何一条都要在这里写清理由。
+
+shell=bash
+
+# SC1091「Not following: ... does not exist」
+#
+# 规范要求每个脚本以 `source /opt/oneserver/lib/bootstrap.sh` 开头 —— 那是
+# **运行期**的绝对路径，仓库里永远不存在，shellcheck 永远跟不进去。
+#
+# 不全局关掉的话，18 个脚本各要写一次 `# shellcheck source=/dev/null`，
+# 而 disable 总数的阈值是 20 条 —— 光这一项就占满。
+# 一个「每个文件都必须写、写了也没信息量」的 disable，正是那条防刷规则要防的东西。
+#
+# 代价：source 一个真不存在的文件不会再被静态检查发现。可接受 ——
+# bootstrap.sh 缺失在运行时第一行就炸，不是需要静态分析才能发现的问题。
+disable=SC1091
+
+# lib/ 之间用变量路径 source（`source "${OS_LIB_DIR}/log.sh"`），
+# 不开这两项 shellcheck 无法跟进被 source 的文件，会误报大量 SC2154（变量未赋值）。
+external-sources=true
+source-path=SCRIPTDIR
+source-path=lib
+
+# --- 主动加严的可选检查 ---
+# 默认关闭，但与本项目「零告警」目标一致，提前打开好过将来批量返工。
+enable=require-variable-braces
+enable=quote-safe-variables
+enable=deprecate-which
+enable=avoid-nullary-conditions

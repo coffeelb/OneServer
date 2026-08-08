@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# 面板 Telegram 通知器
+#
+# 只由 oneserver-web-fast.service 在采集后调用，不是用户命令。把它注册进菜单
+# 会诱导用户手动运行一个只会等锁、也没有可交互操作的内部步骤。
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 027
+
+source /opt/oneserver/lib/bootstrap.sh
+
+readonly ALERT_FILE="${OS_PUBLIC_DIR}/alerts.tsv"
+readonly STATE_FILE='telegram-alerts.tsv'
+readonly TOKEN_KEY='web.telegram_token'
+readonly CHAT_KEY='web.telegram_chat_id'
+
+has_key() {
+    local file=${1} want=${2} key _rest
+    while IFS=$'\t' read -r key _rest || [[ -n ${key} ]]; do
+        [[ ${key} == "${want}" ]] && return 0
+    done <"${file}"
+    return 1
+}
+
+main() {
+    local token='' chat=''
+    os::secure_load "${TOKEN_KEY}" token || return 0
+    os::secure_load "${CHAT_KEY}" chat || return 0
+    [[ -r ${ALERT_FILE} ]] || return 0
+
+    local old="${OS_PUBLIC_DIR}/${STATE_FILE}" msg='' key _level text
+    if [[ ! -r ${old} ]]; then
+        os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+        return 0
+    fi
+    while IFS=$'\t' read -r key _level text || [[ -n ${key} ]]; do
+        [[ -n ${key} ]] || continue
+        if ! has_key "${old}" "${key}"; then
+            msg+="⚠ ${text}"$'\n'
+        fi
+    done <"${ALERT_FILE}"
+    while IFS=$'\t' read -r key _level text || [[ -n ${key} ]]; do
+        [[ -n ${key} ]] || continue
+        if ! has_key "${ALERT_FILE}" "${key}"; then
+            msg+="✅ 已恢复：${text}"$'\n'
+        fi
+    done <"${old}"
+    [[ -n ${msg} ]] || {
+        os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+        return 0
+    }
+    # os::run_out 没有 --timeout 选项（超时早由 curl 自己的 --max-time 保证，
+    # 认不出的长选项现在会硬失败退出 2 而不是被当成 desc 悄悄吞掉）。
+    #
+    # token 用 `-K -` 从 stdin 读 curl 配置，不拼进 URL 再进 argv：这个脚本
+    # 由 oneserver-web-fast.timer 每 30 秒跑一次，同机任何用户 `ps -ef` /
+    # `cat /proc/*/cmdline` 都能在这个窗口里偷到 token。--stdin-secret 把整串
+    # 配置登记进脱敏表，token 因此既不进 argv 也不进日志。
+    #
+    # chat_id 不加 --secret-val：它不是凭据，只是数字群组/用户 ID，
+    # 而 --secret-val 对短于 6 字符的值会拒绝执行整条命令 —— chat_id
+    # 一旦短于这个长度，告警会每 30 秒静默失败一次，得不偿失。
+    os::run_out --stdin-secret "url = \"https://api.telegram.org/bot${token}/sendMessage\"" \
+        '发送 Telegram 面板告警' -- \
+        curl -fsS --max-time 10 --data-urlencode "chat_id=${chat}" --data-urlencode "text=${msg}" -K - \
+        || return 1
+    os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+}
+
+main "$@"

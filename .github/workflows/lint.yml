@@ -1,0 +1,65 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: shellcheck + shfmt
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 shellcheck 与 shfmt
+        run: |
+          v=$(sed -nE "s/^readonly EXPECT_SHELLCHECK_VERSION='([0-9.]+)'.*/\1/p" tests/lint.sh)
+          [ -n "${v}" ] || { echo "从 tests/lint.sh 读不到 EXPECT_SHELLCHECK_VERSION"; exit 1; }
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${v}/shellcheck-v${v}.linux.x86_64.tar.xz" | tar -xJ
+          sudo install -m 0755 "shellcheck-v${v}/shellcheck" /usr/local/bin/shellcheck
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shfmt
+          shellcheck --version
+          shfmt --version
+
+      - name: 静态检查
+        run: bash tests/lint.sh
+
+  unit:
+    name: ${{ matrix.distro }} 隔离测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian13, ubuntu2404, ubuntu2604]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman
+          podman --version
+
+      - name: 创建干净 systemd 容器
+        run: sudo -E bash tests/testenv.sh reset "${{ matrix.distro }}"
+
+      - name: 运行 lib 单元测试
+        run: sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c 'cd /src && bats tests/lib'
+
+      - name: 验证安装与全部命令 smoke
+        run: |
+          sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c '
+            git config --global --add safe.directory /src
+            cd /src
+            bash packaging/make-manifest.sh /tmp/oneserver-manifest.txt
+            bash install.sh --manifest=/tmp/oneserver-manifest.txt --from=/src --yes
+            bash tests/smoke.sh
+          '

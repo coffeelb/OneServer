@@ -1,0 +1,82 @@
+# 示例配置
+
+# 全局配置
+{
+    email example@gmail.com
+
+    # 这里配的是 default logger —— 收的是 Caddy 自己的运行日志（启动、证书签发、
+    # 错误），**不含任何 HTTP 请求记录**。访问日志要写在站点块里，见下。
+    log {
+        output file /var/log/caddy/caddy.log {
+            roll_size 10MB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format json
+        level INFO
+    }
+}
+
+# 站点配置
+example.com {
+    # 网站根目录
+    root * /var/www/wordpress
+
+    # 访问日志。站点块里有 log 才会记 HTTP 请求，全局那个不管这件事
+    log {
+        output file /var/log/caddy/example.com.access.log {
+            roll_size 10MB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format json
+    }
+
+    # 自动 HTTPS (DNS 质询)
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    # 拒绝访问核心敏感文件
+    @disallowed {
+        path_regexp (^/wp-config\.php$|^/xmlrpc\.php$|^/readme\.html$|^/license\.txt$|^/\.user\.ini$|^/wp-content/debug\.log$|^/wp-includes/.*\.php$|^/\.git($|/)|^/\.htaccess$|^/\.gitignore$|\.(sql|tar\.gz|bak|swp|key|env|bak~)$)
+    }
+    respond @disallowed 403 {
+        close
+    }
+
+    # 安全Headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), fullscreen=()"
+        -Server
+        -X-Powered-By
+    }
+
+    # 压缩策略
+    encode zstd gzip
+
+    # 静态资源缓存
+    @static path_regexp \.(avif|css|gif|ico|jpeg|jpg|js|png|svg|webp|woff|woff2)$
+    header @static Cache-Control "public, max-age=31536000"
+
+    # PHP-FPM 处理
+    php_fastcgi unix//run/php/php8.4-fpm.sock
+
+    # 静态文件服务
+    file_server
+}
+
+example.example.com {
+    reverse_proxy http://127.0.0.1:3005
+
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    header {
+        -Server
+    }
+}
