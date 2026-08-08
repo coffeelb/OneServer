@@ -495,13 +495,41 @@ probe::component_version() {
         # compose 两侧都要能被 @requires 判到，否则装了引擎没装 compose 时
         # 菜单照样列出条目，选进去才被拒（§6：不满足要隐藏，不是进去再报）。
         #
-        # podman 侧问 probe::compose_provider —— 判据必须是「有没有任何可用
-        # provider」，不能是「podman-compose 这个包装没装」：装了 Compose v2
-        # 的机器会被整块藏掉，而藏掉且不给提示比报错难查得多。
-        compose-provider)
+        # **podman 侧的判据是「现在真的能用」，不是「有没有 provider」，更不是
+        # 「podman-compose 这个包装没装」**：
+        #
+        #   podman-compose  直接跟 podman 说话，装上就能用
+        #   Compose v2      说的是 Docker API，**要通过 podman 的 docker 兼容
+        #                   socket**，podman.socket 没启用时 `podman compose
+        #                   version` 照样答得出来（本地查询），一 up 就失败
+        #
+        # 只问「有没有 provider」的后果实测过：机器上有 Docker 的 Compose v2
+        # 插件、podman.socket 是 disabled，菜单把「Compose 项目」列了出来，
+        # 而它一个项目也起不了。反过来只认 podman-compose 也不对 —— 会把认真
+        # 用 Compose v2（且开了 socket）的机器整块藏掉，而藏掉且不给提示比报错
+        # 难查得多。
+        compose-usable)
             probe::compose_provider
-            OS_PROBE_VALUE=${OS_PROBE_VALUE#*$'\t'}
-            OS_PROBE_VALUE=${OS_PROBE_VALUE%%$'\t'*}
+            if [[ -z ${OS_PROBE_VALUE} ]]; then
+                OS_PROBE_VALUE=''
+                return 0
+            fi
+            local __pv_kind=${OS_PROBE_VALUE%%$'\t'*}
+            local __pv_ver=${OS_PROBE_VALUE#*$'\t'}
+            __pv_ver=${__pv_ver%%$'\t'*}
+            if [[ ${__pv_kind} != compose-v2 ]]; then
+                OS_PROBE_VALUE=${__pv_ver}
+                return 0
+            fi
+            # enabled 就够：socket 激活是按需拉起的，不必要求它此刻 active
+            probe::service_enabled podman.socket
+            local __pv_en=${OS_PROBE_VALUE}
+            probe::service_active podman.socket
+            if [[ ${__pv_en} == enabled || ${OS_PROBE_VALUE} == active ]]; then
+                OS_PROBE_VALUE=${__pv_ver}
+            else
+                OS_PROBE_VALUE=''
+            fi
             ;;
         # docker 侧是官方 Compose v2 插件，一条命令就答完（D218：这边没有
         # podman 那种「三个 provider 要挑一个」的问题）

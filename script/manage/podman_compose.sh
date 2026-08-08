@@ -6,7 +6,7 @@
 # @name         Compose 项目
 # @group        container
 # @order        50
-# @requires     podman,compose-provider
+# @requires     podman,compose-usable
 # @privilege    root
 # @requires_lib >= 1.26
 # @args         [--action=<ls|add|up|down|rm>] [--name=<项目名>] [--dir=<目录>] [--with-volumes] [--confirm-rm=<项目名>]

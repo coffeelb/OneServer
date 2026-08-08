@@ -858,3 +858,40 @@ EOF
     grep -A 4 'probe::compose_provider() {' "${OS_TEST_REPO_ROOT}/lib/probe.sh" \
         | grep -q 'OS_DEFAULT_PROBE_TIMEOUT'
 }
+
+# **判据是「现在真的能用」，不是「有没有 provider」。** 实测踩过：机器上有
+# Docker 的 Compose v2 插件、podman.socket 是 disabled，菜单把「Compose 项目」
+# 列了出来，而 Compose v2 说的是 Docker API，没有那个 socket 一个项目也起不了。
+@test "component_version compose-usable 在 v2 provider 且 podman.socket 未启用时为空" {
+    os_is_root || skip '非 root 走缓存路径'
+    probe::compose_provider
+    [ -n "${OS_PROBE_VALUE}" ] || skip '本机没有任何 compose provider'
+    local kind
+    IFS=$'\t' read -r kind _ _ <<<"${OS_PROBE_VALUE}"
+    [ "${kind}" = 'compose-v2' ] || skip '本机 provider 不是 Compose v2'
+
+    probe::service_enabled podman.socket
+    local en=${OS_PROBE_VALUE}
+    probe::service_active podman.socket
+    local act=${OS_PROBE_VALUE}
+
+    probe::component_version compose-usable
+    if [ "${en}" = 'enabled' ] || [ "${act}" = 'active' ]; then
+        [ -n "${OS_PROBE_VALUE}" ]
+    else
+        [ -z "${OS_PROBE_VALUE}" ]
+    fi
+}
+
+# podman-compose 直接跟 podman 说话，不经 socket —— 它在就是能用
+@test "component_version compose-usable 对 podman-compose 不要求 podman.socket" {
+    os_is_root || skip '非 root 走缓存路径'
+    probe::compose_provider
+    [ -n "${OS_PROBE_VALUE}" ] || skip '本机没有任何 compose provider'
+    local kind
+    IFS=$'\t' read -r kind _ _ <<<"${OS_PROBE_VALUE}"
+    [ "${kind}" = 'podman-compose' ] || skip '本机 provider 不是 podman-compose'
+
+    probe::component_version compose-usable
+    [ -n "${OS_PROBE_VALUE}" ]
+}
