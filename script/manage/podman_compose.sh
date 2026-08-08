@@ -416,43 +416,94 @@ load_project() {
 
 # ------------------------------------------------------------------
 
-action_ls() {
-    require_podman
-    detect_provider
+# 总览表的编号就是当前操作周期的选择符，避免把同一批项目再打印一遍。
+# 与容器清单同一套：列表缓存进数组，总览按它渲染，动作按它把编号翻回项目名 ——
+# 序号与清单同源，才不会出现「看到的 3 号」与「操作的 3 号」不是一个。
+PK_LIST_READY=0
+PK_NAMES=()
+PK_DIRS=()
+PK_STATUS=()
+PK_COUNTS=()
+PK_PROVIDERS=()
 
+load_project_rows() {
     local -a ids=()
     mapfile -t ids < <(os::state_list compose)
 
-    os::section 'Compose 项目'
-    if [[ ${#ids[@]} -eq 0 ]]; then
-        os::info '一个都没有。注册一个：oneserver podman compose add --name=blog --dir=/srv/blog'
-        os::output 0 count=0
-        return 0
-    fi
+    PK_NAMES=()
+    PK_DIRS=()
+    PK_STATUS=()
+    PK_COUNTS=()
+    PK_PROVIDERS=()
+    PK_LIST_READY=1
 
-    local id name dir unit status kind containers running_list running total
-    local -i n=0
-    for id in "${ids[@]}"; do
+    local id name dir unit kind containers running_list running total
+    for id in ${ids[@]+"${ids[@]}"}; do
         [[ -n ${id} ]] || continue
         name=${id#compose:}
         dir=$(os::state_get "${id}" path)
         kind=$(os::state_get "${id}" provider)
         unit_of unit "${name}"
         probe::service_active "${unit}"
-        status=${OS_PROBE_VALUE}
+        PK_STATUS+=("${OS_PROBE_VALUE}")
 
         project_containers containers "${name}"
         count_lines total "${containers}"
         project_containers_running running_list "${name}"
         count_lines running "${running_list}"
 
-        n+=1
-        os::kv "${name}" "${status} · ${dir} · 容器 ${running}/${total} · provider ${kind:-未记录}"
-        os::output_item "name=${name}" "path=${dir}" "unit=${unit}" \
-            "status=${status}" "containers=${total}" "provider=${kind}"
+        PK_NAMES+=("${name}")
+        PK_DIRS+=("${dir}")
+        PK_COUNTS+=("${running}/${total}")
+        PK_PROVIDERS+=("${kind:-未记录}")
     done
+    return 0
+}
 
-    # 每个项目用的是它自己钉住的那个（上面一行一个），这里报告的是
+# 选一个已托管的项目：编号或项目名都收。
+#
+# **清单没上屏时先列一遍**：从命令行直接跑时总览不会显示（它只在交互的动作
+# 清单里跑），让人对着一个看不见的清单输编号不行。
+select_project() {
+    local __pk_out=${1} __pk_prompt=${2}
+    [[ ${PK_LIST_READY} -eq 1 ]] || action_ls
+    [[ ${#PK_NAMES[@]} -gt 0 ]] || os::die 2 '没有已托管的项目可选'
+
+    local picked=''
+    os::ask --arg name "${__pk_prompt}（输入上方编号；命令行可传 --name）" picked
+    if [[ ${picked} =~ ^[0-9]+$ ]]; then
+        local -i sel=$((picked - 1))
+        ((sel >= 0 && sel < ${#PK_NAMES[@]})) \
+            || os::die 2 "没有编号为「${picked}」的项目"
+        picked=${PK_NAMES[sel]}
+    fi
+    validate_name "${picked}"
+    printf -v "${__pk_out}" '%s' "${picked}"
+    return 0
+}
+
+action_ls() {
+    require_podman
+    detect_provider
+    load_project_rows
+    os::screen_heading 'Compose 项目'
+    if [[ ${#PK_NAMES[@]} -eq 0 ]]; then
+        os::info '一个都没有。注册一个：oneserver podman compose add --name=blog --dir=/srv/blog'
+        os::output 0 count=0
+        return 0
+    fi
+
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#PK_NAMES[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${PK_NAMES[i]}" "${PK_STATUS[i]}" "${PK_COUNTS[i]}"
+            "${PK_PROVIDERS[i]}" "${PK_DIRS[i]}")
+        os::output_item "name=${PK_NAMES[i]}" "path=${PK_DIRS[i]}" \
+            "status=${PK_STATUS[i]}" "containers=${PK_COUNTS[i]}" "provider=${PK_PROVIDERS[i]}"
+    done
+    os::table '编号' '项目' '状态' '容器' 'provider' '目录' -- "${cells[@]}"
+
+    # 每个项目用的是它自己钉住的那个（上面一列一个），这里报告的是
     # **这台机器上现在最好的那个** —— 两者不一致时上面那列会看出来
     local note=''
     if [[ -n ${PROVIDER_PATH} ]]; then
@@ -461,7 +512,7 @@ action_ls() {
         os::info '项目用的是注册时钉住的那个，不会自己换（换要先 down 再 up）'
     fi
     os::info '项目目录是你的，本工具不改也不删它。要彻底注销一个项目走 oneserver podman compose rm'
-    os::output 0 count="${n}"
+    os::output 0 count="${#PK_NAMES[@]}"
     return 0
 }
 
@@ -602,9 +653,7 @@ action_up() {
     require_provider
 
     local name=''
-    os::ask --arg name '项目名字' name ''
-    [[ -n ${name} ]] || os::die 2 '要给出项目名字：--name=blog'
-    validate_name "${name}"
+    select_project name '要启动哪个项目'
     load_project "${name}"
 
     local id unit
@@ -699,9 +748,7 @@ action_down() {
     require_provider
 
     local name=''
-    os::ask --arg name '项目名字' name ''
-    [[ -n ${name} ]] || os::die 2 '要给出项目名字：--name=blog'
-    validate_name "${name}"
+    select_project name '要停止哪个项目'
     load_project "${name}"
 
     local id unit
@@ -738,10 +785,8 @@ action_rm() {
     require_provider
 
     local name='' with_volumes=0
-    os::ask --arg name '要注销哪个项目' name ''
+    select_project name '要注销哪个项目'
     os::flag --arg with-volumes && with_volumes=1
-    [[ -n ${name} ]] || os::die 2 '要给出项目名字：--name=blog'
-    validate_name "${name}"
     load_project "${name}"
 
     local id unit

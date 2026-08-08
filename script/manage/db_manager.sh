@@ -125,22 +125,6 @@ user_exists() {
 
 # ------------------------------------------------------------------
 
-# 现有的用户库 → DB_CHOICES
-#
-# 让人从清单里点，而不是默认手敲库名：删库、覆盖恢复这两件事上，
-# 一个拼错的名字要么白跑一趟，要么（如果恰好撞上另一个库）动错目标。
-load_db_choices() {
-    DB_CHOICES=()
-    user_databases || os::die 1 '查询数据库列表失败'
-    local one
-    local IFS=$'\n'
-    for one in ${OS_RUN_OUTPUT}; do
-        [[ -n ${one} ]] || continue
-        DB_CHOICES+=("${one}")
-    done
-    return 0
-}
-
 # 备份目录里本工具产生的归档 → DB_CHOICES，新的在前
 load_backup_choices() {
     DB_CHOICES=()
@@ -155,36 +139,79 @@ load_backup_choices() {
     return 0
 }
 
-action_list() {
-    local dbs=''
-    user_databases || os::die 1 '查询数据库列表失败'
-    dbs=${OS_RUN_OUTPUT}
+# 总览表的编号就是当前操作周期的选择符，避免把同一批库再打印一遍。
+# 与容器清单同一套：清单缓存进数组，总览按它渲染，动作按它把编号翻回库名 ——
+# 序号与清单同源，才不会出现「看到的 3 号」与「删掉的 3 号」不是一个。
+# 对删库这种不可逆动作，这条比别处更要紧。
+DB_LIST_READY=0
+DB_NAMES=()
+DB_ACCOUNTS=()
 
-    if [[ -z ${dbs} ]]; then
+load_db_rows() {
+    DB_NAMES=()
+    DB_ACCOUNTS=()
+    DB_LIST_READY=1
+
+    user_databases || os::die 1 '查询数据库列表失败'
+    local name user host
+    local IFS=$'\n'
+    for name in ${OS_RUN_OUTPUT}; do
+        [[ -n ${name} ]] || continue
+        # 关联账号从 state 读。读不到不是错：用户手工建的库本来就不在 state 里
+        user=$(os::state_get "db:${name}" user)
+        host=$(os::state_get "db:${name}" host)
+        DB_NAMES+=("${name}")
+        if [[ -n ${user} ]]; then
+            DB_ACCOUNTS+=("${user}@${host}")
+        else
+            DB_ACCOUNTS+=('（非本工具创建，无关联账号记录）')
+        fi
+    done
+    return 0
+}
+
+# 选一个已有的库：编号或库名都收。
+#
+# **清单没上屏时先列一遍**：`oneserver mariadb delete` 从命令行直接跑时总览
+# 不会显示（它只在交互的动作清单里跑），让人对着一个看不见的清单输编号不行。
+#
+# 非交互下 os::ask 没有默认值就以 2 停下 —— 绝不替用户挑第一个来删，
+# 编号打错也不会落回第一项。
+select_database() {
+    local __db_out=${1} __db_prompt=${2}
+    [[ ${DB_LIST_READY} -eq 1 ]] || action_list
+    [[ ${#DB_NAMES[@]} -gt 0 ]] || os::die 2 '没有用户创建的数据库'
+
+    local __db_picked=''
+    os::ask --arg name "${__db_prompt}（输入上方编号；命令行可传 --name）" __db_picked
+    if [[ ${__db_picked} =~ ^[0-9]+$ ]]; then
+        local -i __db_sel=$((__db_picked - 1))
+        ((__db_sel >= 0 && __db_sel < ${#DB_NAMES[@]})) \
+            || os::die 2 "没有编号为「${__db_picked}」的数据库"
+        __db_picked=${DB_NAMES[__db_sel]}
+    fi
+    db_exists "${__db_picked}" || os::die 2 "数据库 ${__db_picked} 不存在"
+    printf -v "${__db_out}" '%s' "${__db_picked}"
+    return 0
+}
+
+action_list() {
+    load_db_rows
+    os::screen_heading '数据库'
+    if [[ ${#DB_NAMES[@]} -eq 0 ]]; then
         os::info '没有用户创建的数据库'
         os::output 0 count=0
         return 0
     fi
 
-    local name user host
-    local -i n=0
-    os::section '数据库'
-    local IFS=$'\n'
-    for name in ${dbs}; do
-        [[ -n ${name} ]] || continue
-        n+=1
-        # 关联账号从 state 读 —— 旧脚本那份 db_user_mapping.conf 的替代品。
-        # 读不到不是错：用户手工建的库本来就不在 state 里
-        user=$(os::state_get "db:${name}" user)
-        host=$(os::state_get "db:${name}" host)
-        if [[ -n ${user} ]]; then
-            os::kv "${name}" "${user}@${host}"
-        else
-            os::kv "${name}" '（非本工具创建，无关联账号记录）'
-        fi
-        os::output_item name="${name}" user="${user}" host="${host}"
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#DB_NAMES[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${DB_NAMES[i]}" "${DB_ACCOUNTS[i]}")
+        os::output_item name="${DB_NAMES[i]}" account="${DB_ACCOUNTS[i]}"
     done
-    os::output 0 count="${n}"
+    os::table '编号' '数据库' '关联账号' -- "${cells[@]}"
+    os::output 0 count="${#DB_NAMES[@]}"
     return 0
 }
 
@@ -279,16 +306,8 @@ action_create() {
 }
 
 action_delete() {
-    load_db_choices
-    [[ ${#DB_CHOICES[@]} -gt 0 ]] || os::die 2 '没有用户创建的数据库可删'
-
-    # `--required`：非交互下没给 --name 就以 2 停下，绝不替用户挑第一个来删；
-    # 编号打错也不落回第一项。名字里带 `=` 的库（本工具建不出来）在清单里
-    # 显示会被截断，那种用 --name= 直接给
     local name=''
-    os::select --required --arg name '要删除哪个数据库' name "${DB_CHOICES[@]}"
-    [[ -n ${name} ]] || os::die 2 '必须给出数据库名称（--name=）'
-    db_exists "${name}" || os::die 2 "数据库 ${name} 不存在"
+    select_database name '要删除哪个数据库'
 
     local user host
     user=$(os::state_get "db:${name}" user)
@@ -388,13 +407,8 @@ shell_safe_name() {
 }
 
 action_backup() {
-    load_db_choices
-    [[ ${#DB_CHOICES[@]} -gt 0 ]] || os::die 2 '没有用户创建的数据库可备份'
-
     local name=''
-    os::select --required --arg name '要备份哪个数据库' name "${DB_CHOICES[@]}"
-    [[ -n ${name} ]] || os::die 2 '必须给出数据库名称（--name=）'
-    db_exists "${name}" || os::die 2 "数据库 ${name} 不存在"
+    select_database name '要备份哪个数据库'
 
     if [[ ${OS_DRYRUN} -eq 1 ]]; then
         os::info "[dry-run] 将把 ${name} 备份到 ${DB_DUMP_DIR}/"
@@ -415,9 +429,23 @@ action_restore() {
     [[ ${#DB_CHOICES[@]} -gt 0 ]] \
         || os::die 2 "${DB_DUMP_DIR} 里没有备份文件（先跑 oneserver mariadb backup）"
 
+    # 备份文件不在总览里（那一屏列的是库），所以这里自己列一份带编号的表 ——
+    # 与其余「从清单里挑对象」的地方同一套写法：列表格 + 输编号
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#DB_CHOICES[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${DB_CHOICES[i]}")
+    done
+    os::table '编号' '备份文件（新的在前）' -- "${cells[@]}"
+
     local file=''
-    os::select --required --arg file '从哪一份备份恢复（新的在前）' file "${DB_CHOICES[@]}"
-    [[ -n ${file} ]] || os::die 2 '必须给出备份文件（--file=）'
+    os::ask --arg file '从哪一份备份恢复（输入上方编号；命令行可传 --file）' file
+    if [[ ${file} =~ ^[0-9]+$ ]]; then
+        local -i sel=$((file - 1))
+        ((sel >= 0 && sel < ${#DB_CHOICES[@]})) \
+            || os::die 2 "没有编号为「${file}」的备份文件"
+        file=${DB_CHOICES[sel]}
+    fi
 
     # **只收文件名，不收路径**，而且必须匹配本工具自己产生的命名。
     #

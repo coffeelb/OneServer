@@ -86,19 +86,28 @@ load_sites() {
 # site_pick <提示> <出参名>   让用户从站点清单里挑一个，结果是**组件标识**
 #
 # 挑而不是手敲：站点名会进 state 的实例标识，敲错一个字符要么白跑一趟，
-# 要么（删除时）指向另一个站点
+# 要么（删除时）指向另一个站点。
+#
+# 总览表的编号就是选择符 —— **清单没上屏时先列一遍**：从命令行直接跑时总览
+# 不会显示（它只在交互的动作清单里跑），让人对着一个看不见的清单输编号不行。
+SITE_LIST_SHOWN=0
 site_pick() {
     local __sp_prompt=${1} __sp_out=${2}
     load_sites
     if [[ ${#SITE_IDS[@]} -eq 0 ]]; then
         os::die 2 '一个站点都没有'
     fi
-    local -a choices=()
-    local -i i
-    for ((i = 0; i < ${#SITE_IDS[@]}; i++)); do
-        choices+=("${SITE_IDS[i]}=${SITE_NAMES[i]}（${SITE_PATHS[i]}）")
-    done
-    os::select --required --arg name "${__sp_prompt}" "${__sp_out}" "${choices[@]}"
+    [[ ${SITE_LIST_SHOWN} -eq 1 ]] || action_list
+
+    local __sp_picked=''
+    os::ask --arg name "${__sp_prompt}（输入上方编号；命令行可传 --name）" __sp_picked
+    if [[ ${__sp_picked} =~ ^[0-9]+$ ]]; then
+        local -i __sp_sel=$((__sp_picked - 1))
+        ((__sp_sel >= 0 && __sp_sel < ${#SITE_IDS[@]})) \
+            || os::die 2 "没有编号为「${__sp_picked}」的站点"
+        __sp_picked=${SITE_IDS[__sp_sel]}
+    fi
+    printf -v "${__sp_out}" '%s' "${__sp_picked}"
     return 0
 }
 
@@ -184,17 +193,20 @@ action_list() {
         return 0
     fi
 
-    os::section '站点'
+    os::screen_heading '站点'
+    local -a cells=()
     local -i i
     local db exists
     for ((i = 0; i < n; i++)); do
         db=$(os::state_get "${SITE_IDS[i]}" db)
-        exists='目录已丢失'
-        [[ -d ${SITE_PATHS[i]} ]] && exists=${SITE_PATHS[i]}
-        os::kv "${SITE_NAMES[i]}" "${exists}${db:+ · 库 ${db}}"
+        exists=${SITE_PATHS[i]}
+        [[ -d ${SITE_PATHS[i]} ]] || exists='目录已丢失'
+        cells+=("[$((i + 1))]" "${SITE_NAMES[i]}" "${exists}" "${db:-—}")
         os::output_item name="${SITE_NAMES[i]}" id="${SITE_IDS[i]}" \
             path="${SITE_PATHS[i]}" db="${db}"
     done
+    os::table '编号' '站点' '目录' '数据库' -- "${cells[@]}"
+    SITE_LIST_SHOWN=1
     os::output 0 count="${n}"
     return 0
 }

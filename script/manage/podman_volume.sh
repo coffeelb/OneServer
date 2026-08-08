@@ -56,32 +56,82 @@ volume_users() {
 
 # ------------------------------------------------------------------
 
-action_ls() {
-    require_podman
+# 总览表的编号就是当前操作周期的选择符，避免把同一批卷再打印一遍。
+# 与容器清单同一套：列表缓存进数组，总览按它渲染，动作按它把编号翻回卷名 ——
+# 序号与清单同源，才不会出现「看到的 3 号」与「删掉的 3 号」不是一个。
+PV_LIST_READY=0
+PV_NAMES=()
+PV_DRIVERS=()
+PV_MOUNTS=()
+PV_USERS=()
+
+load_volume_rows() {
     os::query --timeout 20 -- podman volume ls --format '{{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
     local list=${OS_RUN_OUTPUT}
 
-    os::section '卷'
-    if [[ -z ${list} ]]; then
-        os::info '一个都没有。建一个：oneserver podman volume create --name=pgdata'
-        os::output 0 count=0
-        return 0
-    fi
+    PV_NAMES=()
+    PV_DRIVERS=()
+    PV_MOUNTS=()
+    PV_USERS=()
+    PV_LIST_READY=1
 
     local line name driver mount users
-    local -i n=0
     local IFS=$'\n'
     for line in ${list}; do
         [[ -n ${line} ]] || continue
         IFS=$'\t' read -r name driver mount <<<"${line}"
         volume_users users "${name}"
-        n+=1
-        os::kv "${name}" "${driver} · ${mount} · 使用中：${users//$'\n'/ }"
-        os::output_item "volume=${name}" "driver=${driver}" "mountpoint=${mount}" \
-            "users=${users//$'\n'/ }"
+        PV_NAMES+=("${name}")
+        PV_DRIVERS+=("${driver}")
+        PV_MOUNTS+=("${mount}")
+        PV_USERS+=("${users//$'\n'/ }")
     done
+    return 0
+}
+
+# 选一个已有的卷：编号或卷名都收。
+#
+# **清单没上屏时先列一遍**：从命令行直接跑时总览不会显示（它只在交互的动作
+# 清单里跑），让人对着一个看不见的清单输编号不行。
+select_volume() {
+    local __pv_out=${1} __pv_prompt=${2}
+    [[ ${PV_LIST_READY} -eq 1 ]] || action_ls
+    [[ ${#PV_NAMES[@]} -gt 0 ]] || os::die 2 '没有卷可选'
+
+    local picked=''
+    os::ask --arg name "${__pv_prompt}（输入上方编号；命令行可传 --name）" picked
+    if [[ ${picked} =~ ^[0-9]+$ ]]; then
+        local -i sel=$((picked - 1))
+        ((sel >= 0 && sel < ${#PV_NAMES[@]})) \
+            || os::die 2 "没有编号为「${picked}」的卷"
+        picked=${PV_NAMES[sel]}
+    fi
+    [[ ${picked} =~ ${NAME_RE} ]] || os::die 2 "卷名「${picked}」不合法"
+    printf -v "${__pv_out}" '%s' "${picked}"
+    return 0
+}
+
+action_ls() {
+    require_podman
+    load_volume_rows
+    os::screen_heading '卷'
+    if [[ ${#PV_NAMES[@]} -eq 0 ]]; then
+        os::info '一个都没有。建一个：oneserver podman volume create --name=pgdata'
+        os::output 0 count=0
+        return 0
+    fi
+
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#PV_NAMES[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${PV_NAMES[i]}" "${PV_DRIVERS[i]}" "${PV_MOUNTS[i]}"
+            "${PV_USERS[i]:-—}")
+        os::output_item "volume=${PV_NAMES[i]}" "driver=${PV_DRIVERS[i]}" \
+            "mountpoint=${PV_MOUNTS[i]}" "users=${PV_USERS[i]}"
+    done
+    os::table '编号' '名称' '驱动' '挂载点' '使用中' -- "${cells[@]}"
     os::info '卷里是数据 —— 删容器不会删卷，要删得单独来这里'
-    os::output 0 count="${n}"
+    os::output 0 count="${#PV_NAMES[@]}"
     return 0
 }
 
@@ -122,9 +172,7 @@ action_create() {
 action_rm() {
     require_podman
     local name=''
-    os::ask --arg name '要删哪个卷' name ''
-    [[ -n ${name} ]] || os::die 2 '要给出卷名字：--name=pgdata'
-    [[ ${name} =~ ${NAME_RE} ]] || os::die 2 "卷名「${name}」不合法"
+    select_volume name '要删哪个卷'
 
     os::query --timeout 10 -- podman volume exists "${name}" \
         || os::die 2 "没有叫 ${name} 的卷（oneserver podman volume ls 看有哪些）"

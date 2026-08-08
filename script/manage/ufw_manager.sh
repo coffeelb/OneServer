@@ -33,6 +33,9 @@ readonly UFW_UNIT='ufw.service'
 # 反向 purge，登记与卸载必须在同一个文件里，分居两处迟早对不上
 readonly FIREWALL_ID='firewall'
 
+# 规则表是不是已经被总览打过了 —— 打过就别在删除动作里再来一遍
+UFW_RULES_SHOWN=0
+
 # Docker 把自己的 DNAT/FORWARD 规则插在 UFW 的 INPUT 链之前，`docker run -p`
 # 发布的端口因此完全绕过这份规则表 —— 用户看着 `default deny incoming`，
 # 实际上被 -p 发布过的端口仍然全网可达。只在这台机器确实有 docker 时提示：
@@ -194,6 +197,7 @@ action_status() {
         return 0
     fi
     printf '%s\n' "${rules}"
+    UFW_RULES_SHOWN=1
     return 0
 }
 
@@ -491,11 +495,12 @@ delete_by_number() {
 action_delete() {
     local ports_input='' proto='' from=''
 
-    # 删之前先把现有规则原样打出来 —— 让用户看着真实清单做决定，
-    # 而不是凭记忆输端口号
     probe::ufw_rules
     local rules=${OS_PROBE_VALUE}
-    if [[ ${OS_OUTPUT} != json ]]; then
+    # 规则表在动作清单的总览里刚打过，不再打第二遍。
+    # **只有从命令行直接跑时才打**：那时总览不会显示（它只在交互的动作清单里
+    # 跑），而这一步要用户对着真实清单输端口或序号
+    if [[ ${OS_OUTPUT} != json && ${UFW_RULES_SHOWN} -ne 1 ]]; then
         os::section '当前规则'
         printf '%s\n' "${rules}"
     fi

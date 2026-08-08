@@ -67,6 +67,7 @@ load_types() {
 }
 
 # state 里属于应用的那些条目（含多实例的每一个）
+APP_LIST_SHOWN=0
 APP_IDS=()
 load_installed() {
     APP_IDS=()
@@ -115,22 +116,46 @@ action_list() {
         return 0
     fi
 
+    os::screen_heading '已装的应用'
     local id ver method
-    local -a rows=()
-    for id in "${APP_IDS[@]}"; do
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#APP_IDS[@]}; i++)); do
+        id=${APP_IDS[i]}
         ver=$(os::state_get "${id}" version)
         method=$(os::state_get "${id}" method)
         app_resources "${id}"
-        rows+=("${id}" "${ver:-未知}${method:+（${method}）} · ${APP_RES}")
+        cells+=("[$((i + 1))]" "${id}" "${ver:-未知}" "${method:-未记录}" "${APP_RES}")
         os::output_item id="${id}" version="${ver}" method="${method}"
     done
-
-    os::section '已装的应用'
-    os::kv "${rows[@]}"
+    os::table '编号' '应用' '版本' '安装方式' '资源' -- "${cells[@]}"
+    APP_LIST_SHOWN=1
     # state 里记的是「本工具装过什么」。用户自己 apt 装的那份不在这儿，
     # 不说清的话，一台明明跑着 MariaDB 的机器上这份清单看起来像丢了东西
     os::info '只列本工具装的；手工装的应用不在 state 里，用 oneserver install 看全部状态'
     os::output 0 count="${#APP_IDS[@]}"
+    return 0
+}
+
+# 选一个已装应用：编号或组件标识都收。
+#
+# **清单没上屏时先列一遍**：`oneserver apps show` 从命令行直接跑时总览不会
+# 显示（它只在交互的动作清单里跑），让人对着一个看不见的清单输编号不行。
+select_app() {
+    local __ap_out=${1}
+    load_installed
+    [[ ${#APP_IDS[@]} -gt 0 ]] || os::die 2 '还没有用本工具装过任何应用'
+    [[ ${APP_LIST_SHOWN} -eq 1 ]] || action_list
+
+    local __ap_picked=''
+    os::ask --arg name '看哪个应用（输入上方编号；命令行可传 --name）' __ap_picked
+    if [[ ${__ap_picked} =~ ^[0-9]+$ ]]; then
+        local -i __ap_sel=$((__ap_picked - 1))
+        ((__ap_sel >= 0 && __ap_sel < ${#APP_IDS[@]})) \
+            || os::die 2 "没有编号为「${__ap_picked}」的应用"
+        __ap_picked=${APP_IDS[__ap_sel]}
+    fi
+    printf -v "${__ap_out}" '%s' "${__ap_picked}"
     return 0
 }
 
@@ -141,7 +166,7 @@ action_show() {
     fi
 
     local id=''
-    os::select --required --arg name '看哪个应用' id "${APP_IDS[@]}"
+    select_app id
 
     local ver method installed_at
     ver=$(os::state_get "${id}" version)

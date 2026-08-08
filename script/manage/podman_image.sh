@@ -42,30 +42,77 @@ require_podman() {
 
 # ------------------------------------------------------------------
 
-action_ls() {
-    require_podman
+# 总览表的编号就是当前操作周期的选择符，避免把同一批镜像再打印一遍。
+# 与 podman_container.sh 的容器清单是同一套：列表缓存进数组，总览按它渲染，
+# 动作按它把编号翻回镜像名。序号与清单同源，才不会出现「看到的 3 号」
+# 与「删掉的 3 号」不是一个。
+PI_LIST_READY=0
+PI_REFS=()
+PI_SIZES=()
+PI_CREATED=()
+
+load_image_rows() {
     os::query --timeout 30 -- \
         podman images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.Created}}'
     local list=${OS_RUN_OUTPUT}
 
-    os::section '镜像'
-    if [[ -z ${list} ]]; then
+    PI_REFS=()
+    PI_SIZES=()
+    PI_CREATED=()
+    PI_LIST_READY=1
+
+    local line ref size created
+    local IFS=$'\n'
+    for line in ${list}; do
+        [[ -n ${line} ]] || continue
+        IFS=$'\t' read -r ref size created <<<"${line}"
+        PI_REFS+=("${ref}")
+        PI_SIZES+=("${size}")
+        PI_CREATED+=("${created}")
+    done
+    return 0
+}
+
+# 选一个已有镜像：编号或完整镜像名都收。
+#
+# **清单没上屏时先列一遍**：`oneserver podman image rm` 从命令行直接跑时总览
+# 不会显示（它只在交互的动作清单里跑），让人对着一个看不见的清单输编号不行。
+select_image() {
+    local __pi_out=${1} __pi_prompt=${2}
+    [[ ${PI_LIST_READY} -eq 1 ]] || action_ls
+    [[ ${#PI_REFS[@]} -gt 0 ]] || os::die 2 '没有镜像可选'
+
+    local picked=''
+    os::ask --arg image "${__pi_prompt}（输入上方编号；命令行可传 --image）" picked
+    if [[ ${picked} =~ ^[0-9]+$ ]]; then
+        local -i sel=$((picked - 1))
+        ((sel >= 0 && sel < ${#PI_REFS[@]})) \
+            || os::die 2 "没有编号为「${picked}」的镜像"
+        picked=${PI_REFS[sel]}
+    fi
+    [[ ${picked} =~ ${IMAGE_RE} ]] || os::die 2 "镜像名「${picked}」不合法"
+    printf -v "${__pi_out}" '%s' "${picked}"
+    return 0
+}
+
+action_ls() {
+    require_podman
+    load_image_rows
+    os::screen_heading '镜像'
+    if [[ ${#PI_REFS[@]} -eq 0 ]]; then
         os::info '一个都没有。拉一个：oneserver podman image pull --image=docker.io/library/nginx:alpine'
         os::output 0 count=0
         return 0
     fi
 
-    local line ref size created
-    local -i n=0
-    local IFS=$'\n'
-    for line in ${list}; do
-        [[ -n ${line} ]] || continue
-        IFS=$'\t' read -r ref size created <<<"${line}"
-        n+=1
-        os::kv "${ref}" "${size} · ${created}"
-        os::output_item "image=${ref}" "size=${size}" "created=${created}"
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#PI_REFS[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${PI_REFS[i]}" "${PI_SIZES[i]}" "${PI_CREATED[i]}")
+        os::output_item "image=${PI_REFS[i]}" "size=${PI_SIZES[i]}" "created=${PI_CREATED[i]}"
     done
-    os::output 0 count="${n}"
+    os::table '编号' '镜像' '大小' '创建于' -- "${cells[@]}"
+    os::output 0 count="${#PI_REFS[@]}"
     return 0
 }
 
@@ -127,9 +174,7 @@ image_in_use() {
 action_rm() {
     require_podman
     local image=''
-    os::ask --arg image '要删哪个镜像' image ''
-    [[ -n ${image} ]] || os::die 2 '要给出镜像：--image=...'
-    [[ ${image} =~ ${IMAGE_RE} ]] || os::die 2 "镜像名「${image}」不合法"
+    select_image image '要删哪个镜像'
 
     local users=''
     image_in_use users "${image}"

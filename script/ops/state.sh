@@ -41,30 +41,76 @@ readonly ANY_INSTANCE_HINT='<'
 
 # ------------------------------------------------------------------
 
-action_list() {
-    local -a ids=()
-    mapfile -t ids < <(os::state_list)
+# 总览表的编号就是当前操作周期的选择符，避免把同一批组件再打印一遍。
+# 与容器清单同一套：清单缓存进数组，总览按它渲染，动作按它把编号翻回组件标识
+# —— 序号与清单同源，才不会出现「看到的 3 号」与「查看的 3 号」不是一个。
+ST_LIST_READY=0
+ST_IDS=()
+ST_VERS=()
+ST_METHODS=()
+ST_RES=()
 
-    os::section '已登记的组件'
-    if [[ ${#ids[@]} -eq 0 ]]; then
-        os::info '一个都没有（本工具还没装过任何组件，或 state 被重置过）'
-        os::output 0 count=0
-        return 0
-    fi
+load_component_rows() {
+    ST_IDS=()
+    ST_VERS=()
+    ST_METHODS=()
+    ST_RES=()
+    ST_LIST_READY=1
 
     local id ver method units files pkgs
-    for id in "${ids[@]}"; do
+    while IFS= read -r id; do
+        [[ -n ${id} ]] || continue
         ver=$(os::state_get "${id}" version)
         method=$(os::state_get "${id}" method)
         units=$(os::state_resources "${id}" unit | grep -c . || true)
         files=$(os::state_resources "${id}" file | grep -c . || true)
         pkgs=$(os::state_resources "${id}" pkg | grep -c . || true)
-        os::kv "${id}" "${ver:-未知}（${method:-未记来源}）· unit ${units} · 文件 ${files} · 包 ${pkgs}"
-        os::output_item "id=${id}" "version=${ver}" "method=${method}" \
-            "units=${units}" "files=${files}" "pkgs=${pkgs}"
+        ST_IDS+=("${id}")
+        ST_VERS+=("${ver:-未知}")
+        ST_METHODS+=("${method:-未记来源}")
+        ST_RES+=("unit ${units} · 文件 ${files} · 包 ${pkgs}")
+    done < <(os::state_list)
+    return 0
+}
+
+# 选一个已登记的组件：编号或完整组件标识都收。
+#
+# **清单没上屏时先列一遍**：`oneserver state show` 从命令行直接跑时总览不会
+# 显示（它只在交互的动作清单里跑），让人对着一个看不见的清单输编号不行。
+select_component() {
+    local __st_out=${1}
+    [[ ${ST_LIST_READY} -eq 1 ]] || action_list
+    [[ ${#ST_IDS[@]} -gt 0 ]] || os::die 2 'state 里一个组件都没有'
+
+    local __st_picked=''
+    os::ask --arg id '要看哪个组件（输入上方编号；命令行可传 --id）' __st_picked
+    if [[ ${__st_picked} =~ ^[0-9]+$ ]]; then
+        local -i __st_sel=$((__st_picked - 1))
+        ((__st_sel >= 0 && __st_sel < ${#ST_IDS[@]})) \
+            || os::die 2 "没有编号为「${__st_picked}」的组件"
+        __st_picked=${ST_IDS[__st_sel]}
+    fi
+    printf -v "${__st_out}" '%s' "${__st_picked}"
+    return 0
+}
+
+action_list() {
+    load_component_rows
+    os::screen_heading '已登记的组件'
+    if [[ ${#ST_IDS[@]} -eq 0 ]]; then
+        os::info '一个都没有：本工具还没装过任何组件，或者 state 被重置过'
+        os::output 0 count=0
+        return 0
+    fi
+
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#ST_IDS[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${ST_IDS[i]}" "${ST_VERS[i]}" "${ST_METHODS[i]}" "${ST_RES[i]}")
+        os::output_item "id=${ST_IDS[i]}" "version=${ST_VERS[i]}" "method=${ST_METHODS[i]}"
     done
-    os::info "共 ${#ids[@]} 个。看某一个的全部资源：oneserver state show ${ids[0]}"
-    os::output 0 count="${#ids[@]}"
+    os::table '编号' '组件' '版本' '来源' '资源' -- "${cells[@]}"
+    os::output 0 count="${#ST_IDS[@]}"
     return 0
 }
 
@@ -74,10 +120,7 @@ action_show() {
     # 而他手上正好没有那份清单 —— 有清单的话他也不用跑这条命令了
     local id=${1-}
     if [[ -z ${id} ]]; then
-        local -a ids=()
-        mapfile -t ids < <(os::state_list)
-        [[ ${#ids[@]} -gt 0 ]] || os::die 2 'state 里一个组件都没有'
-        os::select --required --arg id '要看哪个组件' id "${ids[@]}"
+        select_component id
     fi
     os::state_has "${id}" || os::die 2 "state 里没有「${id}」（oneserver state list 看有哪些）"
 

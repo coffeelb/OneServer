@@ -61,32 +61,82 @@ volume_users() {
 
 # ------------------------------------------------------------------
 
-action_ls() {
-    require_docker
+# 总览表的编号就是当前操作周期的选择符，避免把同一批卷再打印一遍。
+# 与容器清单同一套：列表缓存进数组，总览按它渲染，动作按它把编号翻回卷名 ——
+# 序号与清单同源，才不会出现「看到的 3 号」与「删掉的 3 号」不是一个。
+DV_LIST_READY=0
+DV_NAMES=()
+DV_DRIVERS=()
+DV_MOUNTS=()
+DV_USERS=()
+
+load_volume_rows() {
     os::query --timeout 20 -- docker volume ls --format '{{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
     local list=${OS_RUN_OUTPUT}
 
-    os::section '卷'
-    if [[ -z ${list} ]]; then
-        os::info '一个都没有。建一个：oneserver docker volume create --name=pgdata'
-        os::output 0 count=0
-        return 0
-    fi
+    DV_NAMES=()
+    DV_DRIVERS=()
+    DV_MOUNTS=()
+    DV_USERS=()
+    DV_LIST_READY=1
 
     local line name driver mount users
-    local -i n=0
     local IFS=$'\n'
     for line in ${list}; do
         [[ -n ${line} ]] || continue
         IFS=$'\t' read -r name driver mount <<<"${line}"
         volume_users users "${name}"
-        n+=1
-        os::kv "${name}" "${driver} · ${mount} · 使用中：${users//$'\n'/ }"
-        os::output_item "volume=${name}" "driver=${driver}" "mountpoint=${mount}" \
-            "users=${users//$'\n'/ }"
+        DV_NAMES+=("${name}")
+        DV_DRIVERS+=("${driver}")
+        DV_MOUNTS+=("${mount}")
+        DV_USERS+=("${users//$'\n'/ }")
     done
+    return 0
+}
+
+# 选一个已有的卷：编号或卷名都收。
+#
+# **清单没上屏时先列一遍**：从命令行直接跑时总览不会显示（它只在交互的动作
+# 清单里跑），让人对着一个看不见的清单输编号不行。
+select_volume() {
+    local __dv_out=${1} __dv_prompt=${2}
+    [[ ${DV_LIST_READY} -eq 1 ]] || action_ls
+    [[ ${#DV_NAMES[@]} -gt 0 ]] || os::die 2 '没有卷可选'
+
+    local picked=''
+    os::ask --arg name "${__dv_prompt}（输入上方编号；命令行可传 --name）" picked
+    if [[ ${picked} =~ ^[0-9]+$ ]]; then
+        local -i sel=$((picked - 1))
+        ((sel >= 0 && sel < ${#DV_NAMES[@]})) \
+            || os::die 2 "没有编号为「${picked}」的卷"
+        picked=${DV_NAMES[sel]}
+    fi
+    [[ ${picked} =~ ${NAME_RE} ]] || os::die 2 "卷名「${picked}」不合法"
+    printf -v "${__dv_out}" '%s' "${picked}"
+    return 0
+}
+
+action_ls() {
+    require_docker
+    load_volume_rows
+    os::screen_heading '卷'
+    if [[ ${#DV_NAMES[@]} -eq 0 ]]; then
+        os::info '一个都没有。建一个：oneserver docker volume create --name=pgdata'
+        os::output 0 count=0
+        return 0
+    fi
+
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#DV_NAMES[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${DV_NAMES[i]}" "${DV_DRIVERS[i]}" "${DV_MOUNTS[i]}"
+            "${DV_USERS[i]:-—}")
+        os::output_item "volume=${DV_NAMES[i]}" "driver=${DV_DRIVERS[i]}" \
+            "mountpoint=${DV_MOUNTS[i]}" "users=${DV_USERS[i]}"
+    done
+    os::table '编号' '名称' '驱动' '挂载点' '使用中' -- "${cells[@]}"
     os::info '卷里是数据 —— 删容器不会删卷，要删得单独来这里'
-    os::output 0 count="${n}"
+    os::output 0 count="${#DV_NAMES[@]}"
     return 0
 }
 
@@ -127,9 +177,7 @@ action_create() {
 action_rm() {
     require_docker
     local name=''
-    os::ask --arg name '要删哪个卷' name ''
-    [[ -n ${name} ]] || os::die 2 '要给出卷名字：--name=pgdata'
-    [[ ${name} =~ ${NAME_RE} ]] || os::die 2 "卷名「${name}」不合法"
+    select_volume name '要删哪个卷'
 
     os::query --timeout 10 -- docker volume inspect "${name}" \
         || os::die 2 "没有叫 ${name} 的卷（oneserver docker volume ls 看有哪些）"

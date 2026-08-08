@@ -24,24 +24,37 @@ umask 027
 
 source /opt/oneserver/lib/bootstrap.sh
 
-action_list() {
-    local -a keys=()
-    mapfile -t keys < <(os::secure_list)
+# 总览表的编号就是当前操作周期的选择符，避免把同一批 key 再打印一遍。
+# 与容器清单同一套：清单缓存进数组，总览按它渲染，动作按它把编号翻回 key ——
+# 序号与清单同源，才不会出现「看到的 3 号」与「删掉的 3 号」不是一个。
+SC_LIST_READY=0
+SC_KEYS=()
 
-    os::section '凭据库'
-    if [[ ${#keys[@]} -eq 0 ]]; then
+load_key_rows() {
+    SC_KEYS=()
+    mapfile -t SC_KEYS < <(os::secure_list)
+    SC_LIST_READY=1
+    return 0
+}
+
+action_list() {
+    load_key_rows
+    os::screen_heading '凭据库'
+    if [[ ${#SC_KEYS[@]} -eq 0 ]]; then
         os::info '凭据库是空的'
         os::output 0 count=0
         return 0
     fi
 
-    local key
-    for key in "${keys[@]}"; do
-        os::info "    ${key}"
-        os::output_item key="${key}"
+    local -a cells=()
+    local -i i
+    for ((i = 0; i < ${#SC_KEYS[@]}; i++)); do
+        cells+=("[$((i + 1))]" "${SC_KEYS[i]}")
+        os::output_item key="${SC_KEYS[i]}"
     done
-    os::info "共 ${#keys[@]} 条。看某一条的值：oneserver secure get <key>"
-    os::output 0 count="${#keys[@]}"
+    os::table '编号' '凭据 key' -- "${cells[@]}"
+    os::info "共 ${#SC_KEYS[@]} 条。**只列 key，不列值** —— 看某一条的值走「读取凭据」"
+    os::output 0 count="${#SC_KEYS[@]}"
     return 0
 }
 
@@ -52,14 +65,24 @@ action_list() {
 # 于是选中的值写进了这个局部变量，调用方的 `key` 一个字都没拿到，不报错、
 # 不警告，表现为紧接着的一句「凭据 key「」缺少命名空间」。
 # os::ask 早就因为同一个坑加了 `__os_` 前缀，这里是同一件事的第二现场。
+#
+# 编号或完整 key 都收。**清单没上屏时先列一遍**：`oneserver secure get` 从命令行
+# 直接跑时总览不会显示（它只在交互的动作清单里跑），让人对着一个看不见的清单
+# 输编号不行。
 pick_key() {
     local __sc_out=${1}
-    local -a __sc_keys=()
-    mapfile -t __sc_keys < <(os::secure_list)
-    [[ ${#__sc_keys[@]} -gt 0 ]] || os::die 2 '凭据库是空的'
-    local __sc_key=''
-    os::select --required --arg key '要操作哪条凭据' __sc_key "${__sc_keys[@]}"
-    printf -v "${__sc_out}" '%s' "${__sc_key}"
+    [[ ${SC_LIST_READY} -eq 1 ]] || action_list
+    [[ ${#SC_KEYS[@]} -gt 0 ]] || os::die 2 '凭据库是空的'
+
+    local __sc_picked=''
+    os::ask --arg key '要操作哪条凭据（输入上方编号；命令行可传 --key）' __sc_picked
+    if [[ ${__sc_picked} =~ ^[0-9]+$ ]]; then
+        local -i __sc_sel=$((__sc_picked - 1))
+        ((__sc_sel >= 0 && __sc_sel < ${#SC_KEYS[@]})) \
+            || os::die 2 "没有编号为「${__sc_picked}」的凭据"
+        __sc_picked=${SC_KEYS[__sc_sel]}
+    fi
+    printf -v "${__sc_out}" '%s' "${__sc_picked}"
     return 0
 }
 
