@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>OneServer 面板</title>
 <!-- 内联 SVG 图标：外部文件会多一次请求，而离线报告是单文件、根本没地方放它 -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0d13'/%3E%3Crect x='6' y='8' width='20' height='5' rx='1.5' fill='%2339c5cf'/%3E%3Crect x='6' y='16' width='20' height='5' rx='1.5' fill='%233fb950'/%3E%3Ccircle cx='23' cy='10.5' r='1.4' fill='%230a0d13'/%3E%3Ccircle cx='23' cy='18.5' r='1.4' fill='%230a0d13'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0d13'/%3E%3Crect x='6' y='8' width='20' height='5' rx='1.5' fill='%238b9cf9'/%3E%3Crect x='6' y='16' width='20' height='5' rx='1.5' fill='%233fb950'/%3E%3Ccircle cx='23' cy='10.5' r='1.4' fill='%230a0d13'/%3E%3Ccircle cx='23' cy='18.5' r='1.4' fill='%230a0d13'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg:#0a0d13; --panel:#111620; --panel2:#161c28; --panel3:#1c2331; --border:#232c3b;
   --text:#d7dce5; --dim:#7a8496; --dim2:#565f70;
-  --ok:#3fb950; --warn:#d29922; --err:#f85149; --accent:#39c5cf; --blue:#4493f8;
+  --ok:#3fb950; --warn:#d29922; --err:#f85149; --accent:#8b9cf9; --blue:#6ea8fe;
   --ui:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB",
     "Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
@@ -19,14 +19,14 @@
 :root[data-theme="light"]{
   --bg:#eef1f5; --panel:#fff; --panel2:#f5f7fa; --panel3:#eaeef3; --border:#d8dee6;
   --text:#1b2027; --dim:#5b6572; --dim2:#8892a0;
-  --ok:#18794e; --warn:#8a6100; --err:#c93c37; --accent:#0b7285; --blue:#0b5fbe;
+  --ok:#18794e; --warn:#8a6100; --err:#c93c37; --accent:#4c56c0; --blue:#0b5fbe;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font:15px/1.5 var(--ui);overflow:hidden}
 /* 等宽字体没有中文字形,中文会掉进后备字体、再按等宽的字距排 —— 这正是
    全站等宽时中文看着发虚发散的原因。所以等宽只留给两种内容:
    **要对齐的**(数字、时间戳、日志的固定列)和**要照抄的**(路径、unit 名、命令)。 */
-.num,.mono-l,.fix,.line,.lg .h,.chip .v,.nu b,.rhd .rp,.rhd .rv,#sysmeta b.m{font-family:var(--mono)}
+.num,.mono-l,.fix,.line,.lg .h,.chip .v,.nu b,.rhd .rp,.rhd .rv{font-family:var(--mono)}
 .line .m{font-family:var(--ui)}   /* 日志正文是中文,跟着回 UI 字体 */
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:6px}
@@ -37,13 +37,20 @@ body{background:var(--bg);color:var(--text);font:15px/1.5 var(--ui);overflow:hid
   display:flex;align-items:center;gap:17px;padding:0 14px;position:relative;z-index:30}
 #burger{background:none;border:none;color:var(--dim);font:inherit;font-size:18px;cursor:pointer;padding:2px 7px}
 #burger:hover{color:var(--accent)}
+/* 页头只留身份：这是什么工具、哪个版本、哪台机器。系统/内核/架构/运行时长
+   曾经也挤在这儿，但它们是**读一次就够的静态事实** —— 在容器页排查问题时
+   没人需要内核版本号，而概览的「这台机器是什么」卡把它们连同 CPU、内存、
+   SSH 端口、开机于一起给全了。留在页头只是让同一批字跟着你翻每一页。 */
+.brand{display:flex;align-items:center;gap:7px;color:var(--dim);font-size:13.5px;
+  white-space:nowrap}
+/* 指示灯在 #i-logo 里是 evenodd 挖出来的孔，不是第二种填充色：CSS 选择器进不去
+   <use> 的影子树，而 fill 又是继承属性 —— 想给灯单独上色只能把颜色写死在
+   symbol 里，那样它就不会跟着深浅主题走了。挖孔透出的正是页头底色。 */
+.brand .lg{width:17px;height:17px;flex:0 0 17px;fill:var(--accent)}
+.brand b{font-family:var(--mono);font-weight:500;color:var(--dim2)}
+.brand i,.brand b{font-style:normal}
+.brand i::after,.brand b::after{content:"·";color:var(--dim2);margin-left:7px}
 .host{font-size:17px;font-weight:700;color:var(--accent);white-space:nowrap}
-#sysmeta{color:var(--dim);display:flex;align-items:baseline;gap:9px;overflow:hidden;
-  white-space:nowrap;font-size:13.5px;min-width:0}
-#sysmeta span{display:flex;align-items:baseline;gap:5px;min-width:0}
-#sysmeta span+span::before{content:"·";color:var(--dim2);margin-right:4px}
-#sysmeta i{font-style:normal;color:var(--dim2)}
-#sysmeta b{color:var(--dim);font-weight:500;overflow:hidden;text-overflow:ellipsis}
 .grow{flex:1}
 .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font:inherit;font-size:14px;
   padding:4px 11px;border-radius:6px;cursor:pointer;white-space:nowrap}
@@ -116,7 +123,6 @@ body.collapsed .st{position:absolute;margin-left:26px;margin-top:-14px}
   .nav a{gap:0}
   .ngrp{font-size:0;height:1px;padding:0;margin:7px 9px;background:var(--border)}
   .st{position:absolute;margin-left:26px;margin-top:-14px}
-  #sysmeta{display:none}
 }
 .chead{display:flex;align-items:center;gap:10px;padding:8px 13px;border-bottom:1px solid var(--border);background:var(--panel2)}
 .ctitle{font-weight:700;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
@@ -373,12 +379,17 @@ tr.kindrow .dim2{margin-left:6px}
 <symbol id="i-sec" viewBox="0 0 16 16"><path d="M8 1.8l5.2 2v4.3c0 3.1-2.2 5.2-5.2 6.1-3-.9-5.2-3-5.2-6.1V3.8z"/><path d="M5.9 8.1l1.5 1.5 2.9-3.1"/></symbol>
 <symbol id="i-bk" viewBox="0 0 16 16"><rect x="1.8" y="2.6" width="12.4" height="3.2" rx="1"/><path d="M3.2 5.8v6.6a1 1 0 001 1h7.6a1 1 0 001-1V5.8"/><path d="M6.4 8.6h3.2"/></symbol>
 <symbol id="i-log" viewBox="0 0 16 16"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h6.5"/></symbol>
+<!-- 页头标记：与 <head> 里那个 favicon 同一个母题（两片机架 + 指示灯），但**不带**
+     深色圆角底板 —— 那块底板是给浏览器标签页当托底的，页头本来就有面板底色，
+     再叠一层会变成一个贴在栏上的贴纸。改了这里记得同步改 favicon，反之亦然。 -->
+<symbol id="i-logo" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2.7 3.2H13.3Q14.5 3.2 14.5 4.4V6Q14.5 7.2 13.3 7.2H2.7Q1.5 7.2 1.5 6V4.4Q1.5 3.2 2.7 3.2ZM12.7 5.2A.9.9 0 1 1 10.9 5.2A.9.9 0 1 1 12.7 5.2ZM2.7 8.8H13.3Q14.5 8.8 14.5 10V11.6Q14.5 12.8 13.3 12.8H2.7Q1.5 12.8 1.5 11.6V10Q1.5 8.8 2.7 8.8ZM12.7 10.8A.9.9 0 1 1 10.9 10.8A.9.9 0 1 1 12.7 10.8Z"/></symbol>
 </svg>
 
 <div id="top">
   <button id="burger" title="折叠侧边栏">☰</button>
+  <!-- 每项各自成元素：flex 的 gap 只作用在元素之间，夹在中间的裸文本不算元素 -->
+  <span class="brand"><svg class="lg"><use href="#i-logo"/></svg><i>OneServer</i><b id="ver">—</b></span>
   <span class="host" id="hostname">—</span>
-  <div id="sysmeta"></div>
   <span class="grow"></span>
   <span class="age" id="gage">—</span>
   <button class="btn" id="refreshAll">↻ 刷新全部</button>
@@ -401,7 +412,6 @@ tr.kindrow .dim2{margin-left:6px}
       <a href="#/logs"       data-p="log"  title="日志 — 按 8"><svg class="ic"><use href="#i-log"/></svg><span class="lb">日志</span><span class="st"></span></a>
     </div>
     <div class="sfoot">
-      OneServer <b id="ver">—</b><br>
       <span class="dim2">只读面板 · 无操作</span>
     </div>
   </nav>
@@ -870,7 +880,7 @@ function computeAlerts(){
 
 /* ---------------- 渲染:概览 ---------------- */
 function renderTop(){
-  const s=S.slow.m, f=S.fast.m;
+  const s=S.slow.m;
   // 主机名来自 probe，别写死 —— 写死的话每台机器都自称是同一台，
   // 而多机对照时它是唯一的区分标识
   const host=s['os.hostname']||'（未知主机）';
@@ -880,17 +890,6 @@ function renderTop(){
   $('#ver').textContent=s['oneserver.version']||'—';
   // 标签页标题带上主机名：同时开几台机器的面板时，光看标签就能分清
   document.title=`${host} · OneServer`;
-  // 每项各自成元素。拼成一整串的话 flex 的 gap 只作用在元素之间,夹在中间的
-  // 裸文本不算元素 —— 表现是 `x86_64` 和后面那项黏成 `x86_64运行`
-  // 第三项 mono=要照抄的（内核版本、架构串）,发行版名与运行时长是给人读的散文
-  const meta=[
-    [null, s['os.pretty'], 0],
-    ['内核', s['os.kernel'], 1],
-    [null, s['os.arch'], 1],
-    ['运行', f['uptime.seconds']?dur(f['uptime.seconds']):'', 0],
-  ].filter(([,v])=>v);
-  $('#sysmeta').innerHTML=meta.map(([k,v,m])=>
-    `<span>${k?`<i>${k}</i>`:''}<b class="${m?'m':''}">${esc(v)}</b></span>`).join('');
 }
 /* 结论条 —— 概览页唯一必须一眼看完的东西。
    拉不到数据时必须说清是「拉不到」而不是「一切正常」：一个空面板看起来
