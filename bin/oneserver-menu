@@ -154,6 +154,33 @@ show_panel() {
         menu_row '防火墙' "UFW ${ufw}"
     fi
 
+    # 面板**只在开着时占一行**。它是本工具自带的功能开关，任何机器上都「存在」，
+    # 所以显示一行「未启用」等于给每一台没用它的机器的每一屏加一行永久噪声
+    # —— 同 Podman/Docker 不装就不占行的理由。想知道开没开，进监控组第一项。
+    #
+    # 值回答的是「谁能进」而不只是「开着」：面板监听在网卡上，这和防火墙那行
+    # 是同一类事实。门的形态读 state 里 enable 时存下的 auth/from，**不去解析
+    # Caddy 片段** —— 那是 web.sh 的知识，抄到这里迟早和那边对不上。
+    #
+    # 没有「对所有来源开放」这一档：无密码时门就在 Caddy 配置里（要么绑
+    # 回环，要么 remote_ip 判 403），防火墙放不放行都改不了它。
+    probe::service_enabled 'oneserver-web-fast.timer'
+    if [[ ${OS_PROBE_VALUE} == enabled ]]; then
+        local web_port web_from web_door
+        web_port=$(os::state_get web port '')
+        if [[ $(os::state_get web auth 'yes') == no ]]; then
+            web_from=$(os::state_get web from '')
+            if [[ -n ${web_from} ]]; then
+                web_door="无密码 · 限 ${web_from}"
+            else
+                web_door='无密码 · 仅本机'
+            fi
+        else
+            web_door='密码保护'
+        fi
+        menu_row 'Web 面板' "${web_port:+${web_port} · }${web_door}"
+    fi
+
     # 先问「装没装」再问「跑着几个」：`podman ps | wc -l` 的退出码来自 wc，
     # podman 根本不存在时它照样返回 0 和一个 0，于是没装 podman 的机器上
     # 会多出一行「0 / 0 运行中」
