@@ -4,8 +4,8 @@
 #
 # @command      network
 # @name         网络定位（公网 / 内网）
-# @group        container
-# @order        110
+# @group        security
+# @order        40
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides_unit ext:docker.service

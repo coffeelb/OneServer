@@ -8,7 +8,7 @@
 # @order        10
 # @privilege    root
 # @requires_lib >= 1.26
-# @args         [--action=<status|run|check|rollback>] [--ref=<tag>] [--manifest=<路径|URL>] [--from=<目录|tar.gz>] [--force]
+# @args         [--action=<status|run|check|rollback>] [--ref=<tag>] [--manifest=<路径|URL>] [--from=<目录|tar.gz>] [--force] [--confirm-rollback=<y|n>]
 # @description  按清单更新到新版本，原子切换，自检不过回滚
 #
 
@@ -425,7 +425,10 @@ action_rollback() {
     version_of cur "${OS_VERSION_FILE}"
     version_of old "${OS_ROOT}/.old/VERSION"
     os::warn "将把 OneServer 从 ${cur:-未知} 退回 ${old:-上一版}（只换程序文件，凭据、组件登记与探测快照不动）"
-    os::confirm --arg force '确认回滚？' n || os::die 130 '已取消'
+    # **不复用 --force。** 它在 run 那边的意思是「同一版本也强制重装」，在这里
+    # 却成了「跳过确认」—— 同一条命令下一个开关两个意思，而这两个动作的危险
+    # 程度完全不同：一个是重装当前版本，一个是把整棵程序目录换回上一版
+    os::confirm --arg confirm-rollback '确认回滚？' n || os::die 130 '已取消'
 
     os::run '准备切换器的运行目录' -- mkdir -p "${OS_RUN_DIR}"
     os::run '把切换器复制到运行目录' -- cp -- "${UPDATER_SRC}" "${UPDATER_RUN}"

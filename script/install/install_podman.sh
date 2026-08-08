@@ -252,6 +252,7 @@ main() {
         os::select --arg network-mode '这台机器的容器端口对谁开放？' netmode \
             '公网=公网服务器 —— 端口只绑本机，一律走 Caddy 反代' \
             '内网=内网机器 —— 端口直接对局域网开放'
+        os::info '以后要改：安全菜单里的「网络定位」，或敲 oneserver network'
         if [[ ${netmode} == 内网 ]]; then
             os::warn '内网定位会放开 ufw 的转发策略 —— 等于让本机转发它能路由的一切，不只是容器'
             os::confirm --arg confirm-internal '确认这台机器在可信内网？' n \

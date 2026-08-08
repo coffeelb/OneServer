@@ -9,11 +9,17 @@
 # 防火墙只报一句开没开，装卸启停与规则全归 `oneserver firewall`：同一件事有
 # 两个入口的话，用户得先猜自己要的在哪一边，两边的实现还会各漂各的。
 #
+# **`root-nolock`**：全程只有 probe，一个副作用都没有（§6 允许的那一档）。
+# 要 root 是因为非 root 探测只会得到降级值 —— 把降级值当体检结论比不体检更糟。
+# 不持全局锁是因为体检最该派上用场的时刻，恰恰是别的命令正跑着或刚出过事那会儿，
+# 而持锁会让它以退出码 5 拒绝。代价照 §6 说清：它可能撞上一次正在进行的变更，
+# 于是报出中途状态（装了一半的包、刚停还没启的服务）—— 再跑一次就对了。
+#
 # @command      safe status
 # @name         安全体检
 # @group        security
 # @order        10
-# @privilege    root
+# @privilege    root-nolock
 # @requires_lib >= 1.26
 # @description  一屏看清 SSH、防火墙与更新现状并给出建议
 #
