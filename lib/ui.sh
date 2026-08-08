@@ -1149,8 +1149,10 @@ ui::menu() {
     local nav_text=''
     case ${nav} in
         root) nav_text="编号或命令名直达 · ${OS_UI_SYM_ENTER} 退出" ;;
-        submenu) nav_text="编号或命令名直达 · ${OS_UI_SYM_ENTER} 返回上一层" ;;
-        back) nav_text="${OS_UI_SYM_ENTER} 返回上一层" ;;
+        # 二级往下才提 ^C：主屏回车就是退出，再写一个退出键是噪音；
+        # 而深处那几屏「怎么直接出去」恰恰是问得最多的
+        submenu) nav_text="编号或命令名直达 · ${OS_UI_SYM_ENTER} 返回上一层 · ^C 退出" ;;
+        back) nav_text="${OS_UI_SYM_ENTER} 返回上一层 · ^C 退出" ;;
     esac
     if [[ -n ${nav_text} ]]; then
         ui::_tree_bottom_rule "${fw}" "${fd}"
