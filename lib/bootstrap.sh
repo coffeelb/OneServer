@@ -1169,6 +1169,10 @@ os::action_menu() {
         # 代价是动作返回非零就结束整个命令（回到主菜单），与加这个循环之前一致；
         # 换来的是失败仍然是失败。
         "${__os_am_fn}" "${__os_am_act}"
+        # 走到这里就是上一个动作**成功**了（裸调 + set -e：失败根本回不来）。
+        # 它注册的撤销项到此作废 —— 回滚栈是进程级的，而这个循环让一个进程
+        # 跑好几个动作，不作废的话下一个动作失败会把这一个已经做成的事一起撤掉。
+        os::commit
         [[ ${__os_am_loop} -eq 1 ]] || return 0
 
         ui::prompt "${OS_UI_SYM_ENTER} 返回操作列表" 0
@@ -1719,9 +1723,17 @@ os::__on_exit_hook() {
     # 三个前提缺一不可：`root`（root-nolock 是采集器自己，踢自己没意义；
     # `any` 没有副作用）、非 dry-run（预演零变更，包括不触发别的 unit）、
     # 以及**变更清单非空**——什么都没改的命令去踢一轮，只是白烧两三秒 CPU。
-    # unit 不存在（没启用过面板）时 `--allow-fail` 吃掉，不打扰用户。
+    #
+    # **先探 unit 在不在，别指望 `--allow-fail` 兜底。** 兜底只挡住了屏幕：
+    # systemctl 那句 `Unit oneserver-web-slow.service not found.` 走的是命令自己的
+    # stderr，照样原样落进命令日志。没启用过面板的机器上，每条改动过东西的命令
+    # 都会在日志尾部留下这么一行红字 —— 排查真问题的人（连同它上面那条真失败）
+    # 会先被这句无关的 not found 带偏。
     if [[ ${OS_META_PRIVILEGE} == root && ${OS_DRYRUN} -ne 1 && ${#OS_ERR__CHANGES[@]} -gt 0 ]]; then
-        os::systemd_kick 'oneserver-web-slow.service' || true
+        probe::unit_exists 'oneserver-web-slow.service' 2>/dev/null || true
+        if [[ ${OS_PROBE_VALUE} == yes ]]; then
+            os::systemd_kick 'oneserver-web-slow.service' || true
+        fi
     fi
 
     # **失败路径同样要有信封**（§9：json 时 stdout 只有一个信封对象）。

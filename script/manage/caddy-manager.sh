@@ -103,8 +103,24 @@ caddy_validate() {
         done <"${CADDY_ENV_FILE}"
     fi
 
-    os::query --timeout 60 ${env_args[@]+"${env_args[@]}"} \
+    # --want-stderr：caddy 把整份诊断写在 stderr，stdout 是空的。不要来的话
+    # 「校验未通过」后面跟的是一个空行，用户与日志都拿不到任何线索。
+    os::query --timeout 60 --want-stderr ${env_args[@]+"${env_args[@]}"} \
         -- caddy validate --config "${file}" --adapter caddyfile
+}
+
+# 校验失败时，把 caddy 的原话打出来，并在认得出的失败上补一句出口。
+#
+# 「令牌为空」值得单独认：Caddyfile 里的 `{env.XXX}` 展开不出东西时，caddy 报的是
+# `API token '' appears invalid`，而那不是配置的错 —— 配置一个字都不用改，
+# 该做的是 `oneserver caddy token`。没有这一句，用户会照着报错去翻 Caddyfile。
+caddy_report_invalid() {
+    os::info "${OS_RUN_OUTPUT:-（caddy 没有输出任何诊断信息）}"
+    if [[ ${OS_RUN_OUTPUT} == *"token ''"* || ${OS_RUN_OUTPUT} == *'token "" '* ]]; then
+        os::warn 'DNS 令牌是空的 —— 配置本身没问题，是 Caddy 读不到令牌'
+        os::info '配上它：oneserver caddy token（配完按提示重启，reload 不会重读环境变量）'
+    fi
+    return 0
 }
 
 # 重载前把日志目录交还给 caddy 用户。**这一步没有就等于 reload 会随机失败。**
@@ -137,11 +153,31 @@ caddy_fix_log_owner() {
 # 只报「重载失败」是不够的：失败之后旧进程带着旧配置继续跑，而所有常规检查
 # （systemctl status、oneserver caddy status）都显示正常。不明说这一点，
 # 人会以为新配置已经生效，然后去查一个根本不存在的问题。
+# 重启并确认真的起来了。**重启前同样要交还日志目录属主**：理由与 caddy_reload
+# 一样，只是后果更响 —— reload 是不生效，restart 是根本起不来。
+caddy_restart() {
+    caddy_fix_log_owner
+    os::systemd_restart "${CADDY_UNIT}"
+    probe::service_active "${CADDY_UNIT}"
+    if [[ ${OS_PROBE_VALUE} != active && ${OS_DRYRUN} -ne 1 ]]; then
+        os::query --timeout 10 --want-stderr -- journalctl -u "${CADDY_UNIT}" --no-pager -n 20
+        os::debug "journalctl 尾部：${OS_RUN_OUTPUT}"
+        os::die 1 'Caddy 重启后未能进入 active，日志里有 journalctl 的尾部输出'
+    fi
+    return 0
+}
+
 caddy_reload() {
     caddy_fix_log_owner
     os::systemd_reload "${CADDY_UNIT}" || {
         os::err '重载失败 —— systemd 不会动正在跑的进程，此刻服务里跑的仍是上一份配置'
         os::info "服务状态会显示 active，但那是旧进程。失败原因看：journalctl -u ${CADDY_UNIT} -n 30"
+        # 环境文件在，就得提这一句：**reload 不重读 EnvironmentFile**。
+        # 令牌刚变过的话，校验会通过（新进程读得到文件）而 reload 必然失败，
+        # 两者的差别只在「谁读了那个文件」，从报错里一个字都看不出来。
+        if [[ -f ${CADDY_ENV_FILE} ]]; then
+            os::info "配置里用到 {env.*} 而令牌刚改过的话，要的是重启不是重载：oneserver caddy restart"
+        fi
         return 1
     }
     return 0
@@ -185,7 +221,7 @@ apply_caddyfile() {
 
     if ! caddy_validate "${src}"; then
         os::err '新配置未通过 caddy validate，未做任何替换'
-        os::info "${OS_RUN_OUTPUT}"
+        caddy_report_invalid
         return 1
     fi
     os::ok '新配置校验通过'
@@ -239,7 +275,7 @@ action_validate() {
         return 0
     fi
     os::err '校验未通过'
-    os::info "${OS_RUN_OUTPUT}"
+    caddy_report_invalid
     os::die 1 "${CADDYFILE} 校验未通过"
 }
 
@@ -441,13 +477,7 @@ action_reload() {
 }
 
 action_restart() {
-    os::systemd_restart "${CADDY_UNIT}"
-    probe::service_active "${CADDY_UNIT}"
-    if [[ ${OS_PROBE_VALUE} != active && ${OS_DRYRUN} -ne 1 ]]; then
-        os::query --timeout 10 -- journalctl -u "${CADDY_UNIT}" --no-pager -n 20
-        os::debug "journalctl 尾部：${OS_RUN_OUTPUT}"
-        os::die 1 'Caddy 重启后未能进入 active，日志里有 journalctl 的尾部输出'
-    fi
+    caddy_restart
     os::ok 'Caddy 已重启'
     os::output 0 changed=yes
     return 0
@@ -737,7 +767,22 @@ action_token() {
     fi
 
     os::systemd_daemon_reload
-    os::warn "令牌已就位，但 Caddy 要重启才会读到新的环境：oneserver caddy restart"
+
+    # 文件、state、凭据都已落地，这件事到此做成了 —— 后面那步重启是「让它生效」，
+    # 失败了也不该把令牌撤回去。不提交的话，重启失败会连坐删掉刚写好的环境文件，
+    # 用户重输一遍令牌、再失败一次、再被删一次（K18 就是这么发生的）。
+    os::commit
+
+    # **在这里问，而不是丢一句「记得重启」。** reload 不重读 EnvironmentFile，
+    # 只有重启才会 —— 而这件事的后果要等到下一次换配置时才显形：校验通过
+    # （校验是新进程，读得到文件），reload 却失败，现场是「配置明明是对的却装不上」，
+    # 没人会回想到几步之前那句黄字。默认答是：不重启的话这次配置等于没做完。
+    if os::confirm --arg restart-now '现在重启 Caddy 让令牌生效？' y; then
+        caddy_restart
+        os::ok 'Caddy 已重启，令牌已生效'
+    else
+        os::warn '令牌写下了但还没生效 —— 记得 oneserver caddy restart（reload 不算，它不重读环境变量）'
+    fi
 
     os::kv '提供商' "${provider}" \
         '环境变量' "${env_name}" \

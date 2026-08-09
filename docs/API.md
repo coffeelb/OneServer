@@ -43,6 +43,7 @@
 ## `lib/errors.sh` · L2 基础设施
 
 - `os::defer <命令> [参数...]`
+- `os::commit`
 - `os::record_change <描述>`
 - `os::backup_file <路径>`
 - `os::replace_line [--append-if-missing] [--backup] <文件> <正则> <新行>` —— 按正则整行替换，是否写入见 OS_REPLACE_CHANGED
@@ -54,7 +55,7 @@
 
 - `os::run [--allow-fail] [--env K=V] [--secret-val <值>] [--stdin-secret <值>] [--stdin <文本>] <desc> -- <命令...>` —— 有副作用且不需要 stdout；dry-run 下不执行
 - `os::run_out [选项同 os::run] <desc> -- <命令...>` —— 有副作用且需要 stdout，结果写入 OS_RUN_OUTPUT
-- `os::query [--timeout <秒>] [--env K=V...] [--stdin <文本>] -- <命令...>`
+- `os::query [--timeout <秒>] [--env K=V...] [--stdin <文本>] [--want-stderr] -- <命令...>`
 - `os::retry [--stop-on <码,码>] <次数> [选项同 os::run] <desc> -- <命令...>` —— 指数退避重试；dry-run 下只「跑」一次
 
 ## `lib/lock.sh` · L2 基础设施

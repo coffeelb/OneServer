@@ -399,7 +399,13 @@ os::run_out() {
 # os::query —— 只读
 # ==================================================================
 
-# os::query [--timeout <秒>] [--env K=V...] [--stdin <文本>] -- <命令...>
+# os::query [--timeout <秒>] [--env K=V...] [--stdin <文本>] [--want-stderr] -- <命令...>
+#
+# **`--want-stderr` 把 stderr 一起收进 OS_RUN_OUTPUT。** 默认丢弃是对的：
+# 探测取的是值，`command -v` 之流的噪音混进来只会污染判断。但有一类命令
+# 把**结论**写在 stderr 上 —— `caddy validate` 整份诊断都在那儿，stdout 一个
+# 字节都没有。默认路径下调用方拿到空字符串，于是屏幕上只剩「校验未通过」，
+# 真正的原因（令牌为空、模块没编进去）连日志里都不存在。
 #
 # **不产生审计记录**（只读无需追溯），**dry-run 下照常执行**。
 # 必须有超时：菜单每次进来都要探测，podman 一挂工具就开不了机（K14 / D18）。
@@ -418,11 +424,16 @@ os::query() {
     local -i timeout=${OS_DEFAULT_PROBE_TIMEOUT}
     local -a env_names=() env_values=()
     local stdin='' has_stdin=0
+    local -i want_stderr=0
     while [[ $# -gt 0 ]]; do
         case ${1} in
             --timeout)
                 timeout=${2}
                 shift 2
+                ;;
+            --want-stderr)
+                want_stderr=1
+                shift
                 ;;
             --env)
                 env_names+=("${2%%=*}")
@@ -463,23 +474,33 @@ os::query() {
     local out=''
     # 子 shell 里 export 后执行，不用 `env K=V cmd`：后者把值放进 env 自己的
     # argv，而 ps 对同机任何用户可见 —— 那正是规范要防的（同 D63）
-    if [[ ${has_stdin} -eq 1 ]]; then
-        out=$(
-            local -i i
-            for ((i = 0; i < ${#env_names[@]}; i++)); do
-                export "${env_names[i]}=${env_values[i]}"
-            done
-            printf '%s\n' "${stdin}" | timeout "${timeout}" "$@" 2>/dev/null
-        ) || rc=$?
-    else
-        out=$(
-            local -i i
-            for ((i = 0; i < ${#env_names[@]}; i++)); do
-                export "${env_names[i]}=${env_values[i]}"
-            done
-            timeout "${timeout}" "$@" 2>/dev/null
-        ) || rc=$?
+    #
+    # stderr 的去向在子 shell 第一行用 `exec` 定死，而不是挂在每条命令尾巴上：
+    # 「取不取 stderr」乘上「喂不喂 stdin」本来是四份几乎一样的调用，
+    # 抄错一处就是一条通道悄悄丢输出 —— 今晚丢的正是 caddy validate 的错因。
+    out=$(
+        if ((want_stderr == 1)); then
+            exec 2>&1
+        else
+            exec 2>/dev/null
+        fi
+        local -i i
+        for ((i = 0; i < ${#env_names[@]}; i++)); do
+            export "${env_names[i]}=${env_values[i]}"
+        done
+        if ((has_stdin == 1)); then
+            printf '%s\n' "${stdin}" | timeout "${timeout}" "$@"
+        else
+            timeout "${timeout}" "$@"
+        fi
+    ) || rc=$?
+
+    # 要来的 stderr 是拿去上屏的，脱敏不能省：--env 的值已登记进脱敏表，
+    # 而命令自己也可能把凭据回显在错误信息里（同 exec::_redact_stream 的理由）。
+    if ((want_stderr == 1)) && [[ -n ${out} ]]; then
+        out=$(printf '%s\n' "${out}" | exec::_redact_stream)
     fi
+
     exec::_publish "${rc}" "${out}"
     return "${rc}"
 }

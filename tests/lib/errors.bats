@@ -110,6 +110,56 @@ false
     [[ "${output}" == *'true /var/backups/x.conf /etc/target.conf'* ]]
 }
 
+# --- os::commit ---
+#
+# 这一组守的是一个真实事故：同一个进程里连着做两件事（配 DNS 令牌、换配置），
+# 第二件失败，回滚栈把第一件已经做成的东西一并撤了 —— 用户刚存好的令牌、
+# 环境文件、systemd drop-in 全没了，而屏幕上只说「应用新配置失败」。
+@test "commit: 提交过的撤销项不再被后面的失败连坐回放" {
+    local done_marker="${BATS_TEST_TMPDIR}/committed"
+    local late_marker="${BATS_TEST_TMPDIR}/late"
+    run os_run_script "
+os::defer bash -c 'echo x >> \"${done_marker}\"'
+os::commit
+os::defer bash -c 'echo y >> \"${late_marker}\"'
+false
+"
+    [ "${status}" -ne 0 ]
+    [ ! -f "${done_marker}" ]
+    [ -f "${late_marker}" ]
+}
+
+# 撤销是动作，多做一次是破坏；变更清单是告知，中断时用户想知道的是
+# 这个进程里发生过的全部事情。所以 commit 只作废前者。
+@test "commit: 不清空变更清单" {
+    run os_run_script "
+os::record_change '装了 redis-server'
+os::commit
+false
+"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *'装了 redis-server'* ]]
+}
+
+# 「同一个文件只备份一次」防的是一次执行里落一堆一模一样的副本。可提交之后
+# 下一个动作再改同一个文件时，进程启动时的那份原件已经不是回滚目标了 ——
+# 不清的话第二个动作完全没有备份可还原。
+@test "commit: 清空已备份清单，下一个动作能再备份一次" {
+    local target="${BATS_TEST_TMPDIR}/conf2"
+    printf 'first\n' >"${target}"
+    run os_run_script "
+os::backup_file '${target}'
+printf 'second\n' > '${target}'
+os::commit
+os::backup_file '${target}'
+printf 'third\n' > '${target}'
+false
+"
+    [ "${status}" -ne 0 ]
+    # 回滚还原的是第二个动作开始时的内容，不是进程启动时的
+    [ "$(cat "${target}")" = 'second' ]
+}
+
 @test "record_change: 不注册回滚，只进清单" {
     local marker="${BATS_TEST_TMPDIR}/rc"
     run os_run_script "

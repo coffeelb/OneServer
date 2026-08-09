@@ -352,6 +352,40 @@ setup() {
     [ "${OS_RUN_OUTPUT}" = '1' ]
 }
 
+# --- os::query --want-stderr ---
+
+# 有一类命令把结论写在 stderr 上（caddy validate 整份诊断都在那儿，stdout 是空的）。
+# 默认丢弃时调用方拿到空字符串，屏幕上就只剩「校验未通过」四个字。
+@test "query: --want-stderr 把 stderr 收进 OS_RUN_OUTPUT" {
+    os::query --timeout 5 --want-stderr -- sh -c 'echo 出事了 >&2' || true
+    [[ "${OS_RUN_OUTPUT}" == *'出事了'* ]]
+}
+
+@test "query: 默认不收 stderr（探测取的是值，噪音不该混进来）" {
+    os::query --timeout 5 -- sh -c 'echo 噪音 >&2; printf 干净'
+    [ "${OS_RUN_OUTPUT}" = '干净' ]
+}
+
+@test "query: --want-stderr 下 stdout 与 stderr 都在，退出码照旧" {
+    run os::query --timeout 5 --want-stderr -- sh -c 'echo 上; echo 下 >&2; exit 7'
+    [ "${status}" -eq 7 ]
+    os::query --timeout 5 --want-stderr -- sh -c 'echo 上; echo 下 >&2' || true
+    [[ "${OS_RUN_OUTPUT}" == *'上'* ]]
+    [[ "${OS_RUN_OUTPUT}" == *'下'* ]]
+}
+
+# 这条通道专门用来把命令原话打给用户看，凭据不能跟着一起上屏
+@test "query: --want-stderr 的输出照样脱敏" {
+    os::query --timeout 5 --want-stderr --env 'TOK=want-stderr-secret-1' \
+        -- sh -c 'echo "token is ${TOK}" >&2' || true
+    [[ "${OS_RUN_OUTPUT}" != *'want-stderr-secret-1'* ]]
+}
+
+@test "query: --want-stderr 与 --stdin 并用" {
+    os::query --timeout 5 --want-stderr --stdin 'hello' -- cat
+    [[ "${OS_RUN_OUTPUT}" == *'hello'* ]]
+}
+
 # --- 失败要说得出是什么失败了 ---
 
 # 命令自己的 stdout/stderr 全进了日志，ERR trap 抓到的又是框架的 return，
