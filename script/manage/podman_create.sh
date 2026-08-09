@@ -54,10 +54,11 @@ source /opt/oneserver/lib/bootstrap.sh
 # 于是这里收整条命令，自己翻译成 Quadlet。**不引入 podlet**：它是 GitHub
 # Releases 上的 Rust 二进制，引进来就要背一条免校验下载链（D191）。
 #
-# **但首词必须是 podman**（D223）。这里只读文本、不执行它，所以从前 `docker run`
+# **但首词必须指向 podman**（D223）。这里只读文本、不执行它，所以从前 `docker run`
 # 照样能翻译成 Quadlet —— 代价是两个引擎都装着时，一条本要给 Docker 的命令会
 # 无声无息地变成一个 podman 容器，而 `docker ps` 看不见它。首词是用户唯一
-# 表达过的意图，读得到就不该丢。
+# 表达过的意图，读得到就不该丢。装了 podman-docker 时 `docker` 这个词指的就是
+# podman，照收（见 check_named_engine）。
 #
 # 翻译要守住的三条：
 #
@@ -322,16 +323,27 @@ unknown_flag() {
     return 0
 }
 
-# 首词指名了别的引擎时怎么拒。
+# 首词指名了别的引擎时，是拒还是照收。
+#
+# **装了 podman-docker 时 `docker` 不是别的引擎**：那个包提供的
+# `/usr/bin/docker` 就是 `exec podman "$@"`，此时 `docker run …` 在这台机器上
+# 本来就是一条 podman 命令，用户没有指错引擎，拒掉它等于要求他改写一条照样
+# 跑得通的命令。判据用 probe::container_engine（问「docker 这个命令名由谁
+# 提供」），不是 probe::component_version docker（问的是真 Docker 在不在
+# —— 「podman 接管着」和「什么都没有」在它那里都是空，而这两种情形要给的
+# 下一步完全相反）。
 #
 # **拒绝必须给出下一步**：只说「不接受」的话，用户手上那条命令还是没地方用，
 # 而他多半会回头把首词删掉再粘一次 —— 那就绕过了这道拦截，还什么都没提示。
 # 另一个引擎装着就指路过去，没装就明说改哪个词。
-reject_foreign_engine() {
+check_named_engine() {
     local named=${1}
-    probe::component_version docker
-    if [[ ${named} == docker && -n ${OS_PROBE_VALUE} ]]; then
-        os::die 2 '这是一条 docker 命令，而你正在用 Podman 建容器 —— 照粘会建成 podman 容器，而 docker ps 看不见它。要建 Docker 容器请走「Docker 容器 › 创建容器」（oneserver docker run）；确实要建 podman 容器就把开头的 docker 改成 podman'
+    if [[ ${named} == docker ]]; then
+        probe::container_engine
+        [[ ${OS_PROBE_VALUE} == podman ]] && return 0
+        if [[ -n ${OS_PROBE_VALUE} ]]; then
+            os::die 2 '这是一条 docker 命令，而你正在用 Podman 建容器 —— 照粘会建成 podman 容器，而 docker ps 看不见它。要建 Docker 容器请走「Docker 容器 › 创建容器」（oneserver docker run）；确实要建 podman 容器就把开头的 docker 改成 podman'
+        fi
     fi
     os::die 2 "这是一条 ${named} 命令，而本机没有 ${named}。要用 Podman 建这个容器，把开头的 ${named} 改成 podman 再粘一次，其余参数原样保留"
 }
@@ -353,7 +365,7 @@ parse_run_cmd() {
     # **必须找到 run/create**：找不到就说明粘错了东西（多半是 `podman ps`
     # 或半条命令），此时继续解析只会得出一个像模像样却完全不对的容器。
     #
-    # **首词指名的引擎必须是 podman**，不匹配就拒（见 reject_foreign_engine）。
+    # **首词指名的引擎必须是 podman**，别的交给 check_named_engine 判。
     # 首词是用户唯一表达过的「这条命令给谁」，吃掉它等于把这个意图丢了。
     local named=''
     while ((i < n)); do
@@ -373,7 +385,7 @@ parse_run_cmd() {
     if ((i == 0)) || [[ ${PC_TOKENS[i - 1]} != run && ${PC_TOKENS[i - 1]} != create ]]; then
         os::die 2 '这不像一条 run 命令。要粘的是完整的 podman run … ，不是 podman ps 这类查询命令，也不是半条'
     fi
-    [[ -z ${named} || ${named} == podman ]] || reject_foreign_engine "${named}"
+    [[ -z ${named} || ${named} == podman ]] || check_named_engine "${named}"
 
     while ((i < n)); do
         tok=${PC_TOKENS[i]}
