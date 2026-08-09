@@ -4,7 +4,7 @@
 #
 # @privilege    root-nolock
 # @requires_lib >= 2.1
-# @args         [--tier=<fast|slow|all>]
+# @args         [--tier=<live|fast|slow|all>]
 # @description  把 probe 与 state 落成面板用的数据文件
 #
 
@@ -37,10 +37,19 @@ source /opt/oneserver/lib/bootstrap.sh
 # 实测（别的进程持锁 5 秒时）：本脚本 314ms 跑完，而同期一条普通 root
 # 命令等了 3767ms。取锁的话，用户每十秒就有一次机会撞上这个等待。
 
+readonly TIER_LIVE='probe-live.tsv'
 readonly TIER_FAST='probe-fast.tsv'
 readonly TIER_SLOW='probe-slow.tsv'
 readonly HISTORY_FILE='history.tsv'
 readonly HISTORY_SAMPLES='2880'
+# 历史是 public/ 里**唯一想要跨重启存活**的东西：那条 24 小时曲线的用处正在于
+# 「重启前那段内存是怎么爬上去的」，而 public/ 在 tmpfs 上、重启即空。所以给它
+# 单独留一份盘上的副本，慢档（5 分钟一轮）刷一次、开机时回填。
+#
+# 刷频率跟着慢档而不是快档：跟快档的话每 30 秒重写一次 99 KB，正是搬 tmpfs
+# 要消掉的那笔写入；跟慢档就是十分之一，代价只是最多丢最后 5 分钟的曲线。
+readonly HISTORY_BACKUP="${OS_STATE_DIR}/history.tsv"
+
 readonly ALERT_FILE='alerts.tsv'
 UFW_RULES=''
 
@@ -80,6 +89,53 @@ snap_begin() {
     local now
     printf -v now '%(%s)T' -1
     SNAP="#ts"$'\t'"${now}"$'\n'
+    return 0
+}
+
+# ------------------------------------------------------------------
+# 实时档：只读 /proc，一个进程都不起
+# ------------------------------------------------------------------
+#
+# 分这一档的判据是**成本与意义的组合**，不是拍脑袋的频率表：这几个数用 bash
+# 内建就能读完（实测 300 次 0 ms），而它们恰恰是秒级会变、也值得盯着看的
+# 那几个。反过来，`df` 要起进程而磁盘占用 3 秒变一次没有意义，所以它留在快档；
+# `apt-get -s upgrade` 一次 576 ms 而可升级包数一天变几次都算多，留在慢档。
+#
+# 一轮不到 20 ms，占一个核约 0.6%，树莓派上约 2.4%。**所以它用普通 timer 就够**，
+# 不需要常驻进程——规范 §5 的「命令跑在自己的进程里」与 §11 的「定时一律走
+# timer」都不用动。
+#
+# CPU 使用率在**这里**算好再落盘，不推给前端：它是两个时刻之间的量，而这一档
+# 每 3 秒就有一对相邻样本，算出来的正好是这 3 秒的真实区间值。前端自己存上一份
+# 去差分也行，但那样每个消费者都要实现一遍，而且刷新页面就断档。
+collect_live() {
+    probe::mem_total_kb
+    snap 'mem.total_kb'
+    probe::mem_available_kb
+    snap 'mem.available_kb'
+    probe::uptime_seconds
+    snap 'uptime.seconds'
+    probe::loadavg
+    snap 'load.avg'
+
+    probe::cpu_jiffies
+    local now=${OS_PROBE_VALUE}
+    snap 'cpu.jiffies'
+
+    # 上一轮的累计值在上一份文件里。读不到（开机第一轮、或刚被 tmpfs 清空）
+    # 就不落 cpu.pct —— **宁可这一轮没有这个数，也不编一个**：显示成 0% 恰好
+    # 是「机器很闲」这个具体结论，而那可能与事实相反
+    local prev
+    prev=$(snapshot_value "${OS_PUBLIC_DIR}/${TIER_LIVE}" 'cpu.jiffies')
+    if [[ -n ${prev} && -n ${now} ]]; then
+        local -i pt=${prev%% *} pi=${prev##* } nt=${now%% *} ni=${now##* }
+        local -i dt=$((nt - pt)) di=$((ni - pi))
+        # 计数器回绕或重启后倒退时 dt 会是 0 或负数，此时同样不编数
+        if ((dt > 0 && di >= 0 && di <= dt)); then
+            OS_PROBE_VALUE=$(((dt - di) * 100 / dt))
+            snap 'cpu.pct'
+        fi
+    fi
     return 0
 }
 
@@ -132,25 +188,30 @@ collect_fast() {
 
     # 探哪些 unit 不靠猜，取自 state 登记的清单 —— 这也正是「面板显示的
     # 异常」能有意义的原因：state 说该有，probe 说没有，才是真异常
-    local id unit
+    #
+    # **先收齐名单再一次问完**：逐个 `systemctl is-active` 每次都是一次
+    # fork+exec（实测 3.9 ms），十来个 unit 就是 47 ms，而一次问全部约 4 ms。
+    # 本项目自己的 backup service/timer 不在任何组件的 state 里（backup 是内置
+    # 功能，没有 @provides），一并收进同一批。**service 与 timer 都要探**：
+    # 只探 timer 的话，服务页上那条 service 行的状态列会是空的
+    local id unit u
+    local -a units=()
     while IFS= read -r id; do
         [[ -n ${id} ]] || continue
         while IFS= read -r unit; do
             [[ -n ${unit} ]] || continue
-            local u=${unit#*:}
-            probe::service_active "${u}"
-            snap "unit.${u}.active"
+            units+=("${unit#*:}")
         done < <(os::state_units "${id}")
     done < <(os::state_list)
+    units+=('oneserver-backup' 'oneserver-backup.timer')
 
-    # 本项目自己的 backup timer 不在任何组件的 state 里（backup 是内置功能，
-    # 没有 @provides），得单独探。**service 与 timer 都要探**：只探 timer 的话，
-    # 服务页上那条 service 行的状态列会是空的
-    local t
-    for t in oneserver-backup oneserver-backup.timer; do
-        probe::service_active "${t}"
-        snap "unit.${t}.active"
-    done
+    probe::services_active "${units[@]}"
+    local state_line
+    while IFS=$'\t' read -r u state_line || [[ -n ${u} ]]; do
+        [[ -n ${u} ]] || continue
+        OS_PROBE_VALUE=${state_line}
+        snap "unit.${u}.active"
+    done <<<"${OS_PROBE_VALUE}"
 
     # 不写成 `engine=$(probe::container_engine)`：命令替换是子 shell，探到的值
     # 连同缓存都留在子进程里，这个 key 就永远落不进快照
@@ -189,25 +250,56 @@ collect_fast() {
 
 # 定长历史只保留可用于判断缓慢恶化的标量。把每次快档都追加到普通日志会无限
 # 膨胀；这里在内存中截为固定行数后原子替换，保留窗口稳定且断电不会留下半行。
+#
+# 开机后第一轮：tmpfs 里那份还不存在，从盘上的副本回填 —— 否则每次重启曲线
+# 都从零开始，而重启前后那一段恰恰是最想看的。
 append_history() {
     local -a rows=()
-    local row out=''
-    if [[ -r "${OS_PUBLIC_DIR}/${HISTORY_FILE}" ]]; then
-        mapfile -t rows <"${OS_PUBLIC_DIR}/${HISTORY_FILE}" || true
+    local row out='' src="${OS_PUBLIC_DIR}/${HISTORY_FILE}"
+    [[ -r ${src} ]] || src=${HISTORY_BACKUP}
+    if [[ -r ${src} ]]; then
+        mapfile -t rows <"${src}" || true
     fi
     rows+=("${HISTORY_SAMPLE}")
     local start=0
     [[ ${#rows[@]} -gt ${HISTORY_SAMPLES} ]] && start=$((${#rows[@]} - HISTORY_SAMPLES))
-    # 列数变过就丢弃旧行:格式换了以后,老行的第 6 列是不存在的,拿它做
-    # 差分会算出满屏的假峰值。宁可少一段历史,也不画一段假的。
+
+    # 列数变过就丢弃旧行：格式换了以后，老行的第 6 列是不存在的，拿它做
+    # 差分会算出满屏的假峰值。宁可少一段历史，也不画一段假的。
+    #
+    # **但不必每轮把 2880 行全查一遍**（实测 60 ms，占快档一轮的十分之一）：
+    # 文件是上一轮自己写的，那时每一行都已经过了这道校验。真正没查过的只有
+    # 刚追加的这一行。剩下的风险只有「版本换了、格式跟着变」，而那种情况下
+    # **所有**老行会一起不合格 —— 查第一行就能发现，不用挨个查。
+    # 于是常态是 2 次匹配，只有真撞上格式变更才退回全量筛一遍。
     local num='[0-9]+' tab=$'\t' re
     re="^${num}(${tab}${num}){6}${tab}${num}(\\.${num})?$"
-    for (( ; start < ${#rows[@]}; start++)); do
-        row=${rows[start]}
-        [[ ${row} =~ ${re} ]] || continue
-        out+="${row}"$'\n'
-    done
+
+    local -i last=$((${#rows[@]} - 1))
+    if [[ ! ${rows[last]} =~ ${re} ]]; then
+        # 新采的这行自己不合格：本轮什么都不追加，文件原样留着
+        return 0
+    fi
+    if [[ ${start} -lt ${last} && ! ${rows[start]} =~ ${re} ]]; then
+        for (( ; start < ${#rows[@]}; start++)); do
+            row=${rows[start]}
+            [[ ${row} =~ ${re} ]] || continue
+            out+="${row}"$'\n'
+        done
+    else
+        for (( ; start < ${#rows[@]}; start++)); do
+            out+="${rows[start]}"$'\n'
+        done
+    fi
     os::write_public "${HISTORY_FILE}" "${out}" || true
+    return 0
+}
+
+# 把 tmpfs 里的历史刷一份到盘上，供下次开机回填。内容没变就不写（`os::install_file`
+# 换 inode 的语义与 write_public 一致），机器闲着时它一天也不会动一次
+flush_history() {
+    [[ -r "${OS_PUBLIC_DIR}/${HISTORY_FILE}" ]] || return 0
+    os::install_file --mode 0640 "${OS_PUBLIC_DIR}/${HISTORY_FILE}" "${HISTORY_BACKUP}" || true
     return 0
 }
 
@@ -693,11 +785,17 @@ main() {
     local tier
     os::ask --arg tier '采集哪一档' tier 'all'
     case ${tier} in
-        fast | slow | all) ;;
+        live | fast | slow | all) ;;
         *)
-            os::die 2 "--tier 只能是 fast / slow / all，收到「${tier}」"
+            os::die 2 "--tier 只能是 live / fast / slow / all，收到「${tier}」"
             ;;
     esac
+
+    if [[ ${tier} == live || ${tier} == all ]]; then
+        snap_begin
+        collect_live
+        os::write_public "${TIER_LIVE}" "${SNAP}"
+    fi
 
     if [[ ${tier} == fast || ${tier} == all ]]; then
         snap_begin
@@ -725,9 +823,10 @@ main() {
         os::write_public 'volumes.tsv' "${CONTAINER_VOLUMES}"
         os::write_public "${UPDATES_FILE}" "${CONTAINER_UPDATES}"
         publish_alerts
+        flush_history
     fi
 
-    # 例行成功不进日志。这条命令由 timer 每 10 秒跑一次,「已更新」写进 JSONL
+    # 例行成功不进日志。这条命令由 timer 每 3 到 300 秒跑一次（视档位）,「已更新」写进 JSONL
     # 的唯一效果是把真实事件挤出保留窗口 —— 而且日志一变,publish_log 写出去的
     # 那份副本(200 KB+)就得整份重写,占了这台机器几乎全部的磁盘写入。
     # 人手敲的时候照常给回执:那时没有重复,而沉默的成功分不清跑没跑。

@@ -372,3 +372,38 @@ EOF
     os::systemd_install "${BATS_TEST_TMPDIR}/os-t2.service" own
     grep -q 'Description=b' "${OS_SYSTEMD_UNIT_DIR}/os-t2.service"
 }
+
+# --- kick：提前踢一轮，但目标状态没变 ---
+#
+# 它与 start 的分界是**语义**，不是选项多少：start 说「此后这个服务该是运行着
+# 的」，kick 说「反正有 timer 会跑，我只是希望它现在就跑一次」。所以 kick
+# 不记变更、失败也不让本条命令失败——这两条正是下面两个用例守的东西。
+
+@test "kick: 缺 unit 名时安静返回 0，不去起一条没有名字的 systemctl" {
+    run os::systemd_kick
+    [ "${status}" -eq 0 ]
+}
+
+@test "kick: unit 根本不存在时也返回 0，不打断调用方" {
+    os_have_systemd || skip '没有 systemd'
+    OS_ERR__CHANGES=()
+    run os::systemd_kick 'oneserver-bats-no-such-unit.service'
+    [ "${status}" -eq 0 ]
+}
+
+@test "kick: 不写进变更清单 —— 提前采一轮没有改变任何目标状态" {
+    os_have_systemd || skip '没有 systemd'
+    OS_SYSTEMD_UNIT_DIR='/etc/systemd/system'
+    local src
+    src=$(make_unit 'oneserver-bats-kick.service')
+    os::systemd_install "${src}" own
+
+    OS_ERR__CHANGES=()
+    os::systemd_kick 'oneserver-bats-kick.service'
+    [ "${#OS_ERR__CHANGES[@]}" -eq 0 ]
+
+    systemctl stop 'oneserver-bats-kick.service' 2>/dev/null || true
+    systemctl disable 'oneserver-bats-kick.service' 2>/dev/null || true
+    rm -f '/etc/systemd/system/oneserver-bats-kick.service'
+    systemctl daemon-reload 2>/dev/null || true
+}

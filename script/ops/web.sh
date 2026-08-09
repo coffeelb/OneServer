@@ -9,6 +9,8 @@
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides     web
+# @provides_unit own:oneserver-web-live.service
+# @provides_unit own:oneserver-web-live.timer
 # @provides_unit own:oneserver-web-fast.service
 # @provides_unit own:oneserver-web-fast.timer
 # @provides_unit own:oneserver-web-slow.service
@@ -77,18 +79,18 @@ GUARD_AUTH='yes' # 用密码挡
 GUARD_FROM=''    # 不用密码时允许的来源网段；空＝只允许本机
 
 readonly -a WEB_UNITS=(
+    'oneserver-web-live.timer'
     'oneserver-web-fast.timer'
     'oneserver-web-slow.timer'
 )
 # 采集产物。disable 时要清掉：留着的话，页面没了数据还在，而那份数据
 # 会永远停在被关掉的那一刻——比没有更容易误导人
 readonly -a WEB_FILES=(
-    'index.html'
+    'probe-live.tsv'
     'probe-fast.tsv'
     'probe-slow.tsv'
     'history.tsv'
     'alerts.tsv'
-    'telegram-alerts.tsv'
     'components.tsv'
     'containers.tsv'
     'volumes.tsv'
@@ -100,14 +102,15 @@ readonly -a WEB_FILES=(
 )
 
 # ------------------------------------------------------------------
-# 面板页面是**指向模板的符号链接**，不是模板的副本。
+# 面板页面**由 Caddy 直接从模板目录读**，数据目录里既没有副本也没有链接。
 #
 # 副本会过期：`oneserver update` 整目录换掉 templates/，而副本停在拷过去
-# 那一刻 —— 升级完面板还是旧版，用户没有任何迹象能看出来。为此曾加过一条
-# 「页面与当前版本不一致」的检查，代价是每次升级都要有人记得再跑一次 enable
-# 才能把它消掉。链接把这一串整个删掉：路径不变，指向的文件跟着升级换。
+# 那一刻 —— 升级完面板还是旧版，用户没有任何迹象能看出来。
+# 链接解决了过期，但数据目录搬到 tmpfs 之后它每次重启都会消失，于是又要再找
+# 一个东西在开机时把它补回来。
 #
-# Caddy 跟随符号链接，而模板是 0644、templates/ 是 0755，跑 Caddy 的用户读得到。
+# 直接让 Caddy 指过去，两个问题一起没有：升级换掉模板即刻生效，重启不需要
+# 谁来补。模板是 0644、templates/ 是 0755，跑 Caddy 的用户读得到。
 page_source() {
     local override="${OS_ETC_DIR}/templates/dashboard.html"
     # /etc 下的同名文件优先，与 os::install_template 的覆盖规则一致 —— 两边
@@ -119,20 +122,18 @@ page_source() {
     fi
 }
 
-# 已经指对了就不动：否则每次 enable 都是一次变更，「第二次执行零变更」失效。
-# 上一版留下的**普通文件** index.html 会被 ln -f 直接换掉，不需要迁移代码。
-link_page() {
-    local src dst="${OS_PUBLIC_DIR}/index.html"
+# 页面所在的目录，给 Caddy 的第二个 root 用。页面文件名固定是 dashboard.html，
+# 变的只有它在 /etc 覆盖还是在 templates/ 下
+page_dir() {
+    local src
     src=$(page_source)
-    [[ -f ${src} ]] || os::die 1 "面板页面模板不在：${src}"
+    printf '%s' "${src%/*}"
+}
 
-    if [[ ! -d ${OS_PUBLIC_DIR} ]]; then
-        os::run '创建面板数据目录' -- \
-            mkdir -m "${OS_PUBLIC_DIR_MODE}" "${OS_PUBLIC_DIR}" || return 1
-    fi
-    os::query -- readlink -- "${dst}" || true
-    [[ ${OS_RUN_OUTPUT} == "${src}" ]] && return 0
-    os::run '把面板页面指向当前模板' -- ln -sfn -- "${src}" "${dst}"
+ensure_public_dir() {
+    [[ -d ${OS_PUBLIC_DIR} ]] && return 0
+    os::run '创建面板数据目录' -- \
+        mkdir -m "${OS_PUBLIC_DIR_MODE}" "${OS_PUBLIC_DIR}"
 }
 
 web_enabled() {
@@ -279,7 +280,8 @@ revoke_firewall() {
 
 install_units() {
     local u
-    for u in oneserver-web-fast.service oneserver-web-fast.timer \
+    for u in oneserver-web-live.service oneserver-web-live.timer \
+        oneserver-web-fast.service oneserver-web-fast.timer \
         oneserver-web-slow.service oneserver-web-slow.timer; do
         os::systemd_install "${OS_UNIT_SRC_DIR}/${u}" own || return 1
     done
@@ -316,7 +318,8 @@ write_caddy_snippet() {
         fi
         os::install_template --mode 0644 \
             "${OS_TEMPLATE_DIR}/caddy-dashboard.conf" "${CADDY_SNIPPET}" \
-            "SITE_ADDR=${addr}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" "GUARD=${guard}" || return 1
+            "SITE_ADDR=${addr}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" \
+            "PAGE_DIR=$(page_dir)" "GUARD=${guard}" || return 1
         os::state_resource_add "${COMPONENT}" file "${CADDY_SNIPPET}" || true
         return 0
     fi
@@ -369,6 +372,7 @@ write_caddy_snippet() {
     os::install_template --mode 0644 \
         "${OS_TEMPLATE_DIR}/caddy-dashboard.conf" "${CADDY_SNIPPET}" \
         "SITE_ADDR=:${WEB_PORT}" "PUBLIC_DIR=${OS_PUBLIC_DIR}" \
+        "PAGE_DIR=$(page_dir)" \
         "GUARD=$(printf '\tbasic_auth {\n\t\tadmin %s\n\t}' "${hash}")" || return 1
     os::state_resource_add "${COMPONENT}" file "${CADDY_SNIPPET}" || true
     return 0
@@ -454,7 +458,16 @@ do_enable() {
 
     if web_enabled; then
         install_units || return 1
-        link_page || return 1
+        ensure_public_dir || return 1
+        # **已启用的机器也要把每个 timer 过一遍**，不能因为「面板已经开着」
+        # 就跳过。判据 web_enabled 只看快档那一个 timer —— 新增一档时，
+        # 老机器上 unit 文件装进去了却从来没人 enable 它，现场表现是升级完
+        # 少了一档数据而面板报「已启用，无需变更」。真机上第一次就撞到了。
+        # os::systemd_enable 对已启用的 unit 是幂等的，多跑一遍没有代价。
+        local u
+        for u in "${WEB_UNITS[@]}"; do
+            os::systemd_enable "${u}" --now own || return 1
+        done
         write_caddy_snippet || return 1
         local snippet_changed=${OS_TEMPLATE_CHANGED}
         save_guard
@@ -470,8 +483,7 @@ do_enable() {
 
     install_units || return 1
 
-    link_page || return 1
-    os::state_resource_add "${COMPONENT}" file "${OS_PUBLIC_DIR}/index.html" || true
+    ensure_public_dir || return 1
 
     local u
     for u in "${WEB_UNITS[@]}"; do
@@ -486,7 +498,8 @@ do_enable() {
     # 组件资源清单是空的，面板要等下一轮慢档（最长 5 分钟）才自愈。
     # os::state_unit_add 对重复项是幂等的，退出时再登记一次没有代价。
     local unit
-    for unit in oneserver-web-fast.service oneserver-web-fast.timer \
+    for unit in oneserver-web-live.service oneserver-web-live.timer \
+        oneserver-web-fast.service oneserver-web-fast.timer \
         oneserver-web-slow.service oneserver-web-slow.timer; do
         os::state_unit_add "${COMPONENT}" "own:${unit}" || true
     done
@@ -569,14 +582,13 @@ do_disable() {
     for u in "${WEB_UNITS[@]}"; do
         os::systemd_remove "own:${u}" || true
     done
+    os::systemd_remove 'own:oneserver-web-live.service' || true
     os::systemd_remove 'own:oneserver-web-fast.service' || true
     os::systemd_remove 'own:oneserver-web-slow.service' || true
 
-    # `-L` 不能省：index.html 是符号链接，模板已经没了（卸载途中）时 `-e`
-    # 答否，那条断链就会被留在原地
     local f
     for f in "${WEB_FILES[@]}"; do
-        [[ -e "${OS_PUBLIC_DIR}/${f}" || -L "${OS_PUBLIC_DIR}/${f}" ]] || continue
+        [[ -e "${OS_PUBLIC_DIR}/${f}" ]] || continue
         os::run '移除面板数据文件' -- rm -f -- "${OS_PUBLIC_DIR}/${f}" || true
     done
     if [[ -e ${CADDY_SNIPPET} ]]; then
@@ -606,7 +618,7 @@ print_access() {
         os::box '如何查看（未装 Caddy）' -- \
             '页面与数据已就位，但这台机器上没有 HTTP 服务' \
             "取回：scp -r <这台机器>:${OS_PUBLIC_DIR} ./os-panel" \
-            '本地起任意静态服务再打开 index.html' \
+            '本地起任意静态服务再打开 dashboard.html' \
             '直接双击打不开：浏览器不允许 file:// 页面读同目录的数据文件'
         return 0
     fi
@@ -638,7 +650,7 @@ print_access() {
 #
 # 用途：没装 Caddy（或不想开 HTTP）的机器上，scp 走这**一个文件**双击就能看。
 # 在线模式下页面 fetch 同目录的数据文件，而浏览器不允许 file:// 页面读同目录
-# 文件 —— 所以直接把 public/ 拷回本地双击 index.html 是打不开的，必须内嵌。
+# 文件 —— 所以直接把数据目录拷回本地双击页面是打不开的，必须内嵌。
 #
 # 转义只做两步、且顺序不能反：先 `&` 后 `<`。反过来的话第一步产生的
 # `&lt;` 会被第二步的 `&` 替换二次编码成 `&amp;lt;`，页面上就会显示出实体源码。
@@ -652,7 +664,7 @@ do_report() {
 
     local blocks='' f body
     for f in "${WEB_FILES[@]}"; do
-        [[ ${f} == index.html || ${f} == report.html ]] && continue
+        [[ ${f} == report.html ]] && continue
         [[ -r "${OS_PUBLIC_DIR}/${f}" ]] || continue
         body=$(<"${OS_PUBLIC_DIR}/${f}") || body=''
         body=${body//&/&amp;}
@@ -706,13 +718,13 @@ do_status() {
         os::kv "${u}" "${en} / ${act}${OS_PROBE_VALUE:+ · 下次 ${OS_PROBE_VALUE}}"
     done
 
-    # 页面是指向模板的链接，永远等于当前版本，所以**不问版本、也不报「N 秒前」**
-    # ——后者会让人以为它也在被刷新，于是把一个正常的旧时间戳当成故障。
-    # `-f` 跟随链接：断链答否，正是这里要抓的
-    if [[ -f "${OS_PUBLIC_DIR}/index.html" ]]; then
+    # 页面由 Caddy 直接从模板目录读，永远等于当前版本，所以**不问版本、
+    # 也不报「N 秒前」**——后者会让人以为它也在被刷新，于是把一个正常的旧
+    # 时间戳当成故障。这里只确认那个文件还在
+    if [[ -f "$(page_source)" ]]; then
         os::kv '面板页面' '已就位'
     else
-        os::warn '面板页面缺失或链接已断，跑 oneserver web --action=enable 重建'
+        os::warn '面板页面模板缺失，跑 oneserver web --action=enable 重建'
     fi
 
     # 采集产物分两问：**齐不齐**查全部，**新不新鲜**只看两份档位快照。
@@ -723,14 +735,12 @@ do_status() {
     # 天天误报「采集器没在跑」，而且刷新多少遍也消不掉。两份快照首行是
     # `#ts <epoch>`，每轮必变，才是「采集器还活着」的唯一可信信号。
     #
-    # telegram-alerts.tsv 不算采集产物：它是通知器的告警基线，没配 Telegram
-    # 就永远不存在，报它「缺失」是拿一个没开的功能当故障。
     local f
     local -i total=0
     local -a missing=()
     for f in "${WEB_FILES[@]}"; do
         case ${f} in
-            index.html | report.html | telegram-alerts.tsv) continue ;;
+            report.html) continue ;;
         esac
         total+=1
         [[ -f "${OS_PUBLIC_DIR}/${f}" ]] || missing+=("${f}")
@@ -740,7 +750,7 @@ do_status() {
     # 或采集本身出了问题
     local spec name limit label mtime now age fresh='' lag=''
     printf -v now '%(%s)T' -1
-    for spec in 'probe-fast.tsv 30 快档' 'probe-slow.tsv 900 慢档'; do
+    for spec in 'probe-live.tsv 9 实时档' 'probe-fast.tsv 90 快档' 'probe-slow.tsv 900 慢档'; do
         IFS=' ' read -r name limit label <<<"${spec}"
         [[ -f "${OS_PUBLIC_DIR}/${name}" ]] || continue
         mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${name}" 2>/dev/null || printf '0')

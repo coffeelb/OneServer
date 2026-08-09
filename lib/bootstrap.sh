@@ -1560,7 +1560,11 @@ os::require_cmd() {
 os::__check_privilege() {
     # root-nolock 一样要 root：它探的是 systemctl / ufw / sshd -T，非 root 只会
     # 拿到降级值，再把降级值写进快照比不写更糟。它与 root 的区别只在不取锁。
-    [[ ${OS_META_PRIVILEGE} == root || ${OS_META_PRIVILEGE} == root-nolock ]] || return 0
+    # root-trylock 更是要 root：它有真副作用，只是拿不到锁时不当失败。
+    case ${OS_META_PRIVILEGE} in
+        root | root-nolock | root-trylock) ;;
+        *) return 0 ;;
+    esac
     [[ ${EUID:-$(id -u)} -eq 0 ]] && return 0
     os::die 4 "此命令需要 root 权限"
 }
@@ -1704,6 +1708,22 @@ os::__on_exit_hook() {
         probe::snapshot_flush 2>/dev/null || true
     fi
 
+    # 真的改过东西，就顺手让面板的慢档提前采一轮。
+    #
+    # 面板上那个「刷新」按钮只能重新拉取已落盘的数据，**不能触发服务端探测**
+    # （规范 §1：零服务端逻辑，一个能触发采集的端点就是一条从网络通向 root
+    # 执行的路）。而用户想按刷新的绝大多数场合，是刚在终端里装完组件、建完
+    # 容器，想立刻在页面上看到它。改动发生在这一侧，就由这一侧去踢——这一侧
+    # 本来就有 root，也本来就知道自己改了东西。
+    #
+    # 三个前提缺一不可：`root`（root-nolock 是采集器自己，踢自己没意义；
+    # `any` 没有副作用）、非 dry-run（预演零变更，包括不触发别的 unit）、
+    # 以及**变更清单非空**——什么都没改的命令去踢一轮，只是白烧两三秒 CPU。
+    # unit 不存在（没启用过面板）时 `--allow-fail` 吃掉，不打扰用户。
+    if [[ ${OS_META_PRIVILEGE} == root && ${OS_DRYRUN} -ne 1 && ${#OS_ERR__CHANGES[@]} -gt 0 ]]; then
+        os::systemd_kick 'oneserver-web-slow.service' || true
+    fi
+
     # **失败路径同样要有信封**（§9：json 时 stdout 只有一个信封对象）。
     # os::die 直接 exit，脚本末尾那句 os::output 根本走不到 —— 于是参数错、
     # 依赖缺失、环境不支持这些路径的 stdout 是**空的**，消费者分不清「命令失败了」
@@ -1773,12 +1793,22 @@ os::__boot() {
     os::__check_lib_api
     os::__check_requires
 
-    # 6) 锁。只有 @privilege root 取锁。
+    # 6) 锁。
     #    `any` 不取是因为它没有副作用；`root-nolock` 不取是因为它虽然要 root，
     #    却不改任何被锁保护的东西 —— 而每十秒采一次的定时器若持锁，会随机
     #    挡住用户敲的真实命令。代价是它可能采到变更中途的状态，见 §6。
+    #
+    #    `root-trylock` 有副作用、要锁，但**拿不到就走**：它是周期性的，这一轮
+    #    不做下一轮还会来。以 0 退出而不是 5，因为锁被占是预期内的正常情形
+    #    （用户在菜单里停留时那条命令一直持锁），记成失败的结果是每一轮都往
+    #    日志里写错误——而日志本身是面板要发布的产物（规范 §6）。
     if [[ ${OS_META_PRIVILEGE} == root ]]; then
         os::lock_acquire
+    elif [[ ${OS_META_PRIVILEGE} == root-trylock ]]; then
+        if ! os::lock_acquire --try "${OS_TRYLOCK_WAIT}"; then
+            log::write debug "锁被占，本轮跳过：${OS_META_COMMAND}" framework
+            exit 0
+        fi
     fi
 
     log::write debug "启动完成：${OS_META_COMMAND}（dry-run=${OS_DRYRUN}）" framework

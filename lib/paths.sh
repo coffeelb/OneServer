@@ -36,9 +36,18 @@ OS_STATE_FILE="${OS_STATE_DIR}/components.tsv"
 OS_STATE_BAK="${OS_STATE_FILE}.bak"
 OS_STATE_FILE_MODE='0640'
 
-# 非 root 可读的只读数据（probe 快照等，D44）。是 OS_ROOT 下唯一放宽权限的目录，
+# 非 root 可读的只读数据（probe 快照等，D44）。唯一放宽到 0755 的目录，
 # 因此权限值写在这里，而不是散在写它的模块里。
-OS_PUBLIC_DIR="${OS_ROOT}/public"
+#
+# **在 tmpfs 上，不在 OS_ROOT 下**：这里每一项都是「此刻的快照」，重启之后
+# 上一秒的内存占用、容器状态、监听端口全部作废，采集器几秒内重建。实测面板
+# 每天往盘上写 676 MB，买的全是一个没人需要的持久性。挂在 /run 下而不是自己
+# 挂一个 tmpfs：/run 本来就是 tmpfs，不用新增挂载点，也没有「挂载失败就静默
+# 落到盘上」这种查不出来的退路。
+#
+# 与 /run/oneserver 平级而不是它的子目录：那个是 0750（里面有凭据临时文件），
+# 跑 Caddy 的用户连遍历都进不去。
+OS_PUBLIC_DIR='/run/oneserver-public'
 OS_PUBLIC_DIR_MODE='0755'
 
 # probe 快照：root 跑任何命令时框架顺手落一份，非 root 时读它（D44）。

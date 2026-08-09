@@ -270,3 +270,90 @@ EOF
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'没有持锁者信息'* ]]
 }
+
+# --- --try：锁被占是正常情形，不是失败 ---
+#
+# 这一档存在的理由是实测出来的：通知器每 30 秒跑一次、默认取锁，用户在菜单里
+# 停留时它每轮等满 30 秒再以 5 退出，往 JSONL 写数条错误，而 JSONL 正是面板要
+# 发布的产物 —— 一变就整份重写。所以「拿不到锁」必须能安静地表达。
+
+@test "acquire --try: 没人持锁时照常拿到" {
+    local f="${BATS_TEST_TMPDIR}/try-free.sh"
+    {
+        os_lock_holder_script
+        echo 'os::lock_acquire --try 1 && echo got'
+    } >"${f}"
+    run bash "${f}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *got* ]]
+}
+
+@test "acquire --try: 锁被占时返回 1，不退出、不打印、不写错误日志" {
+    local holder="${BATS_TEST_TMPDIR}/try-holder.sh"
+    {
+        os_lock_holder_script
+        echo 'os::lock_acquire 5'
+        echo 'echo ready'
+        echo 'sleep 30'
+    } >"${holder}"
+
+    bash "${holder}" >"${BATS_TEST_TMPDIR}/try-holder.out" 2>&1 &
+    local hpid=$!
+    local i
+    for ((i = 0; i < 100; i++)); do
+        grep -q ready "${BATS_TEST_TMPDIR}/try-holder.out" 2>/dev/null && break
+        sleep 0.1
+    done
+
+    # 关键：返回 1 之后调用方**还活着**，能自己决定怎么办（这里打印 skipped
+    # 并以 0 退出，正是 bootstrap 对 root-trylock 做的事）
+    local second="${BATS_TEST_TMPDIR}/try-second.sh"
+    {
+        os_lock_holder_script
+        echo 'if os::lock_acquire --try 1; then echo got; else echo skipped; fi'
+        echo 'exit 0'
+    } >"${second}"
+
+    run bash "${second}"
+    kill -TERM "${hpid}" 2>/dev/null || true
+    wait "${hpid}" 2>/dev/null || true
+
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *skipped* ]]
+    [[ "${output}" != *got* ]]
+    # 不得报出持锁者：那是给「真的失败了」用的输出
+    [[ "${output}" != *pid=* ]]
+}
+
+@test "acquire --try: 失败后不留下指向锁文件的描述符" {
+    local holder="${BATS_TEST_TMPDIR}/fd-holder.sh"
+    {
+        os_lock_holder_script
+        echo 'os::lock_acquire 5'
+        echo 'echo ready'
+        echo 'sleep 30'
+    } >"${holder}"
+
+    bash "${holder}" >"${BATS_TEST_TMPDIR}/fd-holder.out" 2>&1 &
+    local hpid=$!
+    local i
+    for ((i = 0; i < 100; i++)); do
+        grep -q ready "${BATS_TEST_TMPDIR}/fd-holder.out" 2>/dev/null && break
+        sleep 0.1
+    done
+
+    # 试锁失败后 fd 必须关掉：留着会被子进程继承，于是「进程都退了锁还被持着」
+    local probe="${BATS_TEST_TMPDIR}/fd-probe.sh"
+    {
+        os_lock_holder_script
+        echo 'os::lock_acquire --try 1 || true'
+        echo 'echo "fd=${OS_LOCK__FD:-none}"'
+    } >"${probe}"
+
+    run bash "${probe}"
+    kill -TERM "${hpid}" 2>/dev/null || true
+    wait "${hpid}" 2>/dev/null || true
+
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *fd=none* ]]
+}

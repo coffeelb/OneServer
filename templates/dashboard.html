@@ -137,8 +137,26 @@ body.collapsed .st{position:absolute;margin-left:26px;margin-top:-14px}
 }
 .chead{display:flex;align-items:center;gap:10px;padding:8px 13px;border-bottom:1px solid var(--border);background:var(--panel2)}
 .ctitle{font-weight:700;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+/* 表格类的卡片把档位标在**列头**上：看表是按列看的，「这一格多久变一次」
+   的答案只有落在列上才对得上。非表格的卡片走标题栏并排两个徽章 */
+.tierrow{flex-wrap:wrap}
+.tierwhat{flex-basis:100%;font-size:11.5px;color:var(--dim2);line-height:1.5;
+  margin:1px 0 2px 0}
+.tiercol{font-size:10.5px;color:var(--dim2);font-weight:400;white-space:nowrap}
 .age{font-size:12.5px;color:var(--dim2);margin-left:auto;white-space:nowrap}
 .age.stale{color:var(--warn)} .age.dead{color:var(--err)}
+/* 一张卡混了两档时并排两个徽章。里面的 .age 不再各自 margin-left:auto，
+   否则两个徽章会被推开、中间那个分隔点落到不知道哪儿去 */
+.agebox{font-size:12.5px;color:var(--dim2);margin-left:auto;white-space:nowrap;
+  display:flex;gap:0;align-items:baseline}
+.agebox .age{margin-left:0}
+/* 点完刷新却什么都没变时的那一句话。做成浮层而不是塞进卡片：它是对这一次
+   点击的回应，不是页面状态的一部分，留在屏幕上反而会被当成一条告警 */
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
+  background:var(--panel3);border:1px solid var(--border);border-radius:8px;
+  padding:9px 16px;font-size:13px;color:var(--text);z-index:99;
+  opacity:0;pointer-events:none;transition:opacity .18s}
+#toast.on{opacity:1}
 .cbody{padding:11px 13px} .cbody.flush{padding:0}
 .scroll{max-height:360px;overflow:auto}
 
@@ -399,7 +417,7 @@ tr.kindrow .dim2{margin-left:6px}
   <span class="host" id="hostname">—</span>
   <span class="grow"></span>
   <span class="age" id="gage">—</span>
-  <button class="btn" id="refreshAll">↻ 刷新全部</button>
+  <button class="btn" id="refreshAll">↻ 重新拉取</button>
   <button class="btn mini" id="themeBtn" title="深浅色">◐</button>
 </div>
 
@@ -433,24 +451,25 @@ tr.kindrow .dim2{margin-left:6px}
           <div class="card">
             <div class="chead"><span class="ctitle">资源</span>
               <span class="dim2" id="resHint"></span>
-              <span class="age" data-tier="fast"></span></div>
+              <span class="age" data-tier="live fast"></span></div>
             <div class="cbody" id="res"></div>
           </div>
           <div class="card">
             <div class="chead"><span class="ctitle">组件健康</span>
               <a href="#/components" class="btn mini" style="text-decoration:none">详情 →</a>
-              <span class="age" data-tier="slow"></span></div>
+              <span class="age" data-tier="fast slow"></span></div>
             <div class="cbody" id="ovComp"></div>
           </div>
         </div>
         <div class="ovside">
           <div class="card">
             <div class="chead"><span class="ctitle">最近异常</span>
-              <a href="#/logs" class="btn mini" style="text-decoration:none;margin-left:auto">全部日志 →</a></div>
+              <a href="#/logs" class="btn mini" style="text-decoration:none;margin-left:auto">全部日志 →</a>
+              <span class="age" data-tier="fast"></span></div>
             <div class="cbody flush" id="ovLog"></div>
           </div>
           <div class="card">
-            <div class="chead"><span class="ctitle">这台机器</span><span class="age" data-tier="slow"></span></div>
+            <div class="chead"><span class="ctitle">这台机器</span><span class="age" data-tier="live slow"></span></div>
             <div class="cbody" id="ovHost"></div>
           </div>
           <div class="card">
@@ -481,11 +500,13 @@ tr.kindrow .dim2{margin-left:6px}
     <section class="page" id="p-svc">
       <div class="grid">
         <div class="card wide">
-          <div class="chead"><span class="ctitle">服务与定时器</span><span class="age" data-tier="fast"></span></div>
+          <div class="chead"><span class="ctitle">服务与定时器</span><span class="age" data-tier="fast slow"></span></div>
           <div class="cbody flush"><table>
             <colgroup><col style="width:38%"><col style="width:21%"><col style="width:23%">
               <col style="width:18%"></colgroup>
-            <thead><tr><th>Unit</th><th>状态</th><th>上次结果</th><th>下次触发</th></tr></thead>
+            <thead><tr><th>Unit</th><th>状态 <span class="tiercol">30秒</span></th>
+              <th>上次结果 <span class="tiercol">5分钟</span></th>
+              <th>下次触发 <span class="tiercol">5分钟</span></th></tr></thead>
             <tbody id="svc"></tbody></table></div>
         </div>
       </div>
@@ -497,7 +518,7 @@ tr.kindrow .dim2{margin-left:6px}
         <div class="card wide">
           <div class="chead"><span class="ctitle">容器</span>
             <span class="dim2">两个引擎各有各的容器存储，分开列</span>
-            <span class="age" data-tier="fast"></span></div>
+            <span class="age" data-tier="fast slow"></span></div>
           <div class="cbody flush" id="ctn"></div>
         </div>
       </div>
@@ -523,11 +544,12 @@ tr.kindrow .dim2{margin-left:6px}
         <div class="card wide">
           <div class="chead"><span class="ctitle">监听端口 · 防火墙对照</span>
             <span class="dim2">端口开着 ≠ 外面进得来</span>
-            <span class="age" data-tier="fast"></span></div>
+            <span class="age" data-tier="fast slow"></span></div>
           <div class="cbody flush"><table>
             <colgroup><col style="width:11%"><col style="width:34%"><col style="width:25%">
               <col style="width:30%"></colgroup>
-            <thead><tr><th>端口</th><th>归属</th><th>外部可达性</th><th>判定依据</th></tr></thead>
+            <thead><tr><th>端口 <span class="tiercol">30秒</span></th><th>归属</th>
+              <th>外部可达性 <span class="tiercol">5分钟</span></th><th>判定依据</th></tr></thead>
             <tbody id="port"></tbody></table></div>
         </div>
         <div class="card w2">
@@ -618,8 +640,13 @@ tr.kindrow .dim2{margin-left:6px}
    数字不动,是采集器还没到下一轮,不是页面坏了(D44)。
    ================================================================== */
 
-const PULL   = { fast:5,  slow:60, live:2 };   // 页面 re-fetch 间隔(秒)
-const COLLECT= { fast:30, slow:300 };          // 服务端采集间隔(秒),用于判定陈旧
+const PULL   = { live:2, fast:5, slow:60, log:2 };   // 页面 re-fetch 间隔(秒)
+// 服务端采集间隔(秒)。三档的分界不是频率表，是**成本与意义的组合**：
+//   live 只读 /proc，零进程，而这几个数秒级会变也值得盯着
+//   fast 要起进程（ss / systemctl / 容器巡检），但都是秒级会变的事
+//   slow 一轮两三秒（apt 模拟升级就占 576ms），而这些东西一天变几次都算多
+const COLLECT= { live:3, fast:30, slow:300 };
+const TIERNAME={ live:'实时档', fast:'快档', slow:'慢档' };
 const ROW_H  = 29;                             // 日志行高,必须等于 CSS 的 --row：虚拟滚动按它算偏移
 const LOG_CAP= 20000;                          // 内存中保留的最大行数
 
@@ -790,10 +817,10 @@ const isEnabled = v => v === 'enabled' || v === 'enabled-runtime';
 const isMissing = v => v === 'not-found' || v === '';
 
 /* ---------------- 状态 ---------------- */
-const SRC={fast:'probe-fast.tsv',slow:'probe-slow.tsv',history:'history.tsv',state:'components.tsv',
+const SRC={live:'probe-live.tsv',fast:'probe-fast.tsv',slow:'probe-slow.tsv',history:'history.tsv',state:'components.tsv',
   containers:'containers.tsv',volumes:'volumes.tsv',updates:'container-updates.tsv',
   firewall:'firewall.tsv',backups:'backups.tsv',log:'oneserver.jsonl'};
-const S={ fast:{ts:0,m:{}}, slow:{ts:0,m:{}}, state:{}, containers:[], volumes:[], updates:{},
+const S={ live:{ts:0,m:{}}, fast:{ts:0,m:{}}, slow:{ts:0,m:{}}, state:{}, containers:[], volumes:[], updates:{},
   firewall:[], backups:[], logs:[], history:[], alerts:[], logOffset:0, err:{} };
 
 /* ---------------- 告警:state 声称的 vs probe 探到的 ----------------
@@ -860,9 +887,9 @@ function computeAlerts(){
   const now=Math.floor(Date.now()/1000);
   // 两档一起停是最常见的情形（timer 是同一次 enable 装上的）。分成两条报,
   // 页面顶上就并排挂着两个说同一件事的红条
-  const stale=[['fast','快档'],['slow','慢档']]
-    .filter(([t])=>S[t].ts && now-S[t].ts>COLLECT[t]*6)
-    .map(([t,n])=>`${n} ${ago(now-S[t].ts)}`);
+  const stale=['live','fast','slow']
+    .filter(t=>S[t].ts && now-S[t].ts>COLLECT[t]*6)
+    .map(t=>`${TIERNAME[t]} ${ago(now-S[t].ts)}`);
   if(stale.length)
     A.push({p:'ov',lv:'err',t:'面板数据已停止更新',
       d:`最后一次落盘：${stale.join(' · ')}`,k:'stale',
@@ -884,6 +911,11 @@ function computeAlerts(){
   A.sort((a,b)=>(a.lv==='err'?0:1)-(b.lv==='err'?0:1));
   S.alerts=A;
 }
+
+/* 实时档与快档有几个同名 key —— 快档也要读它们来记历史曲线。取值一律**优先
+   实时档**：它 3 秒一轮，快档 30 秒。实时档还没落过盘时（刚启用、刚重启）
+   自动回落到快档：宁可显示一个 30 秒前的数，也不显示空白。 */
+function lm(){ return Object.assign({}, S.fast.m, S.live.m); }
 
 /* ---------------- 渲染:概览 ---------------- */
 function renderTop(){
@@ -1011,7 +1043,7 @@ function sparkSvg(series,cls,label){
     <path class="ar" d="${p.area}"/><path class="ln" d="${p.line}"/></svg>`};
 }
 function renderRes(){
-  const f=S.fast.m, s=S.slow.m;
+  const f=lm(), s=S.slow.m;
   // 一行指标。extra 是这个指标特有的旁证（CPU 给负载，内存磁盘给绝对值）
   let drew=false, empty=false;
   // pct=null:这个指标现在算不出来（CPU 在第一个采样点之前就是这样）。
@@ -1048,7 +1080,11 @@ function renderRes(){
           ${lcls?`style="color:var(--${lcls})"`:'class="dim"'}>负载 ${esc(la.join(' / '))}</span>`
         +(cores?` <span class="dim2">· ${cores} 核</span>`:'')
       : (cores?`<span class="dim2">${cores} 核</span>`:'');
-    h+=bar('CPU',cpuPt?Math.round(cpuPt.cpu):null,loadTxt,'cpu','CPU 使用率，最近 24 小时');
+    // 实时档把 CPU% 算好了再落盘（它每 3 秒就有一对相邻样本，算出来正是这
+    // 3 秒的真实区间值）。没有它才回落到历史曲线的差分 —— 那个是 30 秒粒度
+    const livePct = S.live.m['cpu.pct']!==undefined ? +S.live.m['cpu.pct'] : null;
+    const cpuNow = livePct!==null ? livePct : (cpuPt?Math.round(cpuPt.cpu):null);
+    h+=bar('CPU',cpuNow,loadTxt,'cpu','CPU 使用率，最近 24 小时');
   }
   const mt=+f['mem.total_kb']||0, ma=+f['mem.available_kb']||0;
   h+=bar('内存',mt?Math.round((mt-ma)/mt*100):0,
@@ -1104,7 +1140,7 @@ function renderOvLog(){
 /* 这台机器是什么 —— 顶栏那几项在窄屏和长发行版名下会被截掉,而「几核几 G」
    顶栏根本放不下。装机、对照多台机器、贴给别人看的时候要的都是这张卡。 */
 function renderOvHost(){
-  const s=S.slow.m, f=S.fast.m;
+  const s=S.slow.m, f=lm();
   const mt=+f['mem.total_kb']||0, cores=+f['cpu.count']||0;
   const up=+f['uptime.seconds']||0;
   // 开机时刻由「现在 - 已运行」反推,用的是**浏览器**的时钟。服务器时钟对不上时
@@ -1126,20 +1162,30 @@ function renderOvHost(){
 // 采集器自身的状态。放在这里是因为它决定了页面上**其余所有数字**可不可信 ——
 // 一份三小时前的快照和一台刚探完的机器,长得一模一样
 function renderOvCollect(){
-  const tier=(k,name)=>`<div class="cl">
-    <span class="n">${name}</span>
-    <span class="dim2">每 ${k==='fast'?COLLECT.fast+' 秒':COLLECT.slow/60+' 分钟'}</span>
-    <span class="age" data-tier="${k}">—</span></div>`;
+  // 这张卡从前只说「有两个档、各自多久一轮、各自多久前落的盘」，
+  // **没说哪些数据属于哪一档** —— 于是「20 秒前」孤立地不构成信息。
+  // 现在它是一张对照表：每一档管什么，一目了然。
+  const WHAT={
+    live:'CPU · 内存 · 负载 · 运行时长',
+    fast:'磁盘 · 监听端口 · 服务状态 · 容器 · 日志',
+    slow:'组件与版本 · 系统信息 · 安全与更新 · 防火墙 · 备份 · 卷与镜像'
+  };
+  const tier=(k)=>`<div class="cl tierrow">
+    <span class="n">${TIERNAME[k]}</span>
+    <span class="age" data-tier="${k}">—</span>
+    <div class="tierwhat">${WHAT[k]}</div></div>`;
   $('#ovCollect').innerHTML=
     (OFFLINE
       ? `<div class="cl"><span class="n">数据源</span><span class="tag warn">离线快照</span>
          <span class="dim2" style="margin-left:auto">不会自动更新</span></div>`
-      : tier('fast','快档')+tier('slow','慢档'))+
+      : tier('live')+tier('fast')+tier('slow'))+
     `<div class="cl"><span class="n">日志</span>
       <span class="dim num">${S.logs.length} 行</span></div>
     <div class="dim2" style="margin-top:9px;font-size:12px;line-height:1.55">
-      时刻是服务端落盘的那一刻。点刷新数字不动，说明采集器还没到下一轮</div>`;
+      时刻是服务端落盘的那一刻。点「重新拉取」数字不动，说明采集器还没到下一轮 ——
+      面板只读，页面上没有任何按钮能让服务端提前采一次</div>`;
 }
+
 // 组件健康 —— 状态点取自「它登记的 unit 里最坏的那个」。组件是用户心里的
 // 单位（"mariadb 还好吗"），unit 是实现细节。
 //
@@ -1745,7 +1791,7 @@ function closeCtx(){ $('#ctxm').hidden=true; }
 /* ---------------- 拉取 ---------------- */
 async function pull(tier){
   try{
-    if(tier==='live'){
+    if(tier==='log'){
       if(OFFLINE){
         if(!S.logs.length){ S.logs=parseJsonl(EMBED['oneserver.jsonl']||''); syncCmd(); renderLog(); }
         return;
@@ -1767,7 +1813,9 @@ async function pull(tier){
       delete S.err.log;
       return;
     }
-    if(tier==='fast'){
+    if(tier==='live'){
+      S.live=parseTsv(await fetchText(SRC.live));
+    }else if(tier==='fast'){
       S.fast=parseTsv(await fetchText(SRC.fast));
       S.history=parseHistory(await fetchText(SRC.history));
       // 容器清单跟快档走:容器起停是秒级的事
@@ -1800,7 +1848,7 @@ async function pull(tier){
     }
     delete S.err[tier];
   }catch(e){
-    S.err[tier==='live'?'log':tier]=String(e.message||e);
+    S.err[tier]=String(e.message||e);
   }
   computeAlerts();
   renderTop(); renderVerdict(); renderAlerts(); renderRes(); renderOvComp();
@@ -1839,17 +1887,27 @@ function paintAges(){
   // 采集时刻来自服务器时钟，这里减的是浏览器时钟。两边不同步时差值会变成
   // 负数 —— 直接 max(0,…) 兜住的话，一份三天前的数据会稳稳显示成「0 秒前」，
   // 那正是 D44 要禁止的「把旧数据伪装成实时」。宁可说不知道。
-  const skew = Math.min(0, now-(S.fast.ts||now), now-(S.slow.ts||now));
+  const skew = Math.min(0, now-(S.live.ts||now), now-(S.fast.ts||now), now-(S.slow.ts||now));
   const bad = skew < -60;
+  // 徽章上**必须同时有节奏和时刻**。只写「20 秒前」的话，那个数字没有参照系：
+  // 20 秒对实时档是已经落后七轮，对慢档是刚采完。这正是「看不出哪块数据属于
+  // 哪一档」的来源 —— 档位信息一直在 data-tier 里，只是渲染时被丢掉了。
   const stamp = (t)=>{
-    if(bad) return {txt:'时钟不同步', cls:' dead'};
+    const every = COLLECT[t]<60 ? `每 ${COLLECT[t]} 秒` : `每 ${COLLECT[t]/60} 分钟`;
+    if(bad) return {txt:`${every} · 时钟不同步`, cls:' dead'};
     const age=Math.max(0,now-(S[t].ts||0)), lim=COLLECT[t]*2;
-    return {txt:ago(age), cls:(age>lim*2?' dead':age>lim?' stale':'')};
+    return {txt:`${every} · ${ago(age)}`, cls:(age>lim*2?' dead':age>lim?' stale':'')};
   };
   $$('.age[data-tier]').forEach(el=>{
-    const r=stamp(el.dataset.tier);
-    el.textContent=r.txt;
-    el.className='age'+r.cls;
+    const tiers=el.dataset.tier.split(' ');
+    // 一张卡混了两档时并排两个徽章，各带各的节奏与时刻 —— 挑一个档标上去
+    // 等于把另一半数据的刷新频率说错了
+    const parts=tiers.map(t=>{
+      const r=stamp(t);
+      return `<span class="age${r.cls}" title="${TIERNAME[t]}">${TIERNAME[t]} ${r.txt}</span>`;
+    });
+    el.innerHTML=parts.join('<span class="dim2"> · </span>');
+    el.className='agebox';
   });
   const g=$('#gage');
   if(bad){
@@ -1859,10 +1917,12 @@ function paintAges(){
     g.title='数据时刻无法与本机时间对齐，「N 秒前」在这种情况下没有意义';
     return;
   }
-  const age=Math.max(0,now-(S.fast.ts||0));
+  // 顶栏跟最快的那一档走：它是「这个页面还活着吗」的信号，
+  // 拿慢档去答会让一台采集器刚死掉的机器看起来一切正常
+  const age=Math.max(0,now-(S.live.ts||S.fast.ts||0));
   g.textContent=`数据 ${ago(age)}`;
-  g.title='';
-  g.className='age'+(age>COLLECT.fast*6?' dead':age>COLLECT.fast*3?' stale':'');
+  g.title=`实时档每 ${COLLECT.live} 秒 · 快档每 ${COLLECT.fast} 秒 · 慢档每 ${COLLECT.slow/60} 分钟`;
+  g.className='age'+(age>COLLECT.live*10?' dead':age>COLLECT.live*4?' stale':'');
 }
 
 /* ---------------- 路由 ---------------- */
@@ -1878,12 +1938,47 @@ function route(){
 addEventListener('hashchange',route);
 
 /* ---------------- 交互 ---------------- */
+let toastTimer=0;
+function toast(msg){
+  let el=$('#toast');
+  if(!el){ el=document.createElement('div'); el.id='toast'; document.body.appendChild(el); }
+  el.textContent=msg;
+  el.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>el.classList.remove('on'),3200);
+}
+
 function flash(btn,fn){
   const old=btn.innerHTML;
   btn.innerHTML='<span class="spin">↻</span>';
   Promise.resolve(fn()).then(()=>setTimeout(()=>btn.innerHTML=old,240));
 }
-$('#refreshAll').onclick=e=>flash(e.currentTarget,async()=>{await pull('fast');await pull('slow');await pull('live');});
+/* 按钮叫「重新拉取」不叫「刷新全部」：它拉的是采集器**已落盘**的数据，
+   不触发服务端探测。面板零服务端逻辑（规范 §1）—— 一个能触发采集的端点就是
+   一条从网络通向 root 执行的路，只读也一样；附带还有一面：一次采集要跑
+   `apt-get -s upgrade` 与卷的 du，一个开着自动刷新的标签页就能压住机器。
+   叫「刷新全部」是在承诺做不到的事，点了没反应就只能怀疑是页面坏了。
+
+   所以这里做两件事：名字说实话，以及**点完之后告诉他结果**。
+   数据真没变时给一句话，比让人对着不动的数字猜要好得多。 */
+function nextIn(){
+  const now=Math.floor(Date.now()/1000);
+  return ['live','fast','slow'].map(t=>{
+    const left=Math.max(0,COLLECT[t]-(now-(S[t].ts||now)));
+    return `${TIERNAME[t]} ${left} 秒后`;
+  }).join(' · ');
+}
+$('#refreshAll').title='面板只读，这里不会触发服务端采集，只是把采集器已经落盘的数据重新拉一遍';
+$('#refreshAll').onmouseenter=e=>{
+  e.currentTarget.title=`面板只读，这里不会触发服务端采集，只是把已落盘的数据重新拉一遍。
+下一轮：${nextIn()}`;
+};
+$('#refreshAll').onclick=e=>flash(e.currentTarget,async()=>{
+  const before=[S.live.ts,S.fast.ts,S.slow.ts].join();
+  await pull('live'); await pull('fast'); await pull('slow'); await pull('log');
+  const after=[S.live.ts,S.fast.ts,S.slow.ts].join();
+  if(before===after) toast(`数据没有变化 —— 采集器还没到下一轮（${nextIn()}）`);
+});
 $('#burger').onclick=()=>{
   document.body.classList.toggle('collapsed');
   localStorage.setItem('os-collapsed',document.body.classList.contains('collapsed')?'1':'');
@@ -1965,7 +2060,8 @@ if(localStorage.getItem('os-collapsed')) document.body.classList.add('collapsed'
 syncExUi(); syncCmd(); route();
 pull('fast'); pull('slow'); pull('live');
 if(!OFFLINE){
-  setInterval(()=>pull('live'),PULL.live*1000);   // 切页也不停 —— 停了会断档
+  setInterval(()=>pull('log'),PULL.log*1000);     // 切页也不停 —— 停了会断档
+  setInterval(()=>pull('live'),PULL.live*1000);
   setInterval(()=>pull('fast'),PULL.fast*1000);
   setInterval(()=>pull('slow'),PULL.slow*1000);
 }

@@ -1,0 +1,19 @@
+[Unit]
+Description=OneServer 面板实时档采集定时器
+Documentation=https://github.com/qichiyuhub/OneServer
+
+[Timer]
+# 同另外两档：OnUnitActiveSec 从上一轮**结束**算起，因此永远不会重叠，
+# 也不会像 OnCalendar 那样把一堆 unit 挤在同一秒唤醒。
+# OnActiveSec=1 让它在 timer 一被启用时就先采一轮，页面不用空等 3 秒。
+OnActiveSec=1
+OnUnitActiveSec=3
+# 精度给到 1 秒。这一档的意义就是「看起来是实时的」，systemd 默认的
+# AccuracySec=1min 会把 3 秒的节拍整个抹掉
+AccuracySec=1s
+# **不要 Persistent**：错过的那一轮采的是「此刻」，补跑一个过去的「此刻」
+# 只会往快照里写过期数据
+Unit=oneserver-web-live.service
+
+[Install]
+WantedBy=timers.target

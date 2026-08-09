@@ -895,3 +895,110 @@ EOF
     probe::component_version compose-usable
     [ -n "${OS_PROBE_VALUE}" ]
 }
+
+# ==================================================================
+# 零进程读 /proc（probe::_probe_proc）
+# ==================================================================
+#
+# 这条路径存在的理由是实测：同一件事（读一次 /proc/loadavg）三种写法各 300 次，
+# bash 内建 0 ms、子 shell 加 cat 220 ms、再套一层 timeout 510 ms。所以要守住的
+# 不变量有两条 —— **结果必须与从前逐字相同**，以及**真的一个进程都不起**。
+
+@test "_probe_proc: 五个 /proc 读数与外部命令的结果逐字相同" {
+    os_is_root || skip '非 root'
+    local want
+
+    probe::mem_total_kb
+    want=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    [ "${OS_PROBE_VALUE}" = "${want}" ]
+
+    probe::mem_available_kb
+    want=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    # 可用内存每时每刻都在变，比不了逐字，只比形态与量级
+    [[ "${OS_PROBE_VALUE}" =~ ^[0-9]+$ ]]
+    [ "${OS_PROBE_VALUE}" -gt 0 ]
+
+    probe::uptime_seconds
+    # 必须已经截掉小数：/proc/uptime 是 `12345.67 …`，带小数点的话消费者
+    # 拿它做整数运算会直接报错
+    [[ "${OS_PROBE_VALUE}" =~ ^[0-9]+$ ]]
+
+    probe::loadavg
+    want=$(cut -d' ' -f1-3 /proc/loadavg)
+    [ "${OS_PROBE_VALUE}" = "${want}" ]
+
+    probe::cpu_jiffies
+    [[ "${OS_PROBE_VALUE}" =~ ^[0-9]+\ [0-9]+$ ]]
+    local total=${OS_PROBE_VALUE%% *} idle=${OS_PROBE_VALUE##* }
+    [ "${idle}" -le "${total}" ]
+}
+
+@test "_probe_proc: 真的没起子进程" {
+    os_is_root || skip '非 root'
+    # 子进程会让 $BASHPID 之后的 PID 往前跳。起一个进程至少消耗一个 PID，
+    # 而 bash 内建读文件一个都不消耗 —— 连读 20 次前后的 PID 差能证明这件事
+    local before after
+    before=$(bash -c 'echo $BASHPID')
+    local i
+    for ((i = 0; i < 20; i++)); do
+        probe::loadavg
+        probe::mem_total_kb
+    done
+    after=$(bash -c 'echo $BASHPID')
+    # 40 次探测若各起 3 个进程（子 shell + timeout + awk）就是 120 个 PID。
+    # 放宽到 40：容器里别的进程也在消耗 PID，但差不出两个数量级
+    [ "$((after - before))" -lt 40 ]
+}
+
+@test "_probe_proc: 文件读不到时降级为 missing，不留空也不假装成功" {
+    os_is_root || skip '非 root'
+    probe::_probe_proc 'test.absent' /proc/no-such-file-here 'field:1'
+    [ "${OS_PROBE_STATUS}" = missing ]
+    [ -z "${OS_PROBE_VALUE}" ]
+}
+
+@test "_probe_proc: 非 root 且无缓存时明确说不可用（同 _probe 的降级契约）" {
+    os_is_root && skip '这条测的是非 root 分支'
+    probe::mem_total_kb
+    [ "${OS_PROBE_STATUS}" = unavailable ]
+    [ "${OS_PROBE_SOURCE}" = none ]
+}
+
+# ==================================================================
+# 批量 unit 状态（probe::services_active）
+# ==================================================================
+
+@test "services_active: 结果与逐个问一致，且顺序对得上" {
+    os_is_root || skip '非 root'
+    os_have_systemd || skip '没有可用的 systemd'
+
+    probe::services_active 'no-such-a.service' 'no-such-b.service'
+    [ "${OS_PROBE_STATUS}" = ok ]
+
+    local line n=0
+    while IFS=$'\t' read -r u st; do
+        [ -n "${u}" ] || continue
+        n=$((n + 1))
+        [ -n "${st}" ]
+    done <<<"${OS_PROBE_VALUE}"
+    [ "${n}" -eq 2 ]
+
+    # 第一行必须是第一个参数：错位不会报错，只会让面板长期显示错的服务状态
+    line=$(head -n1 <<<"${OS_PROBE_VALUE}")
+    [[ "${line}" == "no-such-a.service"$'\t'* ]]
+}
+
+@test "services_active: 一次问完之后，单个查询不再起进程（走缓存）" {
+    os_is_root || skip '非 root'
+    os_have_systemd || skip '没有可用的 systemd'
+
+    probe::services_active 'no-such-a.service'
+    # 批量查询顺手把每一条按 unit.<名>.active 记进了缓存
+    probe::_from_cache 'unit.no-such-a.service.active'
+    [ -n "${OS_PROBE_VALUE}" ]
+}
+
+@test "services_active: 不给参数时安静返回，不去起一条没有参数的 systemctl" {
+    probe::services_active
+    [ -z "${OS_PROBE_VALUE}" ]
+}

@@ -4,6 +4,15 @@
 #
 # 只由 oneserver-web-fast.service 在采集后调用，不是用户命令。把它注册进菜单
 # 会诱导用户手动运行一个只会等锁、也没有可交互操作的内部步骤。
+#
+# @privilege root-trylock
+#
+# **它有副作用（发通知、写去重基线），所以不能是 `root-nolock`；但它每 30 秒
+# 跑一次，而这一轮做不做都行 —— 告警晚半分钟没有代价。** 从前它是默认的
+# `root`：用户在菜单里停留时，被派发的那条命令一直持锁，于是这里每轮等满 30
+# 秒、超时、以 5 退出，往 JSONL 写数条错误。而 JSONL 正是面板要发布的产物，
+# 一变就得整份重写它的副本 —— 实测「用户正在用工具」因此被放大成每天几百 MB
+# 的磁盘写入和满屏红字。锁被占是预期内的正常情形，不是故障（规范 §6）。
 set -Eeuo pipefail
 IFS=$'\n\t'
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
@@ -13,9 +22,19 @@ umask 027
 source /opt/oneserver/lib/bootstrap.sh
 
 readonly ALERT_FILE="${OS_PUBLIC_DIR}/alerts.tsv"
-readonly STATE_FILE='telegram-alerts.tsv'
+# 去重基线**不放 public/**：那个目录是 tmpfs、里面只放「此刻的快照」（规范
+# §4.2）。这份基线是记录 —— 丢了的话每次重启都会把当前所有告警重发一遍；
+# 它也是通知器的内部账本，本来就不该对本机所有用户公开
+readonly BASELINE="${OS_STATE_DIR}/telegram-alerts.tsv"
+
 readonly TOKEN_KEY='web.telegram_token'
 readonly CHAT_KEY='web.telegram_chat_id'
+
+# 把当前告警存成下一轮的比对基线。0640：它跟 state 同级，不对外
+save_baseline() {
+    os::install_file --mode 0640 "${ALERT_FILE}" "${BASELINE}" || true
+    return 0
+}
 
 has_key() {
     local file=${1} want=${2} key _rest
@@ -31,9 +50,9 @@ main() {
     os::secure_load "${CHAT_KEY}" chat || return 0
     [[ -r ${ALERT_FILE} ]] || return 0
 
-    local old="${OS_PUBLIC_DIR}/${STATE_FILE}" msg='' key _level text
+    local old=${BASELINE} msg='' key _level text
     if [[ ! -r ${old} ]]; then
-        os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+        save_baseline
         return 0
     fi
     while IFS=$'\t' read -r key _level text || [[ -n ${key} ]]; do
@@ -49,7 +68,7 @@ main() {
         fi
     done <"${old}"
     [[ -n ${msg} ]] || {
-        os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+        save_baseline
         return 0
     }
     # os::run_out 没有 --timeout 选项（超时早由 curl 自己的 --max-time 保证，
@@ -67,7 +86,7 @@ main() {
         '发送 Telegram 面板告警' -- \
         curl -fsS --max-time 10 --data-urlencode "chat_id=${chat}" --data-urlencode "text=${msg}" -K - \
         || return 1
-    os::write_public "${STATE_FILE}" "$(<"${ALERT_FILE}")" || true
+    save_baseline
 }
 
 main "$@"

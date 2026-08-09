@@ -1,0 +1,24 @@
+[Unit]
+Description=OneServer 面板实时档采集
+Documentation=file:///opt/oneserver/docs/TECHNICAL_SPEC.md
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/oneserver/script/ops/web_collect.sh --tier=live --non-interactive
+
+# 这一档**只读 /proc**，一个外部进程都不起（probe::_probe_proc 走 bash 内建），
+# 所以硬化可以比另外两档更狠：整个文件系统只读就够，只留数据目录可写。
+# 另外两档做不到 strict 是因为 podman 要访问自己的运行时状态（见 fast 那份的
+# 说明）——这一档根本不碰容器，那条限制不适用。
+ProtectSystem=strict
+ReadWritePaths=/run/oneserver-public
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# 一轮实测不到 20 毫秒。给 10 秒纯粹是兜底，超时就放弃这一轮，下一轮自愈
+TimeoutStartSec=10

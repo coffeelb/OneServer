@@ -59,7 +59,7 @@
 
 ## `lib/lock.sh` · L2 基础设施
 
-- `os::lock_acquire [超时秒]`
+- `os::lock_acquire [--try] [超时秒]`
 - `os::lock_report_holder` —— 打印当前持锁者的 PID、命令与起始时间
 - `os::lock_release` —— 通常用不上（进程退出即释放），留给菜单这类长驻进程
 
@@ -76,6 +76,7 @@
 - `probe::kernel` —— 内核版本
 - `probe::unit_exists <unit>` —— unit 文件是否存在
 - `probe::service_active <unit>` —— 服务是否正在运行
+- `probe::services_active <unit>...` —— 一次问多个 unit 的运行状态
 - `probe::service_enabled <unit>` —— 服务是否开机自启
 - `probe::package_version <包名>` —— 已装包的版本，未装为空
 - `probe::package_installed <包名>` —— 包是否已安装，值为 yes / no
@@ -163,6 +164,7 @@
 - `os::systemd_disable <unit>` —— 禁用开机自启
 - `os::systemd_start <unit> / os::systemd_stop <unit>`
 - `os::systemd_stop <unit>` —— 停止服务
+- `os::systemd_kick <unit>` —— 让一个周期性 unit 提前跑一轮，不等它、不记变更
 - `os::systemd_restart <unit>`
 - `os::systemd_reload <unit>`
 - `os::systemd_remove <own:|ext:><unit>`

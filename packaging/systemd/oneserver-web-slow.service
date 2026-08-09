@@ -22,7 +22,8 @@ ExecStart=/opt/oneserver/script/ops/web_collect.sh --tier=slow --non-interactive
 # 实测（systemd-run 逐项验证）：strict 挂，full 与 PrivateTmp 都没问题。
 # 硬化选项必须挨个实测，照抄模板会把功能悄悄弄坏。
 ProtectSystem=full
-ReadWritePaths=/opt/oneserver/public
+# 数据目录在 tmpfs 上（规范 §4.2）；state 那条是给历史曲线的盘上副本用的
+ReadWritePaths=/run/oneserver-public /opt/oneserver/state
 # **read-only 而不是 yes**：yes 会把 /root 整个藏掉，于是
 # probe::ssh_authkeys 读不到 /root/.ssh/authorized_keys，面板上「root 公钥数」
 # 永远是 0 —— 而那个数字正是「能不能安全地关掉密码登录」的依据，

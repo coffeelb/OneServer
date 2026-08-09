@@ -68,6 +68,12 @@ OS_DEFAULT_RETRY_MAX_WAIT=30
 
 OS_DEFAULT_LOCK_WAIT=30
 
+# `root-trylock` 的等待。**必须是秒级**：这一档的意义就是「拿不到就下一轮再来」，
+# 等满 30 秒与直接失败没有区别，只会把一轮的间隔整个吃掉（周期最短的采集是
+# 3 秒）。给 1 秒而不是 0，是为了不让一次正常的短暂交接（上一条命令正在退出、
+# fd 还没关）被当成「锁被长期占着」。
+OS_TRYLOCK_WAIT=1
+
 # --- 日志 ---
 
 OS_DEFAULT_LOG_LEVEL='info'

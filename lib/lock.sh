@@ -12,7 +12,12 @@
 OS_LOCK_HELD=0
 OS_LOCK__FD=''
 
-# os::lock_acquire [超时秒]
+# os::lock_acquire [--try] [超时秒]
+#
+# `--try`：取不到锁**返回 1**，不打印、不写错误日志、不退出。给 `root-trylock`
+# 用（规范 §6）——那类命令是周期性的，锁被占是预期内的正常情形，把它记成失败
+# 会让「用户正在菜单里操作」变成每一轮一条错误日志。没有 `--try` 时行为不变：
+# 取不到锁就报告持锁者并以 5 终止。
 #
 # 取不到锁以退出码 5 终止，并提示持锁的 PID / 命令 / 起始时间 ——
 # 「另一个实例正在运行」而不告诉是哪个，用户除了等没有别的办法。
@@ -29,6 +34,11 @@ OS_LOCK__FD=''
 # 立刻并发去动 dpkg —— 正是这把锁要防的事。只有「持锁进程连同它的子进程都没了」
 # 才会自动接管。测试里两种情形都锁住了。
 os::lock_acquire() {
+    local -i try=0
+    if [[ ${1-} == --try ]]; then
+        try=1
+        shift
+    fi
     local -i timeout=${1:-${OS_DEFAULT_LOCK_WAIT}}
 
     if [[ ${OS_LOCK_HELD} -eq 1 ]]; then
@@ -57,6 +67,13 @@ os::lock_acquire() {
     fi
 
     if ! flock -w "${timeout}" "${OS_LOCK__FD}" 2>/dev/null; then
+        if [[ ${try} -eq 1 ]]; then
+            # fd 要关掉：调用方多半会继续跑（或退出），留着一个指向锁文件的
+            # 描述符会被子进程继承，而那正是「进程都退了锁还被持着」的成因
+            exec {OS_LOCK__FD}>&-
+            OS_LOCK__FD=''
+            return 1
+        fi
         os::lock_report_holder
         log::exit_code error "获取锁失败，等待 ${timeout} 秒超时" 5
         exit 5
