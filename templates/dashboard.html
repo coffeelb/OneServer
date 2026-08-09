@@ -143,6 +143,8 @@ body.collapsed .st{position:absolute;margin-left:26px;margin-top:-14px}
 .tierwhat{flex-basis:100%;font-size:11.5px;color:var(--dim2);line-height:1.5;
   margin:1px 0 2px 0}
 .tiercol{font-size:10.5px;color:var(--dim2);font-weight:400;white-space:nowrap}
+/* 顶栏的已运行时长：比主机名弱一档，别跟它抢注意力 */
+.uptime{font-size:12.5px;color:var(--dim);white-space:nowrap}
 .age{font-size:12.5px;color:var(--dim2);margin-left:auto;white-space:nowrap}
 .age.stale{color:var(--warn)} .age.dead{color:var(--err)}
 /* 一张卡混了两档时并排两个徽章。里面的 .age 不再各自 margin-left:auto，
@@ -415,6 +417,10 @@ tr.kindrow .dim2{margin-left:6px}
   <!-- 每项各自成元素：flex 的 gap 只作用在元素之间，夹在中间的裸文本不算元素 -->
   <span class="brand"><svg class="logomark" viewBox="6 8 20 13" aria-hidden="true"><rect x="6" y="8" width="20" height="5" rx="1.5" class="b1"/><rect x="6" y="16" width="20" height="5" rx="1.5" class="b2"/><circle cx="23" cy="10.5" r="1.4" class="d"/><circle cx="23" cy="18.5" r="1.4" class="d"/></svg><i>OneServer</i><b id="ver">—</b></span>
   <span class="host" id="hostname">—</span>
+  <!-- 已运行时长紧跟主机名：它是「这台机器上次什么时候重启的」最直接的答案，
+       而那正是排查时第一个要确认的事（意外重启过没有）。原来只在概览的
+       「这台机器」卡里有，切到别的页就看不见了 -->
+  <span class="uptime" id="uptime"></span>
   <span class="grow"></span>
   <span class="age" id="gage">—</span>
   <button class="btn" id="refreshAll">↻ 重新拉取</button>
@@ -504,9 +510,9 @@ tr.kindrow .dim2{margin-left:6px}
           <div class="cbody flush"><table>
             <colgroup><col style="width:38%"><col style="width:21%"><col style="width:23%">
               <col style="width:18%"></colgroup>
-            <thead><tr><th>Unit</th><th>状态 <span class="tiercol">30秒</span></th>
-              <th>上次结果 <span class="tiercol">5分钟</span></th>
-              <th>下次触发 <span class="tiercol">5分钟</span></th></tr></thead>
+            <thead><tr><th>Unit</th><th>状态 <span class="tiercol">每30秒</span></th>
+              <th>上次结果 <span class="tiercol">每5分钟</span></th>
+              <th>下次触发 <span class="tiercol">每5分钟</span></th></tr></thead>
             <tbody id="svc"></tbody></table></div>
         </div>
       </div>
@@ -548,8 +554,8 @@ tr.kindrow .dim2{margin-left:6px}
           <div class="cbody flush"><table>
             <colgroup><col style="width:11%"><col style="width:34%"><col style="width:25%">
               <col style="width:30%"></colgroup>
-            <thead><tr><th>端口 <span class="tiercol">30秒</span></th><th>归属</th>
-              <th>外部可达性 <span class="tiercol">5分钟</span></th><th>判定依据</th></tr></thead>
+            <thead><tr><th>端口 <span class="tiercol">每30秒</span></th><th>归属</th>
+              <th>外部可达性 <span class="tiercol">每5分钟</span></th><th>判定依据</th></tr></thead>
             <tbody id="port"></tbody></table></div>
         </div>
         <div class="card w2">
@@ -646,7 +652,9 @@ const PULL   = { live:2, fast:5, slow:60, log:2 };   // 页面 re-fetch 间隔(�
 //   fast 要起进程（ss / systemctl / 容器巡检），但都是秒级会变的事
 //   slow 一轮两三秒（apt 模拟升级就占 576ms），而这些东西一天变几次都算多
 const COLLECT= { live:10, fast:30, slow:300 };
-const TIERNAME={ live:'实时档', fast:'快档', slow:'慢档' };
+// 「实时档 / 快档 / 慢档」是实现内部的叫法，对着用户说没有意义 —— 他要知道的
+// 只有一件事：**这块数字多久变一次**。所以界面上一律只出现节奏本身。
+const every=(t)=>COLLECT[t]<60?`每 ${COLLECT[t]} 秒`:`每 ${COLLECT[t]/60} 分钟`;
 const ROW_H  = 29;                             // 日志行高,必须等于 CSS 的 --row：虚拟滚动按它算偏移
 const LOG_CAP= 20000;                          // 内存中保留的最大行数
 
@@ -889,7 +897,7 @@ function computeAlerts(){
   // 页面顶上就并排挂着两个说同一件事的红条
   const stale=['live','fast','slow']
     .filter(t=>S[t].ts && now-S[t].ts>COLLECT[t]*6)
-    .map(t=>`${TIERNAME[t]} ${ago(now-S[t].ts)}`);
+    .map(t=>`${every(t)}更新的那部分 ${ago(now-S[t].ts)}`);
   if(stale.length)
     A.push({p:'ov',lv:'err',t:'面板数据已停止更新',
       d:`最后一次落盘：${stale.join(' · ')}`,k:'stale',
@@ -913,13 +921,13 @@ function computeAlerts(){
 }
 
 /* 实时档与快档有几个同名 key —— 快档也要读它们来记历史曲线。取值一律**优先
-   实时档**：它 3 秒一轮，快档 30 秒。实时档还没落过盘时（刚启用、刚重启）
+   实时档**：它 10 秒一轮，快档 30 秒。实时档还没落过盘时（刚启用、刚重启）
    自动回落到快档：宁可显示一个 30 秒前的数，也不显示空白。 */
 function lm(){ return Object.assign({}, S.fast.m, S.live.m); }
 
 /* ---------------- 渲染:概览 ---------------- */
 function renderTop(){
-  const s=S.slow.m;
+  const s=S.slow.m, f=lm();
   // 主机名来自 probe，别写死 —— 写死的话每台机器都自称是同一台，
   // 而多机对照时它是唯一的区分标识
   const host=s['os.hostname']||'（未知主机）';
@@ -927,6 +935,13 @@ function renderTop(){
   // 版本从采集数据取,不写死在模板里 —— 写死的话它显示的是「打包这份 HTML 那天
   // 的版本」,而页面本身正是升级时会被换掉的东西
   $('#ver').textContent=s['oneserver.version']||'—';
+  // 已运行时长取自最快的那一档，所以它是跟着走的。探不到就整个不显示，
+  // 不留一个空的「已运行」标签 —— 那会让人以为是刚重启过
+  const up=+f['uptime.seconds']||0;
+  const el=$('#uptime');
+  el.textContent = up ? `已运行 ${dur(up)}` : '';
+  el.title = up ? '从上次开机到现在' : '';
+
   // 标签页标题带上主机名：同时开几台机器的面板时，光看标签就能分清
   document.title=`${host} · OneServer`;
 }
@@ -1080,8 +1095,8 @@ function renderRes(){
           ${lcls?`style="color:var(--${lcls})"`:'class="dim"'}>负载 ${esc(la.join(' / '))}</span>`
         +(cores?` <span class="dim2">· ${cores} 核</span>`:'')
       : (cores?`<span class="dim2">${cores} 核</span>`:'');
-    // 实时档把 CPU% 算好了再落盘（它每 3 秒就有一对相邻样本，算出来正是这
-    // 3 秒的真实区间值）。没有它才回落到历史曲线的差分 —— 那个是 30 秒粒度
+    // 实时档把 CPU% 算好了再落盘（它每一轮就有一对相邻样本，算出来正是这
+    // 一轮的真实区间值）。没有它才回落到历史曲线的差分 —— 那个是 30 秒粒度
     const livePct = S.live.m['cpu.pct']!==undefined ? +S.live.m['cpu.pct'] : null;
     const cpuNow = livePct!==null ? livePct : (cpuPt?Math.round(cpuPt.cpu):null);
     h+=bar('CPU',cpuNow,loadTxt,'cpu','CPU 使用率，最近 24 小时');
@@ -1171,7 +1186,7 @@ function renderOvCollect(){
     slow:'组件与版本 · 系统信息 · 安全与更新 · 防火墙 · 备份 · 卷与镜像'
   };
   const tier=(k)=>`<div class="cl tierrow">
-    <span class="n">${TIERNAME[k]}</span>
+    <span class="n">${every(k)}</span>
     <span class="age" data-tier="${k}">—</span>
     <div class="tierwhat">${WHAT[k]}</div></div>`;
   $('#ovCollect').innerHTML=
@@ -1893,10 +1908,9 @@ function paintAges(){
   // 20 秒对实时档是已经落后七轮，对慢档是刚采完。这正是「看不出哪块数据属于
   // 哪一档」的来源 —— 档位信息一直在 data-tier 里，只是渲染时被丢掉了。
   const stamp = (t)=>{
-    const every = COLLECT[t]<60 ? `每 ${COLLECT[t]} 秒` : `每 ${COLLECT[t]/60} 分钟`;
-    if(bad) return {txt:`${every} · 时钟不同步`, cls:' dead'};
+    if(bad) return {txt:`${every(t)}更新 · 时钟不同步`, cls:' dead'};
     const age=Math.max(0,now-(S[t].ts||0)), lim=COLLECT[t]*2;
-    return {txt:`${every} · ${ago(age)}`, cls:(age>lim*2?' dead':age>lim?' stale':'')};
+    return {txt:`${every(t)}更新 · ${ago(age)}`, cls:(age>lim*2?' dead':age>lim?' stale':'')};
   };
   $$('.age[data-tier]').forEach(el=>{
     const tiers=el.dataset.tier.split(' ');
@@ -1904,7 +1918,7 @@ function paintAges(){
     // 等于把另一半数据的刷新频率说错了
     const parts=tiers.map(t=>{
       const r=stamp(t);
-      return `<span class="age${r.cls}" title="${TIERNAME[t]}">${TIERNAME[t]} ${r.txt}</span>`;
+      return `<span class="age${r.cls}" title="这部分数据${every(t)}重新采集一次">${r.txt}</span>`;
     });
     el.innerHTML=parts.join('<span class="dim2"> · </span>');
     el.className='agebox';
@@ -1921,7 +1935,7 @@ function paintAges(){
   // 拿慢档去答会让一台采集器刚死掉的机器看起来一切正常
   const age=Math.max(0,now-(S.live.ts||S.fast.ts||0));
   g.textContent=`数据 ${ago(age)}`;
-  g.title=`实时档每 ${COLLECT.live} 秒 · 快档每 ${COLLECT.fast} 秒 · 慢档每 ${COLLECT.slow/60} 分钟`;
+  g.title=`页面上的数据分三种节奏：${every('live')} · ${every('fast')} · ${every('slow')}`;
   g.className='age'+(age>COLLECT.live*10?' dead':age>COLLECT.live*4?' stale':'');
 }
 
@@ -1965,8 +1979,8 @@ function nextIn(){
   const now=Math.floor(Date.now()/1000);
   return ['live','fast','slow'].map(t=>{
     const left=Math.max(0,COLLECT[t]-(now-(S[t].ts||now)));
-    return `${TIERNAME[t]} ${left} 秒后`;
-  }).join(' · ');
+    return `${every(t)}更新的 ${left} 秒后`;
+  }).join('，');
 }
 $('#refreshAll').title='面板只读，这里不会触发服务端采集，只是把采集器已经落盘的数据重新拉一遍';
 $('#refreshAll').onmouseenter=e=>{

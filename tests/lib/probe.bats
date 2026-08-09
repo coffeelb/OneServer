@@ -988,14 +988,26 @@ EOF
     [[ "${line}" == "no-such-a.service"$'\t'* ]]
 }
 
-@test "services_active: 一次问完之后，单个查询不再起进程（走缓存）" {
+# 批量结果要能按**单个 unit 的 key** 落进快照，否则非 root 的消费者（面板、
+# doctor）拿到的是一个它不认识的 `unit.active.batch`，而不是它要的那几条。
+@test "services_active: 每条按 unit.<名>.active 记进探测结果表" {
     os_is_root || skip '非 root'
     os_have_systemd || skip '没有可用的 systemd'
 
-    probe::services_active 'no-such-a.service'
-    # 批量查询顺手把每一条按 unit.<名>.active 记进了缓存
-    probe::_from_cache 'unit.no-such-a.service.active'
-    [ -n "${OS_PROBE_VALUE}" ]
+    OS_PROBE__KEYS=()
+    OS_PROBE__VALS=()
+    probe::services_active 'no-such-a.service' 'no-such-b.service'
+
+    local found=0 i
+    for ((i = 0; i < ${#OS_PROBE__KEYS[@]}; i++)); do
+        case "${OS_PROBE__KEYS[i]}" in
+            unit.no-such-a.service.active | unit.no-such-b.service.active)
+                found=$((found + 1))
+                [ -n "${OS_PROBE__VALS[i]}" ]
+                ;;
+        esac
+    done
+    [ "${found}" -eq 2 ]
 }
 
 @test "services_active: 不给参数时安静返回，不去起一条没有参数的 systemctl" {

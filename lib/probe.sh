@@ -470,8 +470,13 @@ probe::service_active() {
 # probe::services_active <unit>...   一次问多个 unit 的运行状态
 #
 # 结果一行一个 `unit<TAB>状态`，顺序与传入一致；同时把每一条按
-# `unit.<名>.active` 写进缓存，所以随后对其中任何一个调
-# `probe::service_active` 都不会再起一次进程。
+# `unit.<名>.active` 记进本进程的探测结果表，于是它们会跟着 `snapshot_flush`
+# 一起落进快照，**非 root 的消费者照样能按单个 unit 的 key 读到**。
+#
+# **但这不会让同进程里随后的 `probe::service_active` 少起一次进程**：root 路径
+# 每次都真探（`probe::_probe` 只在非 root 时读缓存）。想省进程就直接用这个批量
+# 结果，别指望它给单个查询加速——写这句是因为我第一版注释正好写反了，而配套的
+# 测试也跟着写错，直到容器里跑起来才暴露。
 #
 # **为什么要有它**：`systemctl is-active` 每次调用都是一次 fork+exec，实测约
 # 3.9 ms。面板的快档要问 state 里登记的每一个 unit，十来个就是 47 ms —— 而
