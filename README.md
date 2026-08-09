@@ -50,7 +50,7 @@ Podman 需 4.4 或更高版本：Debian 13、Ubuntu 24.04 及更新版本可直�
 | 数据库 | MariaDB 数据库与账号管理 |
 | 容器 | Docker、Podman、Compose 项目、镜像、容器、数据卷 |
 | 安全 | 安全体检、UFW 防火墙、SSH 加固、系统更新与自动安全更新、网络定位、凭据库 |
-| 备份 | 备份管理、恢复管理，支持 rclone 远端 |
+| 备份 | 备份管理、恢复管理，支持 rclone 远端与外部备份导入 |
 | 监控 | 只读 Web 面板、系统诊断、组件状态、操作日志 |
 | 应用 | Caddy、PHP-FPM、MariaDB、Valkey、Node.js、Docker、Podman 的安装与卸载 |
 | 工具箱 | 脚本更新、空间清理、主题预览 |

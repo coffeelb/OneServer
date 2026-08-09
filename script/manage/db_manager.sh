@@ -453,10 +453,13 @@ action_restore() {
     # 经 `sh -c` 表达。用户给的任意路径进 `sh -c` 就是一条注入面，
     # 而把它限死成「DB_DUMP_DIR 里、由本工具按固定格式命名的那些文件」之后，
     # 进命令行的每一个字符都是本脚本自己造的（规范禁 eval 的同一条思路）。
-    # 代价是不能恢复别处的 dump —— 那种需求应当先把文件放进备份目录。
+    # 代价是不能恢复别处的 dump —— 外来转储走
+    # `oneserver restore --from=external --target=db:<库名>`，那条路自带清单审查
+    # 与库级语句预扫描，不该在这里再开一个口子。
     local base=${file##*/}
     if [[ ${base} != "${file}" ]]; then
-        os::die 2 "--file 只接受文件名，不接受路径。本工具的备份都在 ${DB_DUMP_DIR}/"
+        os::err "--file 只接受文件名，不接受路径。本工具的备份都在 ${DB_DUMP_DIR}/"
+        os::die 2 "别处来的转储用：oneserver restore --from=external --target=db:<库名>"
     fi
     if [[ ! ${base} =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]; then
         os::die 2 "认不出的备份文件名：${base}（应形如 <库名>-20260803-120000.sql.gz）"

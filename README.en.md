@@ -50,7 +50,7 @@ Podman must be 4.4 or newer. Debian 13 and Ubuntu 24.04 (and later) ship a suita
 | Databases | MariaDB databases and accounts |
 | Containers | Docker, Podman, Compose projects, images, containers, volumes |
 | Security | Security audit, UFW, SSH hardening, system and unattended updates, network detection, secret store |
-| Backups | Backup and restore, with rclone remotes |
+| Backups | Backup and restore, with rclone remotes and external-backup import |
 | Monitoring | Read-only dashboard, diagnostics, component status, activity log |
 | Apps | Install and remove Caddy, PHP-FPM, MariaDB, Valkey, Node.js, Docker, Podman |
 | Tools | Self-update, disk cleanup, theme preview |
