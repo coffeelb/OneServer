@@ -264,6 +264,9 @@ verify_archive() {
     local file=${1}
     if [[ ! -f ${file}.sha256 ]]; then
         os::err "缺少校验文件：${file}.sha256"
+        os::info '本工具生成的归档旁边一定有一份同名 .sha256，从别处拷过来时要两个文件一起拷。'
+        os::info '如果这本来就是别处（宝塔 / cPanel / 手工打包）来的备份，那条路是：'
+        os::info '  oneserver restore --from=external'
         return 1
     fi
     # 两条都没有管道，直接走 argv——file 经参数传给 awk/sha256sum 而不是拼进
@@ -648,6 +651,13 @@ ex_split_source() {
                 }
                 EX_SRC_SQL=${item}
                 continue
+                ;;
+            # 明摆着是转储、只是压缩格式不认识。不落到下面的「当单个文件处理」——
+            # 那会把一个 .sql.bz2 原样拷进站点目录，报成功，而库一个字节没变
+            *.sql.*)
+                os::err "转储只支持 .sql 与 .sql.gz，收到 ${item##*/}"
+                os::info '先解开再导入，例如：bunzip2 / unxz / unzstd / 7z x'
+                return 1
                 ;;
         esac
         [[ -z ${EX_SRC_FILES} ]] || {
@@ -1083,6 +1093,82 @@ sql_scan() {
     return 0
 }
 
+# ex_read_prefix <wp-config 路径>   读出 $table_prefix，读不到就打印空串
+ex_read_prefix() {
+    local line
+    while IFS= read -r line; do
+        [[ ${line} =~ \$table_prefix[[:space:]]*=[[:space:]]*[\'\"]([A-Za-z0-9_]+)[\'\"] ]] || continue
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+    done <"${1}"
+    return 0
+}
+
+# ex_check_prefix <wp-config 路径> <库名>
+#
+# **导入之后最容易撞、又最看不出原因的一件事。**
+#
+# 外来站点的表前缀常常不是 `wp_`。三种组合会撞上：只灌了库而文件是本机的、
+# 来源包里没有 wp-config 于是沿用了本机那份、有人手工换过 wp-config。
+# 撞上之后 WordPress 连得上库、却一张表都认不出 —— 表现是**跳回安装向导**。
+# 用户看到的是「导入成功了，然后站点要我重新安装一遍」，几乎不可能想到是前缀。
+#
+# 所以这里主动核对，并且把库里真实存在的前缀列出来：只说一句「对不上」
+# 等于把问题原样丢回给用户。
+ex_check_prefix() {
+    local conf=${1} db=${2}
+    [[ -f ${conf} ]] || return 0
+    local prefix
+    prefix=$(ex_read_prefix "${conf}")
+    [[ -n ${prefix} ]] || return 0
+
+    # 一次查完：既判断有没有 `<前缀>options`，也拿到库里实际的前缀。
+    # LIKE 用 `%options` 而不是 `<前缀>options` —— 后者里的 `_` 在 LIKE 里
+    # 是通配符，`wp_options` 会连 `wpXoptions` 一起匹上，白白放过真正的不匹配。
+    os::sql_query '核对站点表前缀' -- \
+        "SHOW TABLES FROM $(os::sql_ident "${db}") LIKE '%options'" || return 0
+    local t found='' others=''
+    while IFS= read -r t; do
+        [[ -n ${t} ]] || continue
+        if [[ ${t} == "${prefix}options" ]]; then
+            found=1
+            break
+        fi
+        others+="  库里实际有 ${t}（前缀是 ${t%options}）"$'\n'
+    done <<<"${OS_RUN_OUTPUT}"
+    [[ -z ${found} ]] || return 0
+
+    os::warn "站点配置里的表前缀是「${prefix}」，但库 ${db} 里没有 ${prefix}options 这张表"
+    if [[ -n ${others} ]]; then
+        while IFS= read -r t; do
+            [[ -n ${t} ]] && os::info "${t}"
+        done <<<"${others}"
+        os::info "改法：编辑 ${conf}，把 \$table_prefix 改成上面那个前缀，再刷新站点"
+    else
+        os::info "库 ${db} 里连一张 %options 表都没有 —— 这份转储可能不是 WordPress 的，或者没真正导进去"
+    fi
+    os::warn '不处理的话，打开站点会是 WordPress 的安装向导，而不是你的站'
+    return 0
+}
+
+# post_restore_hints <站点类型> <站点目录>   恢复/导入完之后该看哪几项
+#
+# **不自动重启服务、不自动清缓存**：PHP-FPM 上跑着的可能不止这一个站，
+# 替用户重启一个正在服务别人的进程不是本命令该做的决定。只把该看的列出来。
+post_restore_hints() {
+    local site_type=${1}
+    [[ ${site_type} == wordpress ]] || return 0
+    os::section '接下来自己检查这几项'
+    os::info '1. 用浏览器打开站点，别只看这里报的成功'
+    os::info '2. 打开后是 WordPress 安装向导 → 表前缀对不上，照上面的提示改 wp-config.php'
+    os::info '3. 白屏或 500 → journalctl -u caddy -n 50，以及对应的 php*-fpm 服务日志；'
+    os::info '   老站点跑在比本机更旧的 PHP 上时也会白屏，先确认版本对不对得上'
+    os::info '4. 图片、样式丢失 → 库里还留着旧域名。WP-CLI：wp search-replace 旧地址 新地址 --all-tables --precise'
+    os::info '5. 域名还没指到这台机器 → oneserver caddy'
+    os::info '6. 全部确认正常之后再清理恢复前副本，不要提前删'
+    return 0
+}
+
 # set_site_url <wp-config 路径> <库名> <新地址>
 #
 # siteurl / home 存在 `<前缀>options` 两行里。**表前缀不写死 `wp_`** ——
@@ -1095,14 +1181,11 @@ set_site_url() {
         os::err "找不到 ${conf}，读不出表前缀，siteurl / home 未改动"
         return 1
     }
-    local line prefix=''
-    while IFS= read -r line; do
-        [[ ${line} =~ \$table_prefix[[:space:]]*=[[:space:]]*[\'\"]([A-Za-z0-9_]+)[\'\"] ]] || continue
-        prefix=${BASH_REMATCH[1]}
-        break
-    done <"${conf}"
+    local prefix
+    prefix=$(ex_read_prefix "${conf}")
     if [[ -z ${prefix} ]]; then
-        os::err "从 ${conf} 里读不出合法的表前缀，siteurl / home 未改动"
+        os::err "从 ${conf} 里读不出 \$table_prefix，siteurl / home 未改动"
+        os::info '手工改：登录数据库，UPDATE <前缀>options SET option_value=... WHERE option_name IN ('"'"'siteurl'"'"','"'"'home'"'"')'
         return 1
     fi
 
@@ -1356,6 +1439,12 @@ ex_preview() {
     [[ -n ${EX_DEST_DB} ]] && kv+=('落点数据库' "${EX_DEST_DB}")
     os::kv "${kv[@]}"
 
+    # 路径打错一个字母就会静静地建出一个新目录，导入「成功」而站点纹丝不动。
+    # 在确认之前把这件事说出来，是唯一能拦住它的时机。
+    if [[ -n ${EX_DEST_DIR} && ! -e ${EX_DEST_DIR} ]]; then
+        os::warn "落点 ${EX_DEST_DIR} 当前不存在，导入时会新建它 —— 路径没写错吧？"
+    fi
+
     if [[ -n ${EX_SRC_FILES} && ${EX_KIND} != file ]]; then
         local m rel tops='' prefix=''
         local -i n=0
@@ -1413,11 +1502,22 @@ import_external() {
     [[ -z ${EX_SRC_FILES} || -n ${EX_DEST_DIR} ]] \
         || os::die 2 "落点 ${target} 只有数据库，文件来源无处可放"
 
-    if [[ -n ${EX_SRC_FILES} && ${EX_KIND} != file ]]; then
-        local subdir=''
-        os::ask --arg subdir '只取来源里的这个子路径（留空 = 自动定位站点根）' subdir ''
+    # 单个文件落到一个已经存在的目录上：现有做法会把整个目录挪进 pre-restore、
+    # 再放一个文件进去，而用户十有八九想的是「放进这个目录里」。
+    # **这种破坏性歧义不猜**，让他把话说全。
+    if [[ ${EX_KIND} == 'file' && -d ${EX_DEST_DIR} ]]; then
+        os::err "落点 ${EX_DEST_DIR} 是一个已存在的目录，而来源是单个文件"
+        os::die 2 "把落点写成完整的目标文件路径，例如：--target=path:${EX_DEST_DIR}/${EX_SRC_FILES##*/}"
+    fi
+
+    if [[ -n ${EX_SRC_FILES} && ${EX_KIND} != 'file' ]]; then
+        # 先把来源读出来、审查完，再问子路径 —— 反过来的话，一个根本读不开的
+        # 压缩包会让用户先白答一道题
         ex_read_members || os::die 1 '读不出来源清单，未做任何改动'
         ex_audit_members || os::die 1 '来源清单未通过审查，未做任何改动'
+        local subdir=''
+        os::ask --arg subdir \
+            '来源里哪一层是要导入的内容？（多数情况直接回车，让它自己找）' subdir ''
         ex_locate_root "${subdir}" || os::die 2 '定位不出要导入的内容，未做任何改动'
         ex_check_space || os::die 1 '空间不够，未做任何改动'
     fi
@@ -1480,8 +1580,14 @@ import_external() {
         os::die 1 "导入未完成。覆盖前的副本在 ${RS_PRE_DIR}"
     fi
 
+    # 灌过库的站点一律核对前缀。**这一步不能因为「导入成功了」就省掉** ——
+    # 前缀对不上时前面每一步都会报成功，只有打开站点才看得出来
+    [[ -z ${EX_SITE_TYPE} || -z ${EX_SRC_SQL} ]] \
+        || ex_check_prefix "${EX_DEST_DIR}/wp-config.php" "${EX_DEST_DB}"
+
     os::ok "导入完成：${target}"
     os::info "覆盖前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
+    post_restore_hints "${EX_SITE_TYPE}"
     os::output 0 target="${target}" source="${EX_SRC_FILES:-${EX_SRC_SQL}}" changed=yes
     return 0
 }
@@ -1586,18 +1692,31 @@ main() {
     fi
 
     # --- 5. 选模式 ---
+    #
+    # **选项按这份归档里真有什么来给。** 原来三个选项固定摆着，而一份只有库的
+    # 归档选「仅文件」的下场是当场报错退出 —— 把一个工具自己知道不成立的选择
+    # 摆到人面前，等他选错再纠正他。
+    local -a modes=()
+    [[ -n ${RS_MF_DB} && -n ${RS_MF_ROOT} ]] && modes+=('all=数据库与文件')
+    [[ -n ${RS_MF_DB} ]] && modes+=('db=仅数据库')
+    [[ -n ${RS_MF_ROOT} ]] && modes+=('files=仅文件')
+    [[ ${#modes[@]} -gt 0 ]] || os::die 3 '这份归档里既没有数据库也没有文件，内容不完整'
+    [[ ${#modes[@]} -gt 1 ]] || os::info '这份归档里只有一种内容，下面这一项是唯一选择'
+
     local mode=''
-    os::select --arg mode '恢复什么' mode 'all=数据库与文件' 'db=仅数据库' 'files=仅文件'
-    case ${mode} in
-        all | db | files) ;;
-        *) os::die 2 "--mode 只能是 all / db / files，收到「${mode}」" ;;
-    esac
-    [[ ${mode} == db && -z ${RS_MF_DB} ]] && os::die 2 '这份归档里没有数据库'
-    [[ ${mode} == files && -z ${RS_MF_ROOT} ]] && os::die 2 '这份归档里没有文件'
+    # os::select 天然只收清单里的值：填错原地重问，命令行给错的值以 2 停下。
+    # 因此这里不需要再补一遍「mode 是不是合法」的判断。
+    os::select --arg mode '恢复什么' mode "${modes[@]}"
 
     local only=''
     if [[ ${mode} != db ]]; then
         os::ask --arg only '只恢复归档内的某个子路径（留空 = 整份，例：wp-content/uploads）' only ''
+    fi
+    # 库整份回到备份那一刻、文件只回一段，两边讲的就不是同一个时间点的事了。
+    # 典型后果：文章在库里存在，附件却还是现在这份（或者反过来）。
+    if [[ ${mode} == all && -n ${only} ]]; then
+        os::warn "数据库会整份恢复，而文件只恢复 ${only} 这一段 —— 两边可能对不上"
+        os::info '只想回滚一部分文件、不动数据库的话，选「仅文件」（--mode=files）'
     fi
 
     # --- 6. 确认。覆盖是不可逆的，走规范那一套 ---
@@ -1644,8 +1763,14 @@ main() {
         os::die 1 "恢复未完成。恢复前副本在 ${RS_PRE_DIR}"
     fi
 
+    # 库来自归档、而文件这次没恢复（--mode=db）时，站点目录里的 wp-config
+    # 仍是本机的那份，它的表前缀未必与归档里的库对得上
+    [[ ${mode} != db || -z ${RS_MF_SITE_TYPE} || -z ${RS_MF_SOURCE} ]] \
+        || ex_check_prefix "${RS_MF_SOURCE}/wp-config.php" "${RS_MF_DB}"
+
     os::ok "恢复完成：${target}（${mode}）"
     os::info "恢复前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
+    post_restore_hints "${RS_MF_SITE_TYPE}"
     os::output 0 target="${target}" mode="${mode}" archive="${file}" changed=yes
     return 0
 }

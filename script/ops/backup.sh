@@ -29,20 +29,15 @@ source /opt/oneserver/lib/bootstrap.sh
 #
 # ## 一、rclone 是「传输」，不是「备份」——本工具也不把它当备份工具用
 #
-# 真正的备份软件是 restic / borg：去重、增量、加密、快照。它们在这里都被
-# 否掉了，理由只有一条，但这条压倒性：
+# 归档格式是 `tar.gz` 加一份同名 `sha256`，不用 restic / borg。备份要在
+# 「这台机器没了」那一刻兑现，而那一刻手里可能只有一个桶和一台陌生的 Linux ——
+# coreutils 就该解得开，连 oneserver 都不必装。
 #
-#   **归档只有该工具本身能打开。**
+# 诚实说清代价：**无去重、无增量。** 5 GB 的站点每天传 5 GB，不粉饰。
 #
-# 备份的意义是「这台机器没了之后还能恢复」。restic 的仓库要 restic 二进制
-# + 仓库密码 + 仓库结构完整，三样缺一样就是一堆打不开的数据块。而
-# `tar.gz` + `sha256` 在任何一台 Linux 上用 coreutils 就能验、就能解，
-# **连 oneserver 都不需要装**。对「个人 / 小型 VPS」这个目标用户，
-# 「恢复路径的依赖尽可能少」比「省 70% 带宽」重要得多。
-#
-# 诚实说清代价：**无去重、无增量。** 5 GB 的站点每天传 5 GB。
-# 认这个代价，不粉饰。真需要增量的那天，做法是在「目的地」这一层
-# 加一个 restic 实现，而不是推翻归档格式（见下面第三点）。
+# 完整论证、两处不能当成绝对的例外，以及什么时候该重估这个选择，见 D236。
+# **别照「以后在目的地那层换成 restic」的思路改** —— 那样拿不到去重收益，
+# D236 讲了为什么。
 #
 # 于是 rclone 的定位就清楚了：**它只负责把一个已经做好的归档搬到远端。**
 # 选它而不是 rsync/sftp/awscli，是因为它一个二进制覆盖 70 个后端、
@@ -352,8 +347,23 @@ check_space() {
         local -- dksize=${OS_RUN_OUTPUT%%[[:space:]]*}
         [[ ${dksize} =~ ^[0-9]+$ ]] && need=${dksize}
     fi
-    # 库转储体积事先不可知，按 512 MB 兜底留量
-    [[ -n ${db} ]] && need+=524288
+    # 库的体积不该靠拍脑袋：information_schema 给的是数据加索引的实际字节，
+    # 而转储通常比它小（不含索引），按它估偏保守，正合适。
+    #
+    # 512 MB 只在**查不到时**兜底。原来无条件按 512 MB 估，一个 5 GB 的库
+    # 会让空间检查一路绿灯，然后在打包途中把分区撑爆 —— 而撑爆分区正是这个
+    # 函数存在的全部理由。
+    if [[ -n ${db} ]]; then
+        local dbq
+        dbq=$(os::sql_str "${db}")
+        if os::sql_query '估算数据库体积' -- \
+            "SELECT COALESCE(SUM(data_length + index_length) DIV 1024, 0) FROM information_schema.tables WHERE table_schema = ${dbq}" \
+            && [[ ${OS_RUN_OUTPUT} =~ ^[0-9]+$ ]] && [[ ${OS_RUN_OUTPUT} -gt 0 ]]; then
+            need+=${OS_RUN_OUTPUT}
+        else
+            need+=524288
+        fi
+    fi
 
     probe::disk_free_kb "${OS_ARCHIVE_DIR}"
     local free=${OS_PROBE_VALUE}
@@ -411,8 +421,14 @@ make_archive() {
     if [[ -n ${db} ]]; then
         os::info "导出数据库 ${db}"
         # 凭据零参与：D121，OS root 走 unix_socket
-        os::run '导出数据库' -- sh -c \
-            "mysqldump --single-transaction --routines --triggers --events --quick --hex-blob --default-character-set='${OS_DEFAULT_DB_CHARSET}' '${db}' > '${stage}/database.sql'" \
+        #
+        # 用 `--result-file=` 而不是 `sh -c '… > 文件'`：后者要一层 shell，
+        # 于是库名与路径必须拼进脚本文本。mysqldump 自己就能落盘，一层 shell
+        # 都不需要 —— 每一个值都以 argv 传进去，不可能被当成 shell 语法解释。
+        os::run '导出数据库' -- mysqldump --single-transaction --routines \
+            --triggers --events --quick --hex-blob \
+            --default-character-set="${OS_DEFAULT_DB_CHARSET}" \
+            --result-file="${stage}/database.sql" "${db}" \
             || {
                 os::err "数据库 ${db} 导出失败，${type}:${name} 未产生备份"
                 return 1
@@ -495,7 +511,9 @@ make_archive() {
     # **解一遍验一遍。** 只看 tar 的退出码不够：这是备份系统里唯一能区分
     # 「以为有」和「真的有」的一步，而「真要用时发现是半个」正是备份最怕的事。
     # 代价是一次完整解压读，认这个代价。
-    os::query --timeout 3600 -- sh -c "tar -tzf '${out}.partial' > /dev/null" || {
+    # os::query 本来就把 stdout 收进变量、不往屏幕上打，所以不需要
+    # `sh -c '… > /dev/null'` —— 少一层 shell，路径也就不用拼进脚本文本
+    os::query --timeout 3600 -- tar -tzf "${out}.partial" || {
         os::run --allow-fail '清理损坏的归档' -- rm -f "${out}.partial"
         os::err "${type}:${name} 的归档自检未通过，已删除"
         return 1
@@ -753,6 +771,8 @@ action_run() {
     os::state_set backup last="${ts}" last_status=ok \
         local_keep="${local_keep}" remote_keep="${remote_keep}"
     os::ok "备份完成：${ok_n} 个目标"
+    os::info "归档在 ${OS_ARCHIVE_DIR}/<类型>/<名字>/，每份旁边有一份同名 .sha256"
+    os::info '要用它恢复：oneserver restore    ·    定期确认归档没坏：oneserver backup verify'
     os::output 0 ok="${ok_n}" failed=0 skipped="${skip_n}" changed=yes
     return 0
 }
@@ -943,6 +963,12 @@ overview_targets() {
         os::output_item target="${id}" count="${cnt[${dir}]}" \
             newest="${newest[${dir}]}" bytes="${nbytes[${dir}]}" state="${state}"
     done <<<"${ids}"
+
+    # **「没列出来」不等于「不重要」，只等于「本工具不知道它存在」。**
+    # 备份工具最危险的失败不是备份失败，是用户以为自己被保护着 —— 而手工建的库、
+    # 手工放进 /var/www 的目录，这份清单一个都发现不了。说清楚它才是一份诚实的总览。
+    os::info '这里只列本工具知道的东西：部署过的站点、mariadb create 建的库、登记过的 path。'
+    os::info '手工建的库、手工放的目录不会自己出现 —— 用「添加备份目标」把它们登记进来。'
     return 0
 }
 
