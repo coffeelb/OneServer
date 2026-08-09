@@ -202,13 +202,14 @@ show_panel() {
         menu_row 'Docker' "${docker_running} / ${OS_PROBE_VALUE:-0} 容器运行中"
     fi
 
-    # `docker` 这个命令名归谁：写着 podman 的机器上照样能粘贴 docker 命令，
-    # 而这件事从「已装组件」那一行是看不出来的
+    # `docker` 这个命令名归谁。**只在它不归 Docker 时才说** —— 装着 Docker 的
+    # 机器上打一行「docker 命令：真 Docker」是废话，而状态面板每一行都要挣得
+    # 自己那个位置。真正需要告知的只有反过来那种：机器上没有 Docker，
+    # 粘贴的 docker 命令却照样能跑，这件事从「已装」那一行看不出来
     probe::container_engine
-    case ${OS_PROBE_VALUE} in
-        podman) menu_row 'docker 命令' '由 podman 接管' ;;
-        docker) menu_row 'docker 命令' '真 Docker' ;;
-    esac
+    if [[ ${OS_PROBE_VALUE} == podman ]]; then
+        menu_row 'docker 命令' '由 podman 接管'
+    fi
 
     # 非 root 时数据来自快照。用 probe 自己给出的来源判断，不去看 EUID ——
     # 规范禁止脚本自行做权限判断，而这里要说的本来也是「数据是哪来的」
