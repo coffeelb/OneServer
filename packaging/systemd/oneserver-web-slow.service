@@ -24,6 +24,11 @@ ExecStart=/opt/oneserver/script/ops/web_collect.sh --tier=slow --non-interactive
 ProtectSystem=full
 # 数据目录在 tmpfs 上（规范 §4.2）；state 那条是给历史曲线的盘上副本用的
 ReadWritePaths=/run/oneserver-public /opt/oneserver/state
+# 数据目录在 tmpfs 上，重启即空，必须由 systemd 在挂命名空间之前建回来 ——
+# 三行缺一不可，理由见 fast 那份的说明
+RuntimeDirectory=oneserver-public
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 # **read-only 而不是 yes**：yes 会把 /root 整个藏掉，于是
 # probe::ssh_authkeys 读不到 /root/.ssh/authorized_keys，面板上「root 公钥数」
 # 永远是 0 —— 而那个数字正是「能不能安全地关掉密码登录」的依据，

@@ -246,6 +246,15 @@ os::write_public() {
         return 2
     fi
 
+    # **内容必须过脱敏**，而不是指望每个调用方自觉：public/ 是 0755，写进去
+    # 就等于对本机所有用户公开（规范 §4.2「永不含凭据」），而这里有十几个调用方，
+    # 其中 report.html 还把其余产物整份内嵌进去 —— 漏一个就是明文凭据落在一个
+    # 人人可读的文件里。约定管不住这种事，通道上做才管得住。
+    # **脱敏在比较之前**：放到后面的话，比较的是明文、写下去的是脱敏结果，
+    # 于是每一轮都判定「变了」，每十秒换一次 inode（正是 1. 要避免的）
+    log::redact "${content}"
+    content=${OS_LOG__REDACTED}
+
     local target="${OS_PUBLIC_DIR}/${name}"
     if [[ -f ${target} ]] && [[ $(cat -- "${target}" 2>/dev/null) == "${content}" ]]; then
         return 0

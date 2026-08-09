@@ -478,7 +478,14 @@ errors::on_signal() {
     fi
 
     OS_ERR__SIGNALED=1
-    log::exit_code warn "被信号 ${sig} 打断" 131
+    # **INT 不是异常**：它只有一个来源 —— 操作者在终端按了 Ctrl-C，和已经记成
+    # info 的「用户取消」（130）是同一类事，级别理应一致。记成 warn 的后果不是
+    # 多一行日志，是面板的「最近异常」被自己按的 Ctrl-C 刷满，真异常反而没人看。
+    # HUP / TERM 保持 warn：那是外力打断（SSH 断线、kill、关机），操作者可能
+    # 根本不在场，也不知道停在了哪一步 —— 那正是需要有人看一眼的情况。
+    local lv=warn
+    [[ ${sig} == INT ]] && lv=info
+    log::exit_code "${lv}" "被信号 ${sig} 打断" 131
 
     errors::_stderr error "被 ${sig} 打断，已停止执行"
     # **不跑回滚栈**：中断点的系统状态未知，此时执行回滚动作很可能加重破坏。

@@ -61,6 +61,10 @@ body{background:var(--bg);color:var(--text);font:15px/1.5 var(--ui);overflow:hid
 .brand b{font-family:var(--mono);font-weight:500;color:var(--dim2)}
 .brand i,.brand b{font-style:normal}
 .brand i::after,.brand b::after{content:"·";color:var(--dim2);margin-left:7px}
+/* 标记与产品名一起链到仓库。hover 用整体变淡而不是下划线：分隔点长在
+   i::after 上，下划线会连它一起划进去 */
+.brand .home{display:flex;align-items:center;gap:7px;text-decoration:none}
+.brand .home:hover{opacity:.75}
 .host{font-size:15px;font-weight:500;color:var(--text);white-space:nowrap}
 .grow{flex:1}
 .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font:inherit;font-size:14px;
@@ -138,8 +142,13 @@ body.collapsed .st{position:absolute;margin-left:26px;margin-top:-14px}
 .chead{display:flex;align-items:center;gap:10px;padding:8px 13px;border-bottom:1px solid var(--border);background:var(--panel2)}
 .ctitle{font-weight:700;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
 /* 表格类的卡片把档位标在**列头**上：看表是按列看的，「这一格多久变一次」
-   的答案只有落在列上才对得上。非表格的卡片走标题栏并排两个徽章 */
+   的答案只有落在列上才对得上。标题栏那枚徽章说的是整张卡的最坏情况 */
+/* .cl .n 的 44px 是给「日志」这种两字标签定的，装不下「每 5 分钟」——
+   现场表现是节奏被折成「每 10」+「秒」两行 */
 .tierrow{flex-wrap:wrap}
+/* 选择器带上 .cl 是为了压过下面那条同名同权重的 .cl .n —— 权重相同时
+   靠先后顺序决胜，而那条排在本行之后 */
+.cl.tierrow .n{flex:0 0 68px}
 .tierwhat{flex-basis:100%;font-size:11.5px;color:var(--dim2);line-height:1.5;
   margin:1px 0 2px 0}
 .tiercol{font-size:10.5px;color:var(--dim2);font-weight:400;white-space:nowrap}
@@ -147,11 +156,6 @@ body.collapsed .st{position:absolute;margin-left:26px;margin-top:-14px}
 .uptime{font-size:12.5px;color:var(--dim);white-space:nowrap}
 .age{font-size:12.5px;color:var(--dim2);margin-left:auto;white-space:nowrap}
 .age.stale{color:var(--warn)} .age.dead{color:var(--err)}
-/* 一张卡混了两档时并排两个徽章。里面的 .age 不再各自 margin-left:auto，
-   否则两个徽章会被推开、中间那个分隔点落到不知道哪儿去 */
-.agebox{font-size:12.5px;color:var(--dim2);margin-left:auto;white-space:nowrap;
-  display:flex;gap:0;align-items:baseline}
-.agebox .age{margin-left:0}
 /* 点完刷新却什么都没变时的那一句话。做成浮层而不是塞进卡片：它是对这一次
    点击的回应，不是页面状态的一部分，留在屏幕上反而会被当成一条告警 */
 #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
@@ -259,6 +263,11 @@ tr.det>td{background:var(--panel2);padding:10px 13px 12px 31px}
 .nu b{display:block;font-size:17px;font-variant-numeric:tabular-nums}
 .nu span{color:var(--dim);font-size:12.5px}
 .nu.ok b{color:var(--ok)} .nu.warn b{color:var(--warn)} .nu.err b{color:var(--err)}
+/* 整块可点，跳到它所统计的那一页。hover 提亮底色而不是加下划线：块里是
+   数字 + 标签两行，下划线会把标签也划进去，而数字用的是等宽字体，
+   下划线落在它下面会和数字的基线打架 */
+a.nu{text-decoration:none;color:inherit}
+a.nu:hover{background:var(--panel2)}
 
 /* 修复提示是**一行可复制的命令,不是按钮** —— 只读面板能给的最大帮助就到这里,
    再往前一步(点一下就执行)就越过了规范 §1 的边界 */
@@ -415,14 +424,18 @@ tr.kindrow .dim2{margin-left:6px}
 <div id="top">
   <button id="burger" title="折叠侧边栏">☰</button>
   <!-- 每项各自成元素：flex 的 gap 只作用在元素之间，夹在中间的裸文本不算元素 -->
-  <span class="brand"><svg class="logomark" viewBox="6 8 20 13" aria-hidden="true"><rect x="6" y="8" width="20" height="5" rx="1.5" class="b1"/><rect x="6" y="16" width="20" height="5" rx="1.5" class="b2"/><circle cx="23" cy="10.5" r="1.4" class="d"/><circle cx="23" cy="18.5" r="1.4" class="d"/></svg><i>OneServer</i><b id="ver">—</b></span>
+  <!-- 仓库地址写死在这里：这个页面由 Caddy **直接从模板目录读**（见 web.sh 的
+       page_source），没有任何占位符替换环节。源头是 lib/defaults.sh 的
+       OS_DEFAULT_REPO_URL，改那边记得改这里 -->
+  <span class="brand"><a class="home" href="https://github.com/qichiyuhub/OneServer" target="_blank" rel="noopener noreferrer" title="在 GitHub 上打开 OneServer"><svg class="logomark" viewBox="6 8 20 13" aria-hidden="true"><rect x="6" y="8" width="20" height="5" rx="1.5" class="b1"/><rect x="6" y="16" width="20" height="5" rx="1.5" class="b2"/><circle cx="23" cy="10.5" r="1.4" class="d"/><circle cx="23" cy="18.5" r="1.4" class="d"/></svg><i>OneServer</i></a><b id="ver">—</b></span>
   <span class="host" id="hostname">—</span>
   <!-- 已运行时长紧跟主机名：它是「这台机器上次什么时候重启的」最直接的答案，
        而那正是排查时第一个要确认的事（意外重启过没有）。原来只在概览的
        「这台机器」卡里有，切到别的页就看不见了 -->
   <span class="uptime" id="uptime"></span>
   <span class="grow"></span>
-  <span class="age" id="gage">—</span>
+  <!-- 平时不出现，只在服务器时钟对不上时露头（paintAges） -->
+  <span class="age" id="gage" hidden></span>
   <button class="btn" id="refreshAll">↻ 重新拉取</button>
   <button class="btn mini" id="themeBtn" title="深浅色">◐</button>
 </div>
@@ -431,7 +444,9 @@ tr.kindrow .dim2{margin-left:6px}
   <nav id="side">
     <div class="nav" id="nav">
       <a href="#/"           data-p="ov"   title="概览 — 按 1"><svg class="ic"><use href="#i-ov"/></svg><span class="lb">概览</span><span class="st"></span></a>
-      <div class="ngrp">这台机器</div>
+      <!-- 组件 / 服务 / 容器 都是「这台机器上跑着什么」。分组名一律用状态而非
+           动作：面板只读，「部署」「安装」这类动词会让人以为这里能操作 -->
+      <div class="ngrp">运行中</div>
       <a href="#/components" data-p="comp" title="组件 — 按 2"><svg class="ic"><use href="#i-comp"/></svg><span class="lb">组件</span><span class="st"></span></a>
       <a href="#/services"   data-p="svc"  title="服务 — 按 3"><svg class="ic"><use href="#i-svc"/></svg><span class="lb">服务</span><span class="st"></span></a>
       <a href="#/containers" data-p="ctn"  title="容器 — 按 4"><svg class="ic"><use href="#i-ctn"/></svg><span class="lb">容器</span><span class="st"></span></a>
@@ -442,8 +457,11 @@ tr.kindrow .dim2{margin-left:6px}
       <a href="#/backups"    data-p="bk"   title="备份 — 按 7"><svg class="ic"><use href="#i-bk"/></svg><span class="lb">备份</span><span class="st"></span></a>
       <a href="#/logs"       data-p="log"  title="日志 — 按 8"><svg class="ic"><use href="#i-log"/></svg><span class="lb">日志</span><span class="st"></span></a>
     </div>
+    <!-- 侧栏唯一一块常驻文案。第二行是**出口**：用户在这里发现问题之后，
+         下一个动作一定是「那我去哪儿修」，只说「只读」等于把人留在原地 -->
     <div class="sfoot">
-      <span class="dim2">只读面板 · 无操作</span>
+      <span class="dim2">只读面板 · 不对本机执行任何变更<br>
+        变更操作一律经终端 <span class="mono-l">oneserver</span></span>
     </div>
   </nav>
 
@@ -475,11 +493,11 @@ tr.kindrow .dim2{margin-left:6px}
             <div class="cbody flush" id="ovLog"></div>
           </div>
           <div class="card">
-            <div class="chead"><span class="ctitle">这台机器</span><span class="age" data-tier="live slow"></span></div>
+            <div class="chead"><span class="ctitle">系统信息</span><span class="age" data-tier="live slow"></span></div>
             <div class="cbody" id="ovHost"></div>
           </div>
           <div class="card">
-            <div class="chead"><span class="ctitle">采集</span></div>
+            <div class="chead"><span class="ctitle">数据更新</span></div>
             <div class="cbody" id="ovCollect"></div>
           </div>
         </div>
@@ -654,7 +672,10 @@ const PULL   = { live:2, fast:5, slow:60, log:2 };   // 页面 re-fetch 间隔(�
 const COLLECT= { live:10, fast:30, slow:300 };
 // 「实时档 / 快档 / 慢档」是实现内部的叫法，对着用户说没有意义 —— 他要知道的
 // 只有一件事：**这块数字多久变一次**。所以界面上一律只出现节奏本身。
-const every=(t)=>COLLECT[t]<60?`每 ${COLLECT[t]} 秒`:`每 ${COLLECT[t]/60} 分钟`;
+// 数与单位分开返回，是因为混档卡要把两档并成一个区间（见 paintAges）：
+// 两边单位相同时「每 10–30 秒」比「每 10 秒–30 秒」少一个字且照样准
+const pace=(sec)=>sec<60?[sec,'秒']:[sec/60,'分钟'];
+const every=(t)=>{const [n,u]=pace(COLLECT[t]); return `每 ${n} ${u}`;};
 const ROW_H  = 29;                             // 日志行高,必须等于 CSS 的 --row：虚拟滚动按它算偏移
 const LOG_CAP= 20000;                          // 内存中保留的最大行数
 
@@ -1122,14 +1143,20 @@ function renderRes(){
   // 跨引擎合计:概览要的是「这台机器上有几个容器在跑」,分引擎是容器页的事
   const hasEng=!!(f['container.engines']||'').trim();
   const cRun=S.containers.filter(c=>c.state==='running').length;
-  const nu=(v,lb,cls)=>`<div class="nu ${cls||''}"><b>${v}</b><span>${lb}</span></div>`;
+  // 每块都是一个数，而每个数背后都有一整页在解释它 —— 「服务异常 2」下一句
+  // 一定是「哪两个」。做成链接，省掉「看见数字 → 去侧栏找对应页」这一跳
+  const PAGE={'#/components':'组件','#/services':'服务','#/network':'网络',
+    '#/containers':'容器','#/security':'安全'};
+  const nu=(v,lb,href,cls)=>`<a class="nu ${cls||''}" href="${href}"
+    title="到「${PAGE[href]}」页看明细"><b>${v}</b><span>${lb}</span></a>`;
   $('#res').innerHTML=h+`<div class="nums">`+
-    nu(Object.keys(S.state).length,'组件')+
-    nu(`${run}/${units.length}`,'服务运行')+
-    nu(badSvc,'服务异常',badSvc?'err':'ok')+
-    nu(ports,'监听端口')+
-    (hasEng?nu(`${cRun}/${S.containers.length}`,'容器'):'')+
-    nu(up,'可升级包',sec?'err':'')+`</div>`;
+    nu(Object.keys(S.state).length,'组件','#/components')+
+    nu(`${run}/${units.length}`,'服务运行','#/services')+
+    nu(badSvc,'服务异常','#/services',badSvc?'err':'ok')+
+    nu(ports,'监听端口','#/network')+
+    (hasEng?nu(`${cRun}/${S.containers.length}`,'容器','#/containers'):'')+
+    // 可升级包的明细在安全页的「系统更新」卡里，不在组件页
+    nu(up,'可升级包','#/security',sec?'err':'')+`</div>`;
 }
 /* 最近异常 —— 告警是 state 与 probe 的差分,而「上周三那条命令失败了」
    差分看不出来。不放这里的话,用户得先想到去翻日志页才会知道 */
@@ -1152,7 +1179,7 @@ function renderOvLog(){
     <div class="m" title="${esc(r.msg)}">${esc(r.msg)}</div></a>`).join('')
     ||`<div class="empty">日志里没有 error 或 warn</div>`;
 }
-/* 这台机器是什么 —— 顶栏那几项在窄屏和长发行版名下会被截掉,而「几核几 G」
+/* 系统信息 —— 顶栏那几项在窄屏和长发行版名下会被截掉,而「几核几 G」
    顶栏根本放不下。装机、对照多台机器、贴给别人看的时候要的都是这张卡。 */
 function renderOvHost(){
   const s=S.slow.m, f=lm();
@@ -1163,7 +1190,7 @@ function renderOvHost(){
   const boot=up?new Date(Date.now()-up*1000):null;
   const row=(k,v)=>v?`<dt>${k}</dt><dd>${v}</dd>`:'';
   $('#ovHost').innerHTML=`<dl class="kv">
-    ${row('主机名',`<b>${esc(s['os.hostname']||'—')}</b>`)}
+    ${row('主机名',esc(s['os.hostname']||'—'))}
     ${row('系统',esc(s['os.pretty']||''))}
     ${row('内核',`<span class="mono-l">${esc(s['os.kernel']||'')}</span>`)}
     ${row('架构',`<span class="num">${esc(s['os.arch']||'')}</span>`)}
@@ -1177,9 +1204,8 @@ function renderOvHost(){
 // 采集器自身的状态。放在这里是因为它决定了页面上**其余所有数字**可不可信 ——
 // 一份三小时前的快照和一台刚探完的机器,长得一模一样
 function renderOvCollect(){
-  // 这张卡从前只说「有两个档、各自多久一轮、各自多久前落的盘」，
-  // **没说哪些数据属于哪一档** —— 于是「20 秒前」孤立地不构成信息。
-  // 现在它是一张对照表：每一档管什么，一目了然。
+  // 这张卡是一张对照表：每一种节奏各管哪些数据。只说「有几档、各自多久一轮」
+  // 而不说哪些数据属于哪一档的话，卡头那句「20 秒前」孤立地不构成信息。
   const WHAT={
     live:'CPU · 内存 · 负载 · 运行时长',
     fast:'磁盘 · 监听端口 · 服务状态 · 容器 · 日志',
@@ -1194,11 +1220,13 @@ function renderOvCollect(){
       ? `<div class="cl"><span class="n">数据源</span><span class="tag warn">离线快照</span>
          <span class="dim2" style="margin-left:auto">不会自动更新</span></div>`
       : tier('live')+tier('fast')+tier('slow'))+
-    `<div class="cl"><span class="n">日志</span>
-      <span class="dim num">${S.logs.length} 行</span></div>
+    // 行数不加解释的话，「2000 行」看上去像是这台机器一共只发生过这么多事。
+    // 数字取实际长度而不是写死 2000：服务端的尾部行数改了，这里不该跟着漂
+    `<div class="cl"><span class="n" title="面板只发布日志尾部，完整记录在服务器的 /var/log/oneserver/">日志</span>
+      <span class="dim num">${S.logs.length} 行 · 仅尾部</span></div>
     <div class="dim2" style="margin-top:9px;font-size:12px;line-height:1.55">
-      时刻是服务端落盘的那一刻。点「重新拉取」数字不动，说明采集器还没到下一轮 ——
-      面板只读，页面上没有任何按钮能让服务端提前采一次</div>`;
+      时刻指服务端落盘的时间。重新拉取后数字不变，说明采集器未到下一轮；
+      面板只读，无法要求服务端提前采集。</div>`;
 }
 
 // 组件健康 —— 状态点取自「它登记的 unit 里最坏的那个」。组件是用户心里的
@@ -1381,23 +1409,39 @@ function toggleComp(tr,restore){
   if(nx&&nx.classList.contains('det')){ nx.remove(); EXPANDED.delete(tr.dataset.id); return; }
   if(!restore) EXPANDED.add(tr.dataset.id);
   const c=S.state[tr.dataset.id], s=S.slow.m;
-  const label={pkg:'包',file:'文件',unit:'Unit',divert:'Divert',alt:'Alternatives'};
+  // 标签说的是**这是什么**，不是机制的名字。`Divert`/`Alternatives` 直译成
+  // 「改道」「替代项」，用户看着下面那串路径照样不知道是什么 —— 那是 dpkg 的
+  // 机制名，不是分类名。机制名放 title：只有要去搜、要去敲命令时才需要原词。
+  const label={pkg:['APT 包',''],
+    file:['安装的文件','只登记本组件创建的文件；它改过一行的既有配置不算'],
+    unit:['系统服务','systemd unit'],
+    divert:['顶替的系统文件','dpkg-divert：把发行版的原文件挪开，让本组件的版本顶上'],
+    alt:['命令候选','update-alternatives：决定这个命令名实际指向哪个可执行文件']};
   let h='';
   for(const k of RES_KEYS){
     if(!c.res[k]?.length) continue;
-    h+=`<div style="margin-bottom:7px"><span class="dim">${label[k]}</span><br>`+
+    const [name,tip]=label[k];
+    h+=`<div style="margin-bottom:7px"><span class="dim"${
+      tip?` title="${esc(tip)}"`:''}>${name}</span><br>`+
       c.res[k].map(v=>{
-        let extra='';
+        let extra='', txt=v;
         if(k==='pkg'){
           const ver=s[`pkg.${v}.version`];
           extra = ver===''? ' <span class="tag err">已卸载</span>'
                 : ver ? ` <span class="dim2">${esc(ver)}</span>` : '';
         }
-        return `<span class="mono-l">• ${esc(v)}${extra}</span>`;
+        if(k==='unit'){
+          // own:/ext: 是内部约定，但它区分的事情对用户有实际意义：卸载时
+          // own 删文件、ext 只停用禁用。所以前缀本身不显示，含义显示出来
+          const own=v.startsWith('own:');
+          txt=v.replace(/^(own|ext):/,'');
+          extra=` <span class="tag">${own?'本工具创建':'发行版提供'}</span>`;
+        }
+        return `<span class="mono-l">• ${esc(txt)}${extra}</span>`;
       }).join('<br>')+`</div>`;
   }
-  const other=Object.keys(c).filter(k=>!['id','res','version','installed_at'].includes(k));
-  if(other.length) h+=`<div>${other.map(k=>`<span class="dim">${esc(k)}</span> ${esc(c[k])}`).join(' · ')}</div>`;
+  // state 里其余的键（kind 等）不再原样打印：键名是内部约定，而 kind 的含义
+  // 组件页早就按「应用 / 实例 / 功能开关」分过段了，重复一遍还漏实现细节
   const tr2=document.createElement('tr');
   tr2.className='det';
   tr2.innerHTML=`<td colspan="5">${h||'<span class="dim2">未登记任何资源 —— 卸载时只能删 state 行</span>'}</td>`;
@@ -1905,38 +1949,60 @@ function paintAges(){
   const skew = Math.min(0, now-(S.live.ts||now), now-(S.fast.ts||now), now-(S.slow.ts||now));
   const bad = skew < -60;
   // 徽章上**必须同时有节奏和时刻**。只写「20 秒前」的话，那个数字没有参照系：
-  // 20 秒对实时档是已经落后七轮，对慢档是刚采完。这正是「看不出哪块数据属于
-  // 哪一档」的来源 —— 档位信息一直在 data-tier 里，只是渲染时被丢掉了。
-  const stamp = (t)=>{
-    if(bad) return {txt:`${every(t)}更新 · 时钟不同步`, cls:' dead'};
-    const age=Math.max(0,now-(S[t].ts||0)), lim=COLLECT[t]*2;
-    return {txt:`${every(t)}更新 · ${ago(age)}`, cls:(age>lim*2?' dead':age>lim?' stale':'')};
+  // 20 秒对最快的一档是已经落后两轮，对最慢的一档是刚采完。
+  //
+  // 一张卡混了两档时**仍然只出一枚徽章**。并排两枚、各带各的节奏与时刻，等于
+  // 把四个数字摆在一起却不说哪个管哪部分，读出来是「每 30 秒更新 · 6 秒前 ·
+  // 每 5 分钟更新 · 23 秒前」—— 用户没有任何线索能把它拆开。
+  // 收敛的办法是两项都取最坏情况：节奏给区间，时刻给最旧的那一份。于是徽章的
+  // 意思是「这张卡上的数字最慢这么久变一次，而且没有比这更旧的」——一句话，
+  // 且对卡上每一个数字都成立，不像挑一档去代表全卡那样会把另一半说错。
+  // 取最旧还顺带落在安全的那一侧：只会让一部分数据显得比实际旧，绝不会把旧的
+  // 说成新的（D44）。所以措辞就用顶栏那句「数据 N 秒前」，不必写「最旧」——
+  // 同一个词在页面上只教一次，精确含义留给 title。
+  // **哪部分数据属于哪一档不进徽章**：那是概览页「采集」整张对照表在回答的
+  // 问题，塞回来只会让它退化成一串没有归属的数字。
+  const stamp = (tiers)=>{
+    const t=[...tiers].sort((a,b)=>COLLECT[a]-COLLECT[b]);
+    const [na,ua]=pace(COLLECT[t[0]]), [nb,ub]=pace(COLLECT[t[t.length-1]]);
+    const rate=t.length===1 ? every(t[0])
+      : ua===ub ? `每 ${na}–${nb} ${ua}` : `每 ${na} ${ua}–${nb} ${ub}`;
+    if(bad) return {rate, when:'时钟不同步', cls:' dead'};
+    let age=0, cls='';
+    for(const k of t){
+      const a=Math.max(0,now-(S[k].ts||0)), lim=COLLECT[k]*2;
+      if(a>age) age=a;
+      // 超期按**各档自己的**周期判，一档落后就整枚变色。拿最慢那档的周期去量
+      // 最快那档的话，采集器停了十分钟徽章还是绿的
+      if(a>lim*2) cls=' dead'; else if(a>lim && cls!==' dead') cls=' stale';
+    }
+    return {rate, when:`数据 ${ago(age)}`, cls};
   };
   $$('.age[data-tier]').forEach(el=>{
     const tiers=el.dataset.tier.split(' ');
-    // 一张卡混了两档时并排两个徽章，各带各的节奏与时刻 —— 挑一个档标上去
-    // 等于把另一半数据的刷新频率说错了
-    const parts=tiers.map(t=>{
-      const r=stamp(t);
-      return `<span class="age${r.cls}" title="这部分数据${every(t)}重新采集一次">${r.txt}</span>`;
-    });
-    el.innerHTML=parts.join('<span class="dim2"> · </span>');
-    el.className='agebox';
+    const r=stamp(tiers);
+    // 概览「采集」那张卡的行首**就是**节奏本身，徽章再说一遍会读成
+    // 「每 10 秒　每 10 秒更新 · 数据 6 秒前」。那张卡上只留时刻
+    el.textContent=el.closest('.tierrow') ? r.when : `${r.rate}更新 · ${r.when}`;
+    // **必须保住 age 这个类**：选择器就是靠它找回这些元素的，换成别的类名
+    // 徽章会停在第一次绘制的那个数字上，而页面其余部分照常刷新 —— 现场表现是
+    // 「数据明明在更新，卡头却一直说 6 秒前」
+    el.className='age'+r.cls;
+    el.title=tiers.length>1
+      ? `这张卡上的数字有两种节奏（${tiers.map(every).join(' 与 ')}）。徽章说的是最坏情况：最慢的那一档、最旧的那一份，所以其余数据只会比它更新。哪些数据属于哪一档，见概览页「采集」`
+      : `这部分数据${every(tiers[0])}重新采集一次`;
   });
+  // 顶栏平时**不显示新鲜度**：每张卡自己那枚徽章已经说过一遍，而且说得更准
+  // （分档的、按各自周期判超期的）。顶栏再放一个全局数字只是噪音。
+  // 但时钟不同步必须留在这里：卡上那句只说得出「时钟不同步」，**差多少**只有
+  // 这一处会说，而那正是「该去校时还是该去查采集器」的分岔点。
   const g=$('#gage');
-  if(bad){
-    // ago() 带「前」字，这里说的是时钟差不是时刻，去掉它
-    g.textContent=`服务器时钟比本机快 ${ago(-skew).replace(/前$/,'')}`;
-    g.className='age dead';
-    g.title='数据时刻无法与本机时间对齐，「N 秒前」在这种情况下没有意义';
-    return;
-  }
-  // 顶栏跟最快的那一档走：它是「这个页面还活着吗」的信号，
-  // 拿慢档去答会让一台采集器刚死掉的机器看起来一切正常
-  const age=Math.max(0,now-(S.live.ts||S.fast.ts||0));
-  g.textContent=`数据 ${ago(age)}`;
-  g.title=`页面上的数据分三种节奏：${every('live')} · ${every('fast')} · ${every('slow')}`;
-  g.className='age'+(age>COLLECT.live*10?' dead':age>COLLECT.live*4?' stale':'');
+  g.hidden=!bad;
+  if(!bad) return;
+  // ago() 带「前」字，这里说的是时钟差不是时刻，去掉它
+  g.textContent=`服务器时钟比本机快 ${ago(-skew).replace(/前$/,'')}`;
+  g.className='age dead';
+  g.title='数据时刻无法与本机时间对齐，「N 秒前」在这种情况下没有意义';
 }
 
 /* ---------------- 路由 ---------------- */

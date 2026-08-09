@@ -238,6 +238,32 @@ os_is_root() { [ "$(id -u)" -eq 0 ]; }
     [ "$(stat -c %i "${OS_PUBLIC_DIR}/a.tsv")" = "${before}" ]
 }
 
+@test "write_public 落地前过脱敏 —— public/ 是 0755，进去就是对本机所有用户公开" {
+    OS_PUBLIC_DIR="${BATS_TEST_TMPDIR}/public"
+    OS_PUBLIC_DIR_MODE='0755'
+    local pass='S3cr3t-P@ssw0rd-长密码'
+    log::secret_add "${pass}"
+    os::write_public 'probe-slow.tsv' "db.dsn"$'\t'"mysql://root:${pass}@localhost"
+
+    run grep -F "${pass}" "${OS_PUBLIC_DIR}/probe-slow.tsv"
+    [ "${status}" -ne 0 ]
+    grep -q '\*\*\*' "${OS_PUBLIC_DIR}/probe-slow.tsv"
+}
+
+@test "write_public 脱敏后内容一致仍不换 inode（脱敏必须发生在比较之前）" {
+    OS_PUBLIC_DIR="${BATS_TEST_TMPDIR}/public"
+    OS_PUBLIC_DIR_MODE='0755'
+    local pass='S3cr3t-P@ssw0rd-长密码'
+    log::secret_add "${pass}"
+    os::write_public 'a.tsv' "pass ${pass}"
+    local before
+    before=$(stat -c %i "${OS_PUBLIC_DIR}/a.tsv")
+    os::write_public 'a.tsv' "pass ${pass}"
+    # 比较用明文、写入用脱敏结果的话，这里每一轮都会判定「变了」——
+    # 采集器每 10 秒换一次 inode，正在读的客户端拿到半截
+    [ "$(stat -c %i "${OS_PUBLIC_DIR}/a.tsv")" = "${before}" ]
+}
+
 @test "write_public 拒绝带路径的文件名" {
     OS_PUBLIC_DIR="${BATS_TEST_TMPDIR}/public"
     run os::write_public '../escape.tsv' 'x'

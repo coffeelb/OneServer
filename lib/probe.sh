@@ -97,9 +97,14 @@ probe::snapshot_flush() {
         printf '#ts\t%s\n' "${now}"
         local -i i
         for ((i = 0; i < ${#OS_PROBE__KEYS[@]}; i++)); do
+            # 落的是**命令原始输出**，而这个文件是 0644 —— 只要有哪个探测项
+            # 碰到含凭据的配置，明文就直接躺在一个人人可读的文件里。所以和
+            # os::write_public 一样，脱敏做在通道上，不靠各 probe 函数自觉
+            local v
+            log::redact "${OS_PROBE__VALS[i]}"
+            v=${OS_LOG__REDACTED}
             # 值里的制表符与换行会撕开行式格式，换成空格即可 ——
             # 快照是给人看的概览，不需要精确还原
-            local v=${OS_PROBE__VALS[i]}
             v=${v//$'\t'/ }
             v=${v//$'\n'/ }
             printf '%s\t%s\n' "${OS_PROBE__KEYS[i]}" "${v}"

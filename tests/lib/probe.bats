@@ -455,6 +455,20 @@ EOF
     grep -q '^os.id' "${OS_PROBE_SNAPSHOT}"
 }
 
+@test "快照落地前过脱敏 —— 它是 0644，本机任何用户都读得到" {
+    os_is_root || skip '非 root'
+    local pass='S3cr3t-P@ssw0rd-长密码'
+    log::secret_add "${pass}"
+    # 探测落的是命令**原始输出**，哪天有个探测项碰到含凭据的配置，
+    # 明文就直接进了这个人人可读的文件
+    probe::_remember 'test.raw' "user=root password=${pass}"
+    probe::snapshot_flush
+
+    run grep -F "${pass}" "${OS_PROBE_SNAPSHOT}"
+    [ "${status}" -ne 0 ]
+    grep -q '\*\*\*' "${OS_PROBE_SNAPSHOT}"
+}
+
 @test "缓存命中时标注来源与时间" {
     mkdir -p "${OS_PUBLIC_DIR}"
     local now

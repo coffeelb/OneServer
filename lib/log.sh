@@ -24,6 +24,9 @@ OS_LOG_CMD_FILE=''
 OS_LOG__SECRETS=()
 OS_LOG__REDACTED=''
 OS_LOG__ESCAPED=''
+# log::exit_code → log::write 这一跳的私有通道。走变量而不是给 log::write
+# 加第四个参数：退出码只有这一个来源，加进签名等于让每个调用方都要知道它
+OS_LOG__EXIT_CODE=''
 
 # 级别数值，越小越严重。比较用数值，不要比字符串。
 OS_LOG__LV_ERROR=0
@@ -203,6 +206,10 @@ OS_LOG__TS=''
 # 三个落点一次写完。**脱敏在这里发生**，之后的所有写入都已经是安全文本。
 log::write() {
     local level=${1:-info} msg=${2-} source=${3:-script}
+    # 取走并**立刻清空**：下面有两条提前 return（级别过滤、日志未启用），
+    # 不在这里清的话这个码会漏给下一条毫不相干的记录
+    local code=${OS_LOG__EXIT_CODE}
+    OS_LOG__EXIT_CODE=''
 
     log::level_value "${level}"
     local -i want=${OS_LOG__LVV}
@@ -218,8 +225,14 @@ log::write() {
     local safe=${OS_LOG__REDACTED}
     log::_now
 
+    # 退出码只写进**人读的那行**。JSONL 用 exit_code 字段表达同一件事，msg
+    # 保持干净 —— 消费者拿字段自己渲染（面板就是这么做的），两边都写会渲染成
+    # 「被信号 HUP 打断 (退出码 131) (退出码 131)」
+    local human=${safe}
+    [[ -n ${code} ]] && human="${safe} (退出码 ${code})"
+
     local line
-    printf -v line '%s %-5s [%s] %s' "${OS_LOG__TS}" "${level^^}" "${OS_LOG_COMMAND}" "${safe}"
+    printf -v line '%s %-5s [%s] %s' "${OS_LOG__TS}" "${level^^}" "${OS_LOG_COMMAND}" "${human}"
     printf '%s\n' "${line}" 2>/dev/null >>"${OS_LOG_MAIN}" || true
     if [[ -n ${OS_LOG_CMD_FILE} ]]; then
         printf '%s\n' "${line}" 2>/dev/null >>"${OS_LOG_CMD_FILE}" || true
@@ -231,29 +244,24 @@ log::write() {
     local jcmd=${OS_LOG__ESCAPED}
     log::json_escape "${source}"
     local jsrc=${OS_LOG__ESCAPED}
-    printf '{"ts":"%s","level":"%s","source":"%s","command":"%s","msg":"%s"}\n' \
-        "${OS_LOG__TS}" "${level,,}" "${jsrc}" "${jcmd}" "${jmsg}" \
+    local rc=''
+    [[ -n ${code} ]] && printf -v rc ',"exit_code":%d' "${code}"
+    printf '{"ts":"%s","level":"%s","source":"%s","command":"%s","msg":"%s"%s}\n' \
+        "${OS_LOG__TS}" "${level,,}" "${jsrc}" "${jcmd}" "${jmsg}" "${rc}" \
         2>/dev/null >>"${OS_LOG_JSONL}" || true
 
     return 0
 }
 
-# log::exit_code <级别> <消息> <退出码>   带 exit_code 字段的 JSONL 记录
+# log::exit_code <级别> <消息> <退出码>   带 exit_code 字段的记录
+#
+# 一次事件**一条记录**。从前这里先调 log::write（那已经落了一条 JSONL），
+# 再自己往 JSONL 补写第二条，两条只差一个「(退出码 N)」后缀 —— 按 msg 去重的
+# 消费者合并不了，面板的「最近异常」因此被同一次中断刷成两行。
 log::exit_code() {
     local level=${1:-error} msg=${2-} code=${3:-1}
-    log::write "${level}" "${msg} (退出码 ${code})" framework
-    if [[ ${OS_LOG_ENABLED} -ne 1 ]]; then
-        return 0
-    fi
-    log::redact "${msg}"
-    log::json_escape "${OS_LOG__REDACTED}"
-    local jmsg=${OS_LOG__ESCAPED}
-    log::json_escape "${OS_LOG_COMMAND}"
-    local jcmd=${OS_LOG__ESCAPED}
-    log::_now
-    printf '{"ts":"%s","level":"%s","source":"framework","command":"%s","msg":"%s","exit_code":%d}\n' \
-        "${OS_LOG__TS}" "${level,,}" "${jcmd}" "${jmsg}" "${code}" \
-        2>/dev/null >>"${OS_LOG_JSONL}" || true
+    OS_LOG__EXIT_CODE=${code}
+    log::write "${level}" "${msg}" framework
     return 0
 }
 

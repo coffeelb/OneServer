@@ -253,6 +253,47 @@ EOF
     grep -q '状态未知' "${outfile}"
 }
 
+# Ctrl-C 记成 warn 的后果不是多一行日志，是面板的「最近异常」被操作者自己按的
+# Ctrl-C 刷满，真异常反而没人看。INT 与已经是 info 的「用户取消」(130) 同类
+os_signal_level() {
+    local sig=${1} f="${BATS_TEST_TMPDIR}/lv-${sig}.sh"
+    local dir="${BATS_TEST_TMPDIR}/log-${sig}"
+    cat >"${f}" <<EOF
+set -Eeuo pipefail
+source "${OS_TEST_REPO_ROOT}/lib/paths.sh"
+source "${OS_TEST_REPO_ROOT}/lib/defaults.sh"
+source "${OS_TEST_REPO_ROOT}/lib/theme.sh"
+source "${OS_TEST_REPO_ROOT}/lib/ui.sh"
+source "${OS_TEST_REPO_ROOT}/lib/log.sh"
+source "${OS_TEST_REPO_ROOT}/lib/errors.sh"
+OS_LOG_DIR="${dir}"
+OS_LOG_MAIN="\${OS_LOG_DIR}/oneserver.log"
+OS_LOG_JSONL="\${OS_LOG_DIR}/oneserver.jsonl"
+OS_AUDIT_LOG="\${OS_LOG_DIR}/audit.log"
+log::init sig
+errors::install
+echo ready
+sleep 30
+EOF
+    bash "${f}" >"${BATS_TEST_TMPDIR}/out-${sig}" 2>&1 &
+    local pid=$! i
+    for ((i = 0; i < 100; i++)); do
+        grep -q ready "${BATS_TEST_TMPDIR}/out-${sig}" 2>/dev/null && break
+        sleep 0.1
+    done
+    kill "-${sig}" "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    grep -o '"level":"[a-z]*"' "${dir}/oneserver.jsonl" | tail -n 1
+}
+
+@test "INT 记成 info：操作者自己按的 Ctrl-C 不是异常" {
+    [ "$(os_signal_level INT)" = '"level":"info"' ]
+}
+
+@test "HUP 仍记成 warn：外力打断，操作者可能不在场" {
+    [ "$(os_signal_level HUP)" = '"level":"warn"' ]
+}
+
 @test "不可中断区段内收到信号：延后到区段结束" {
     local f="${BATS_TEST_TMPDIR}/critcase.sh"
     local outfile="${BATS_TEST_TMPDIR}/critout"

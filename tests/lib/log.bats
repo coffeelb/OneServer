@@ -225,6 +225,49 @@ print('ok')
     [ "${output}" = 'ok' ]
 }
 
+@test "jsonl: exit_code 一次事件只落一条，且 msg 里不重复写退出码" {
+    log::exit_code warn '被信号 HUP 打断' 131
+    run python3 -c "
+import json
+recs = [json.loads(l) for l in open('${OS_LOG_JSONL}', encoding='utf-8')]
+# 两条只差一个「(退出码 N)」后缀的话，按 msg 去重的消费者合并不了 ——
+# 面板的「最近异常」会被同一次中断刷成两行
+assert len(recs) == 1, recs
+assert recs[0]['msg'] == '被信号 HUP 打断', recs
+assert recs[0]['exit_code'] == 131, recs
+print('ok')
+"
+    [ "${output}" = 'ok' ]
+    # 人读的那行仍要带退出码：那里没有字段可用
+    grep -q '被信号 HUP 打断 (退出码 131)' "${OS_LOG_MAIN}"
+}
+
+@test "jsonl: 退出码不会漏给下一条记录" {
+    log::exit_code error '装不上' 1
+    log::write info '继续干别的'
+    run python3 -c "
+import json
+recs = [json.loads(l) for l in open('${OS_LOG_JSONL}', encoding='utf-8')]
+assert 'exit_code' not in recs[-1], recs[-1]
+print('ok')
+"
+    [ "${output}" = 'ok' ]
+}
+
+@test "jsonl: 被级别过滤掉的退出码也不会漏给下一条" {
+    # debug 默认不落盘，那一跳提前 return —— 码要是没在入口清掉，
+    # 就会挂到下一条毫不相干的记录上
+    log::exit_code debug '这条被过滤' 7
+    log::write info '下一条'
+    run python3 -c "
+import json
+recs = [json.loads(l) for l in open('${OS_LOG_JSONL}', encoding='utf-8')]
+assert 'exit_code' not in recs[-1], recs[-1]
+print('ok')
+"
+    [ "${output}" = 'ok' ]
+}
+
 # --- 分层 ---
 
 @test "log.sh 不调用任何 ui::*（同层禁止互相依赖）" {

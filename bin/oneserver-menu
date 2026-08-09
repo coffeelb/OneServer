@@ -677,7 +677,10 @@ menu_run() {
     if [[ -e ${OS_MENU_BACK_FLAG} ]]; then
         rm -f -- "${OS_MENU_BACK_FLAG}" 2>/dev/null || true
     else
-        if ((rc != 0)); then
+        # 130（用户取消）与 131（被信号打断）不再复述：那是用户自己刚做的动作，
+        # 而且被打断时 errors.sh 已经在屏幕上打过「被 X 打断，已停止执行」。
+        # 用 os::warn 说第三遍，等于把一次正常操作记成异常送进面板
+        if ((rc != 0 && rc != 130 && rc != 131)); then
             os::warn "上一条命令以退出码 ${rc} 结束"
         fi
         os::prompt "${OS_UI_SYM_ENTER} 返回菜单 · q 退出" 0

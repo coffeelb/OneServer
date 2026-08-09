@@ -18,6 +18,11 @@ ExecStart=/opt/oneserver/script/ops/web_collect.sh --tier=live --non-interactive
 # 实测：只放开数据目录时写 0 行，加上这一条写 12 行。
 ProtectSystem=strict
 ReadWritePaths=/run/oneserver-public /var/log/oneserver
+# 数据目录在 tmpfs 上，重启即空，必须由 systemd 在挂命名空间之前建回来 ——
+# 三行缺一不可，理由见 fast 那份的说明
+RuntimeDirectory=oneserver-public
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

@@ -91,6 +91,35 @@ os::output 0 note=ok
 EOF
     chmod +x /opt/oneserver/script/ops/selftest_noise.sh
 
+    # 自己给自己发 INT 的假命令：等价于用户在这条命令跑到一半时按 Ctrl-C
+    cat >/opt/oneserver/script/ops/selftest_sig.sh <<'EOF'
+#!/bin/bash
+#
+# 端到端测试用：自中断
+#
+# @command      selftest sig
+# @name         端到端中断
+# @group        toolbox
+# @order        930
+# @privilege    any
+# @requires_lib >= 1.0
+# @description  自己给自己发 INT，验证菜单不复述用户自己的中断
+#
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 027
+
+source /opt/oneserver/lib/bootstrap.sh
+
+printf 'SIG-RAN\n'
+kill -INT $$
+sleep 5
+EOF
+    chmod +x /opt/oneserver/script/ops/selftest_sig.sh
+
     # 独占一个分组的**叶子**命令：菜单对单成员分组会自动跳过那一层，而跳过之后
     # 拿到的是 `r:`（执行）还是 `c:`（下潜）两条路完全不同。已有的单成员分组
     # （容器那两个）成员都是有下级的父命令，走不到 `r:` 那条路。
@@ -325,6 +354,19 @@ menu_num() {
     run bash -c "printf '${tb}\n${echo_n}\n' | /opt/oneserver/bin/oneserver menu"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"ECHO:"* ]]
+}
+
+@test "菜单不复述用户自己的中断" {
+    local tb sig
+    tb=$(menu_num "$(menu_screen '\n')" '工具箱')
+    [ -n "${tb}" ]
+    sig=$(menu_num "$(menu_screen "${tb}\n")" '端到端中断')
+    [ -n "${sig}" ]
+    run bash -c "printf '${tb}\n${sig}\n\n' | /opt/oneserver/bin/oneserver menu"
+    [[ "${output}" == *"SIG-RAN"* ]]
+    # errors.sh 已经在屏幕上打过「被 INT 打断，已停止执行」，菜单再说一遍是
+    # 第三次 —— 而它用的是 os::warn，那一遍会被当成异常送进面板
+    [[ "${output}" != *"上一条命令以退出码"* ]]
 }
 
 @test "菜单收纳：虚拟分组展开后显示其成员" {

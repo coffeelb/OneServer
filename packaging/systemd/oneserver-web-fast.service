@@ -25,6 +25,17 @@ ExecStartPost=/opt/oneserver/script/ops/web_notify.sh --non-interactive
 ProtectSystem=full
 # 数据目录在 tmpfs 上（规范 §4.2）；state 那条是给历史曲线的盘上副本用的
 ReadWritePaths=/run/oneserver-public /opt/oneserver/state
+# **数据目录只能由 RuntimeDirectory 建**，不能指望采集器自己 mkdir：/run 是
+# tmpfs，重启后目录没了，而 ReadWritePaths 挂命名空间发生在 ExecStart **之前**，
+# 路径不存在就直接 226/NAMESPACE —— 进程压根没起来，轮不到它去建。现场表现是
+# 三个 timer 全 active、面板却一份数据都没有，且不会自愈，直到有人在终端跑一条
+# root 命令（退出钩子里的 probe::snapshot_flush 顺手把目录建了回来）才恢复。
+# 给 ReadWritePaths 加 `-` 前缀不是解法：路径被忽略后 /run 仍是只读，进程起来了
+# 也写不进去。
+# **Preserve=yes 不能省**：oneshot 每轮都退出，默认行为是退出即删这个目录。
+RuntimeDirectory=oneserver-public
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 # **read-only 而不是 yes**：yes 会把 /root 整个藏掉，于是
 # probe::ssh_authkeys 读不到 /root/.ssh/authorized_keys，面板上「root 公钥数」
 # 永远是 0 —— 而那个数字正是「能不能安全地关掉密码登录」的依据，
