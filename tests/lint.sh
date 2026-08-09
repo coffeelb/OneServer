@@ -34,7 +34,10 @@ IFS=$'\n\t'
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
-readonly MAX_DISABLES=19
+# 第 20 条在 uninstall.sh：`OS_PROBE_NO_SNAPSHOT=1` 由 lib/probe.sh 的退出钩子
+# 消费，本文件内必然「未使用」。不置它的话，钩子会把卸载刚删掉的
+# $OS_PUBLIC_DIR 在退出时 mkdir 回来 —— 卸载命令自己不报任何错。
+readonly MAX_DISABLES=20
 
 # 变更流水注释的棘轮上限。**只降不升**：清理一批就把这个数往下调，
 # 它记录的是「还欠多少」，不是「允许多少」。

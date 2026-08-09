@@ -64,6 +64,9 @@ fi
 declare -a patterns=(
     'VERSION'
     'install.sh'
+    # 卸载器必须随分发落地：装机的人多半是 curl 一条命令进来的，手上没有仓库。
+    # 它故意不在 script/ 下（那里的东西一律进菜单），入口是 README 里的一行
+    'uninstall.sh'
     'bin/*'
     'lib/*'
     'script/*'

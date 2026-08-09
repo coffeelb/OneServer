@@ -54,7 +54,7 @@ export PATH
 umask 022
 
 # 与 install.sh 的 OWNED_TOP 必须一致：清单覆盖哪些，切换就换哪些。
-# 运行时数据（state/ public/ secure.conf）不在其中，切换不碰它们。
+# 运行时数据（state/ secure.conf）不在其中，切换不碰它们。
 TOP_ORDER=('lib' 'templates' 'packaging' 'script' 'bin')
 
 # 自检的墙钟上限（秒）。doctor --selftest 在真机上是几秒的事，

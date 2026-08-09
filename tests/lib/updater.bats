@@ -33,7 +33,7 @@ os_mk_root() {
         printf 'old\n' >"${ROOT}/${top}/mark"
     done < <(os_tops)
     printf '1.0.0\n' >"${ROOT}/VERSION"
-    mkdir -p "${ROOT}/state" "${ROOT}/public"
+    mkdir -p "${ROOT}/state"
     printf 'caddy\tinstalled\n' >"${ROOT}/state/components.tsv"
     printf 'db.password=s3cret\n' >"${ROOT}/secure.conf"
 }
@@ -91,7 +91,6 @@ os_marks_are() {
     [ "${status}" -eq 0 ]
     [ "$(cat "${ROOT}/state/components.tsv")" = "$(printf 'caddy\tinstalled')" ]
     [ "$(cat "${ROOT}/secure.conf")" = 'db.password=s3cret' ]
-    [ -d "${ROOT}/public" ]
 }
 
 # --- 自检不过就地回滚 ---------------------------------------------

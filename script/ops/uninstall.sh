@@ -8,7 +8,7 @@
 # @order        30
 # @privilege    root
 # @requires_lib >= 1.20
-# @args         [--id=<组件标识>] [--all] [--purge] [--keep-pkg] [--confirm-uninstall=<组件标识|oneserver>]
+# @args         [--id=<组件标识>] [--keep-pkg] [--confirm-uninstall=<组件标识>]
 # @description  按资源清单反向卸载应用；数据与备份永不自动删除
 #
 
@@ -295,154 +295,11 @@ do_secrets() {
     return 0
 }
 
-# ==================================================================
-# --all：卸载本工具自身（计划 6.5）
-# ==================================================================
-#
-# 与卸组件是两件事，所以走一条单独的路径：**本工具自身不在 state 里**
-# （state 记的是「本工具装过什么」，它自己不是自己的组件），
-# 所以这一段是**唯一**允许出现硬编码路径的地方 —— 那几个路径由
-# `install.sh` 写死地放下去，也只能由这里写死地收回来。
-#
-# 三件事必须说清楚：
-#
-#   1. **已装的组件不会被卸载**。而且一旦本工具没了，那份资源清单也就没了 ——
-#      它们此后只能手工清。所以清单里逐个列出来，让人有机会先去卸组件
-#   2. **备份归档永远保留**（`/var/backups/oneserver`）。它是「机器没了之后
-#      还能恢复」的东西，删它与卸载工具是两个决定
-#   3. `--purge` 才连 `/etc/oneserver` 与 `secure.conf` 一起删。**默认不删**：
-#      secure.conf 里是这台机器上所有自动生成的密码，站点还在跑、库还在用，
-#      删掉它等于把那些密码永久丢掉
-#
-# 自删是安全的：`rm -rf /opt/oneserver` 走的是 unlink，而 bash 持着已打开的
-# fd，inode 要等进程退出才真正释放（危险的是**覆盖**，不是 unlink —— K13 是
-# 前者）。lib 早已 source 进内存，后面不再有任何 source。
-
-self_uninstall() {
-    local purge=${1}
-
-    local -a ids=()
-    mapfile -t ids < <(os::state_list)
-
-    local -a lines=()
-    if [[ ${purge} -eq 1 ]]; then
-        lines+=("程序目录 ${OS_ROOT} 整个（含 state 与凭据库）")
-    else
-        lines+=("程序目录 ${OS_ROOT} 里除 secure.conf 之外的一切（含 state 与 public 快照）")
-    fi
-    lines+=("入口 /usr/local/bin/oneserver 与 /usr/local/bin/os")
-    lines+=("日志目录 ${OS_LOG_DIR}")
-    lines+=('logrotate 配置 /etc/logrotate.d/oneserver')
-    lines+=('bash 补全 /etc/bash_completion.d/oneserver')
-    lines+=("本工具自带的 systemd unit（own:，如备份 timer）")
-    if [[ ${purge} -eq 1 ]]; then
-        lines+=("配置目录 ${OS_ETC_DIR}")
-        lines+=("**凭据库 ${OS_SECURE_CONF} —— 里面是本机所有自动生成的密码**")
-    fi
-
-    os::section '卸载 OneServer 自身'
-    os::kv '安装位置' "${OS_ROOT}" \
-        '版本' "$(cat "${OS_VERSION_FILE}" 2>/dev/null || printf '未知')" \
-        '已登记的组件' "${#ids[@]} 个" \
-        '连配置与凭据一起删' "$([[ ${purge} -eq 1 ]] && printf '是（--purge）' || printf '否')"
-
-    os::section '以下不会被删除'
-    os::info "    备份归档 ${OS_BACKUP_DIR}"
-    if [[ ${purge} -ne 1 ]]; then
-        os::info "    配置 ${OS_ETC_DIR}"
-        os::info "    凭据库 ${OS_SECURE_CONF}（站点还在用里面的密码；要一起删加 --purge）"
-    fi
-    if [[ ${#ids[@]} -gt 0 ]]; then
-        local one
-        for one in "${ids[@]}"; do
-            os::info "    组件 ${one}（连同它装的包与文件）"
-        done
-        os::warn '这些组件不会被卸载，而本工具一旦没了，它们的资源清单也就没了 ——'
-        os::warn "要让它们能被干净卸掉，先逐个：oneserver uninstall ${ids[0]}"
-    fi
-
-    # 同 main()：dry-run 下 destroy_confirm 必然返回 1，那是「预演」不是
-    # 「用户放弃」，继续往下走才能让 --all --dry-run 预演出真实会执行的命令
-    if ! os::destroy_confirm --arg confirm-uninstall 'oneserver' -- \
-        ${lines[@]+"${lines[@]}"}; then
-        if [[ ${OS_DRYRUN} -ne 1 ]]; then
-            os::info '已取消，什么都没有动'
-            os::output 130 removed=no
-            return 130
-        fi
-        os::info '[dry-run] 继续预演下面每一步会执行的命令（内部命令自动跳过，不会真的执行）'
-    fi
-
-    # own: 的 unit 先停掉再删文件 —— 留一个指向已删除 ExecStart 的 timer，
-    # 会让 systemd 每次触发都记一条失败，而那时已经没有工具能解释它是什么
-    local u
-    for u in $(os::state_units 'backup'); do
-        if [[ ${u} == own:* ]]; then
-            os::systemd_remove "${u}" || true
-        fi
-    done
-    local unit
-    for unit in "${OS_SYSTEMD_UNIT_DIR}"/oneserver-*.timer "${OS_SYSTEMD_UNIT_DIR}"/oneserver-*.service; do
-        [[ -e ${unit} ]] || continue
-        os::systemd_remove "own:${unit##*/}" || true
-    done
-
-    os::record_change '卸载了 OneServer 自身'
-    os::run --allow-fail '删除入口链接' -- rm -f -- /usr/local/bin/oneserver /usr/local/bin/os || true
-    os::run --allow-fail '删除 bash 补全' -- rm -f -- /etc/bash_completion.d/oneserver || true
-    os::run --allow-fail '删除 logrotate 配置' -- rm -f -- /etc/logrotate.d/oneserver || true
-
-    # **程序目录在前、日志目录在后**：反过来的话，删程序目录这一步已经没有
-    # 日志可写了。删完程序目录本进程仍能跑完 —— `rm` 走的是 unlink，
-    # bash 持着已打开的 fd，inode 要等进程退出才真正释放（危险的是覆盖，不是
-    # unlink，K13 是前者）。最后那条删日志的命令自己写不进日志，框架静默降级
-    if [[ ${purge} -eq 1 ]]; then
-        os::run --allow-fail '删除配置目录' -- rm -rf -- "${OS_ETC_DIR}" || true
-        os::run --allow-fail '删除程序目录' -- rm -rf -- "${OS_ROOT}" || true
-    else
-        # **凭据库必须留下**：`secure.conf` 就在 $OS_ROOT 里面，
-        # 而里面是站点**此刻还在用**的数据库密码 —— 跟着程序目录一起删掉，
-        # 等于「卸载一个管理工具」顺手让那些站点永久丢失自己的密码（K1 那一类）。
-        # 用 find 排除它，而不是列一串要删的子目录：后者漏掉 .staging / .old
-        # 这种更新期间留下的目录，而且每加一个运行时目录就要记得回来补一行
-        os::run --allow-fail '删除程序目录（保留凭据库）' -- find "${OS_ROOT}" -mindepth 1 -maxdepth 1 ! -name secure.conf -exec rm -rf {} + || true
-    fi
-    os::run --allow-fail '删除日志目录' -- rm -rf -- "${OS_LOG_DIR}" || true
-
-    if [[ ${OS_DRYRUN} -eq 1 ]]; then
-        os::info '[dry-run] 将卸载 OneServer 自身'
-        os::output 0 removed=no purge="${purge}" components="${#ids[@]}" changed=dry-run
-        return 0
-    fi
-
-    os::ok 'OneServer 已卸载'
-    os::info "备份归档仍在 ${OS_BACKUP_DIR}"
-    if [[ ${purge} -ne 1 ]]; then
-        os::info "配置仍在 ${OS_ETC_DIR}"
-        os::info "凭据库仍在 ${OS_SECURE_CONF} —— 站点还在用里面的密码；确认不需要了再删"
-    fi
-    if [[ ${#ids[@]} -gt 0 ]]; then
-        os::warn "${#ids[@]} 个组件仍装在系统上，需要手工清理"
-    fi
-    os::output 0 removed=yes purge="${purge}" components="${#ids[@]}"
-    return 0
-}
-
 # ------------------------------------------------------------------
 
 main() {
     local keep_pkg=0
     os::flag --arg keep-pkg && keep_pkg=1
-    local purge=0
-    os::flag --arg purge && purge=1
-
-    # --all 走另一条路：卸的是本工具自身，不是某个组件。
-    # **这一段必须排在问组件之前** —— 原来先无条件问一句「要卸载哪个组件」，
-    # 于是 `uninstall --all` 也得先答一个跟它毫无关系的问题
-    if os::flag --arg all; then
-        self_uninstall "${purge}"
-        return $?
-    fi
 
     un_candidates
     [[ ${#UN_CANDIDATES[@]} -gt 0 ]] \

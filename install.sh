@@ -431,14 +431,19 @@ remove_orphans() {
 }
 
 setup_dirs() {
-    mkdir -p "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state" "${ROOT}/public"
+    # **没有 ${ROOT}/public**：probe 快照与面板数据在 /run/oneserver-public
+    # （tmpfs），由采集器与框架自己建。这里再建一个同名目录，落下的是一个
+    # 谁也不写、却全局可读的空壳 —— 卸载时还得记得清它
+    mkdir -p "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state"
     chown root:root "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
     chmod 0755 "${ROOT}"
     chmod 0750 "${ETC_DIR}" "${LOG_DIR}"
     chmod 0700 "${BACKUP_DIR}"
     chmod 0750 "${ROOT}/state"
-    # public 是给非 root 读的 probe 快照，0755 是有意的
-    chmod 0755 "${ROOT}/public"
+    # 早先的版本在这里建过 ${ROOT}/public。它不在 OWNED_TOP 里，remove_orphans
+    # 扫不到，装过那些版本的机器会一直留着一个空的全局可读目录。只在它确实空着
+    # 时收掉 —— 万一有人往里放过东西，那是他的文件，不归安装器处置
+    rmdir "${ROOT}/public" 2>/dev/null || true
 
     # secure.conf 只建一个 0600 的空壳，**不覆盖已有的** ——
     # 里面是这台机器上所有自动生成的密码

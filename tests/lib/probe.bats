@@ -455,6 +455,18 @@ EOF
     grep -q '^os.id' "${OS_PROBE_SNAPSHOT}"
 }
 
+@test "OS_PROBE_NO_SNAPSHOT=1 时不落快照，也不把目录建回来" {
+    os_is_root || skip '非 root'
+    probe::os_id
+    # 卸载器删完落点之后正是这个状态：目录没了，而钩子还要跑一次。
+    # 没有这个开关的话，退出时 mkdir 会把刚删掉的目录原样造回来
+    rm -rf "${OS_PUBLIC_DIR}"
+    OS_PROBE_NO_SNAPSHOT=1
+    probe::snapshot_flush
+    [ ! -e "${OS_PUBLIC_DIR}" ]
+    OS_PROBE_NO_SNAPSHOT=0
+}
+
 @test "快照落地前过脱敏 —— 它是 0644，本机任何用户都读得到" {
     os_is_root || skip '非 root'
     local pass='S3cr3t-P@ssw0rd-长密码'

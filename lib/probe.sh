@@ -41,6 +41,10 @@ OS_PROBE__VALS=()
 # 缓存超过这个秒数就明确告知「数据是旧的」，而不是默默用
 OS_PROBE_CACHE_MAX_AGE="${OS_DEFAULT_PROBE_SNAPSHOT_MAX_AGE}"
 
+# 置 1 则退出时不落快照。**只有卸载器该动它**：快照钩子跑在退出路径上，
+# 而卸载的最后一步正是删掉快照所在的目录（见 probe::snapshot_flush）
+OS_PROBE_NO_SNAPSHOT=0
+
 probe::_is_root() {
     [[ ${EUID:-$(id -u)} -eq 0 ]]
 }
@@ -75,6 +79,11 @@ probe::_remember() {
 # 就得自己调函数记录，`script/ops/web_collect.sh` 就是这么做的。
 probe::snapshot_flush() {
     local target=${OS_PROBE_SNAPSHOT}
+    # 卸载器删完落点之后置 1。**这个钩子挂在退出路径上，包括卸载那一次** ——
+    # 没有这个开关的话，它会在 $OS_PUBLIC_DIR 刚被删掉之后立刻 mkdir 回来：
+    # 卸载命令自己没有任何报错，机器上却留着一个目录（实测撞见，见
+    # tests/lib/uninstall.bats 那条全盘扫描）
+    [[ ${OS_PROBE_NO_SNAPSHOT:-0} -eq 1 ]] && return 0
     probe::_is_root || return 0
     [[ ${#OS_PROBE__KEYS[@]} -gt 0 ]] || return 0
     # **`mkdir` 不带 `-p`，这是有意的**：这个钩子挂在退出路径上，包括卸载那次。

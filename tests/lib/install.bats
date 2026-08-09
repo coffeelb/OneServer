@@ -257,20 +257,37 @@ os_mf_with() {
     [ -f "${ROOT}/lib/paths.sh" ]
 }
 
-@test "orphans: 不碰 state/、public/ 与 secure.conf" {
+@test "orphans: 不碰 state/ 与 secure.conf" {
     os_mk_src
     os_install_run "parse_manifest '${STAGING}/manifest.txt'; place_files"
     [ "${status}" -eq 0 ]
-    mkdir -p "${ROOT}/state" "${ROOT}/public"
+    mkdir -p "${ROOT}/state"
     printf 'caddy\tinstalled\n' >"${ROOT}/state/components.tsv"
     printf 'db.password=s3cret\n' >"${ROOT}/secure.conf"
-    printf '{}\n' >"${ROOT}/public/probe.tsv"
 
     os_install_run "parse_manifest '${STAGING}/manifest.txt'; remove_orphans"
     [ "${status}" -eq 0 ]
     [ "$(cat "${ROOT}/secure.conf")" = 'db.password=s3cret' ]
     [ -f "${ROOT}/state/components.tsv" ]
-    [ -f "${ROOT}/public/probe.tsv" ]
+}
+
+# 面板数据在 /run/oneserver-public（tmpfs）。早先的版本在程序目录下也建过一个
+# 同名目录，没有任何东西往里写 —— 装过那些版本的机器会一直留着一个空的
+# 全局可读目录，而 remove_orphans 扫不到它（不在 OWNED_TOP 里）
+@test "dirs: 不再建 public/，并收掉旧版本留下的空壳" {
+    mkdir -p "${ROOT}/public"
+    os_install_run 'setup_dirs'
+    [ "${status}" -eq 0 ]
+    [ ! -e "${ROOT}/public" ]
+    [ -d "${ROOT}/state" ]
+}
+
+@test "dirs: 旧 public/ 里有东西时不动它（那是用户的文件）" {
+    mkdir -p "${ROOT}/public"
+    printf 'mine\n' >"${ROOT}/public/keep.txt"
+    os_install_run 'setup_dirs'
+    [ "${status}" -eq 0 ]
+    [ -f "${ROOT}/public/keep.txt" ]
 }
 
 # --- 参数 ---------------------------------------------------------

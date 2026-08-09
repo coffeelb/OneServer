@@ -356,6 +356,27 @@ menu_num() {
     [[ "${output}" == *"ECHO:"* ]]
 }
 
+@test "clean overview 是只读的：跑完什么都没少" {
+    [ -d /opt/oneserver ] || skip '需要装好的 /opt/oneserver'
+    mkdir -p /var/tmp/oneserver
+    printf 'x\n' >/var/tmp/oneserver/leftover
+    run bash -c '/opt/oneserver/bin/oneserver clean --action=overview --non-interactive'
+    [ "${status}" -eq 0 ]
+    # 默认动作只报告。它要是动了手，这个文件就没了
+    [ -f /var/tmp/oneserver/leftover ]
+    [[ "${output}" == *'可以直接清'* ]]
+    [[ "${output}" == *'只报告，不在这里删'* ]]
+    rm -rf /var/tmp/oneserver
+}
+
+@test "clean 的 json 信封字段齐全" {
+    [ -d /opt/oneserver ] || skip '需要装好的 /opt/oneserver'
+    run bash -c '/opt/oneserver/bin/oneserver clean --action=overview --non-interactive --output=json'
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'"safe_kb"'* ]]
+    [[ "${output}" == *'"orphan_archives"'* ]]
+}
+
 @test "菜单不复述用户自己的中断" {
     local tb sig
     tb=$(menu_num "$(menu_screen '\n')" '工具箱')
