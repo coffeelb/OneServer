@@ -10,8 +10,9 @@
 # @requires     podman
 # @privilege    root
 # @requires_lib >= 1.28
-# @args         [--action=<ls|start|stop|restart|logs|rm|autoupdate>] [--name=<名字>] [--auto-update=<on|off>] [--lines=<行数>] [--confirm-rm=<名字>]
-# @description  创建、查看、启停、日志、删除与切换自动更新
+# @provides_unit ext:podman-auto-update.timer
+# @args         [--action=<ls|start|stop|restart|logs|rm|autoupdate|au-on|au-off|au-now>] [--name=<名字>] [--auto-update=<on|off>] [--lines=<行数>] [--confirm-rm=<名字>]
+# @description  创建、查看、启停、日志、删除与自动更新
 #
 
 set -Eeuo pipefail
@@ -36,6 +37,18 @@ source /opt/oneserver/lib/bootstrap.sh
 # **不是本工具建的容器照样列出来，但不碰**（`ls` 里「本工具托管」那一栏）：
 # 机器上可能有别人 `podman run` 起来的东西，把它们藏起来会让人以为没有，
 # 而替它们做决定更糟。
+#
+# ==================================================================
+# 自动更新是**标签 + 定时器**两件事，缺一不成
+# ==================================================================
+#
+# 标签（Quadlet 里的 `AutoUpdate=registry`）说的是「这个容器愿意被更新」，
+# 真正去拉镜像重启容器的是系统自带的 `podman-auto-update.timer`。**只打标签
+# 不开定时器，什么都不会发生** —— 这正是「切换了自动更新却没有任何反应」的
+# 来源，所以这一屏两件事都要能管，列表页两件事都要显示。
+#
+# 定时器是 `ext:` 的（发行版包带来的），开关只用 enable/disable，**不删文件**。
+# 它是全机一份，开关影响机器上所有打了标签的容器，不是单个容器的设置。
 
 readonly QUADLET_DIR='/etc/containers/systemd'
 readonly NAME_RE='^[a-z0-9][a-z0-9_-]{0,62}$'
@@ -201,12 +214,20 @@ action_ls() {
             "compose_project=${PC_PROJECTS[i]}" "auto_update=${PC_AUTOUPDATE[i]}"
     done
     os::table '编号' 'ID' '名称' '镜像' '状态' '自启' '自动更新标记' -- "${cells[@]}"
-    if ((any_autoupdate == 1)); then
-        probe::service_active "${AUTOUPDATE_TIMER}"
-        [[ ${OS_PROBE_VALUE} == active ]] \
-            || os::warn "有容器开着自动更新，但 ${AUTOUPDATE_TIMER} 没在跑，标签不会生效：oneserver install podman --auto-update=y"
+
+    # 标签与定时器是两件事，只显示标签会让人以为已经开好了
+    probe::service_active "${AUTOUPDATE_TIMER}"
+    local svc=${OS_PROBE_VALUE}
+    local svc_label='未开启'
+    [[ ${svc} == active ]] && svc_label='已开启'
+    probe::timer_next "${AUTOUPDATE_TIMER}"
+    local next=${OS_PROBE_VALUE}
+    os::kv '自动更新服务' "${svc_label}${next:+（下次 ${next}）}"
+    if ((any_autoupdate == 1)) && [[ ${svc_label} == 未开启 ]]; then
+        os::warn '有容器打了自动更新标记，但自动更新服务没开 —— 标记不会生效，用「开启自动更新服务」把它起来'
     fi
-    os::output 0 count="${#PC_NAMES[@]}"
+
+    os::output 0 count="${#PC_NAMES[@]}" auto_update_service="${svc_label}"
     return 0
 }
 
@@ -357,8 +378,99 @@ action_autoupdate() {
         os::die 1 "容器 ${name} 重启后没能跑起来，Quadlet 文件已改，容器状态需要人工确认"
     fi
 
-    os::ok "容器 ${name} 的自动更新已设为「${target_label}」"
+    os::ok "容器 ${name} 的自动更新标签已设为「${target_label}」"
+    if [[ ${target} == on ]]; then
+        probe::service_active "${AUTOUPDATE_TIMER}"
+        [[ ${OS_PROBE_VALUE} == active ]] \
+            || os::warn '自动更新服务没开，这个标签暂时不会生效 —— 用「开启自动更新服务」把它起来'
+    fi
     os::output 0 name="${name}" auto_update="${target}" changed=yes
+    return 0
+}
+
+# ------------------------------------------------------------------
+# 自动更新服务（全机一份的定时器）
+# ------------------------------------------------------------------
+
+# 这个 unit 是发行版包提供的，老版本 podman 没有它。缺了就明说，
+# 不能装作开过 —— 「开了但什么都没发生」比「这台机器不支持」难查得多
+require_autoupdate_unit() {
+    probe::unit_exists "${AUTOUPDATE_TIMER}"
+    [[ ${OS_PROBE_VALUE} == yes ]] \
+        || os::die 3 "这个 podman 版本没有 ${AUTOUPDATE_TIMER}，自动更新服务无从开启"
+    return 0
+}
+
+action_au_on() {
+    require_podman
+    require_autoupdate_unit
+
+    probe::service_active "${AUTOUPDATE_TIMER}"
+    if [[ ${OS_PROBE_VALUE} == active ]]; then
+        os::ok '自动更新服务已经开着，未改动'
+        os::output 0 auto_update_service=on changed=no
+        return 0
+    fi
+
+    # ext:：包自带的 unit，卸载时只停止禁用、禁止删文件（D36）
+    os::systemd_enable --now "${AUTOUPDATE_TIMER}" ext
+    os::ok '自动更新服务已开启 —— 只动打了自动更新标记的容器，其余一概不碰'
+    os::info '给容器打标记：本屏的「切换自动更新标签」'
+    os::output 0 auto_update_service=on changed=yes
+    return 0
+}
+
+action_au_off() {
+    require_podman
+    require_autoupdate_unit
+
+    # 两样都要问：只看 active 的话，一个「这次没跑但开机会自启」的定时器会被
+    # 当成已经关了，于是重启之后它自己回来
+    probe::service_enabled "${AUTOUPDATE_TIMER}"
+    local enabled=${OS_PROBE_VALUE}
+    probe::service_active "${AUTOUPDATE_TIMER}"
+    if [[ ${OS_PROBE_VALUE} != active && ${enabled} != enabled ]]; then
+        os::ok '自动更新服务本来就没开，未改动'
+        os::output 0 auto_update_service=off changed=no
+        return 0
+    fi
+
+    # 停 + 禁用两件都要做：只 stop 的话重启机器它照样回来，
+    # 而用户以为已经关掉了。容器上的标记留着，再开启时原样生效
+    os::systemd_stop "${AUTOUPDATE_TIMER}"
+    os::systemd_disable "${AUTOUPDATE_TIMER}"
+    os::ok '自动更新服务已关闭（容器上的标记留着，再开启时照旧生效）'
+    os::output 0 auto_update_service=off changed=yes
+    return 0
+}
+
+# 手动跑一轮，不等定时器。定时器没开的人也用得上 ——
+# 「我自己决定什么时候更新」是一种合理的用法，不是非要开定时器不可
+action_au_now() {
+    require_podman
+
+    local -i marked=0
+    local -i i
+    load_container_rows
+    for ((i = 0; i < ${#PC_NAMES[@]}; i++)); do
+        [[ -n ${PC_AUTOUPDATE[i]} ]] && marked=1
+    done
+    ((marked == 1)) \
+        || os::die 2 '没有容器打过自动更新标记，跑了也不会动任何东西 —— 先用「切换自动更新标签」标一个'
+
+    os::warn '打了标记的容器里，镜像有新版本的会被拉取并重启，期间这些容器会短暂中断'
+    os::record_change '手动执行了一次 podman 自动更新'
+    os::run_out '执行一次自动更新' -- podman auto-update \
+        || os::die 1 '自动更新执行失败（详情看日志）'
+
+    if [[ ${OS_DRYRUN} -eq 1 ]]; then
+        os::info '[dry-run] 更新没有真的执行，结果无从确认'
+        os::output 0 changed=dry-run
+        return 0
+    fi
+    os::section '更新结果'
+    os::info "${OS_RUN_OUTPUT}"
+    os::output 0 changed=yes
     return 0
 }
 
@@ -373,7 +485,9 @@ main() {
 
     os::action_menu --overview action_ls --arg action '操作' dispatch \
         'start=启动' 'stop=停止' 'restart=重启' \
-        'logs=查看日志' 'rm=删除容器' 'autoupdate=切换自动更新'
+        'logs=查看日志' 'rm=删除容器' \
+        'autoupdate=切换自动更新标签' \
+        'au-on=开启自动更新服务' 'au-off=关闭自动更新服务' 'au-now=立即检查更新'
 }
 
 dispatch() {
@@ -385,7 +499,10 @@ dispatch() {
         logs) action_logs ;;
         rm) action_rm ;;
         autoupdate) action_autoupdate ;;
-        *) os::die 2 "未知操作「${1}」，可用：ls start stop restart logs rm autoupdate" ;;
+        au-on) action_au_on ;;
+        au-off) action_au_off ;;
+        au-now) action_au_now ;;
+        *) os::die 2 "未知操作「${1}」，可用：ls start stop restart logs rm autoupdate au-on au-off au-now" ;;
     esac
 }
 

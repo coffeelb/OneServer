@@ -12,7 +12,7 @@
 # @provides_unit ext:docker.service
 # @provides_unit ext:docker.socket
 # @provides_unit ext:containerd.service
-# @args         [--compose=<y|n>] [--purge-podman-docker=<y|n>] [--restart-daemon=<y|n>] [--watchtower=<n|y>] [--network-mode=<公网|内网>]
+# @args         [--compose=<y|n>] [--purge-podman-docker=<y|n>] [--restart-daemon=<y|n>] [--network-mode=<公网|内网>]
 # @description  从 Docker 官方源装 Docker CE，处理命令名冲突
 #
 
@@ -37,7 +37,6 @@ source /opt/oneserver/lib/bootstrap.sh
 # **配**：三个用户该选的 ——
 #   `--compose`              装不装 docker-compose-plugin（默认 y）
 #   `--purge-podman-docker`  撞上 podman-docker 时才问（默认 n）
-#   `--watchtower`           部署不部署 Watchtower（默认 n，见下）
 #   端口默认绑哪个地址由网络定位决定，**装的时候就问**（没设过才问，一台机器
 #   一次）。两处各问一半正是「端口发布了却连不上」与「以为只绑了本机」的成因。
 #
@@ -74,35 +73,17 @@ source /opt/oneserver/lib/bootstrap.sh
 # 就写进容器配置了。改完只能列出对不上的那几个，由人挑时间重建。
 #
 # ==================================================================
-# 自动更新：Docker 没有 Quadlet，只能靠 Watchtower
+# 自动更新不在这里
 # ==================================================================
 #
-# podman 那边的自动更新是 Quadlet 的 `AutoUpdate=` 标签 + 系统自带的
-# `podman-auto-update.timer`（D 系列，见 install_podman.sh）。Docker 没有
-# 等价的原生机制，业界通行做法是部署 Watchtower 盯着 docker.sock，定时拉
-# 新镜像、重建带标签的容器。
+# 自动更新是**名单驱动**的（名单里的容器才更新，见 docker_container.sh），
+# 而**装 Docker 的这一刻名单必然是空的** —— 机器上一个容器都还没有。此时
+# 部署更新器要么无事可做，要么只能不带名单起，而不带名单等于扫全机，正是
+# 「不在名单里的一概不动」的反面。
 #
-# **`--label-enable` 是硬要求，不是可选项**：不带它 Watchtower 默认更新
-# *所有*容器，与 podman 那边「标签驱动、默认不动」的哲学完全相反。带上它，
-# 只有 `oneserver docker run` 建容器时勾了自动更新（打上
-# `com.centurylinklabs.watchtower.enable=true`）的那些才会被动。
-#
-# **默认不部署**：与 podman 的 `--auto-update` 同一条理由（§15 降低安全性的
-# 选项默认为否）—— 夜里自动换镜像重启是一次没人盯着的变更。
-#
-# **它本身就是一个普通 docker 容器，不进资源清单**：docker 容器本来就不在
-# 本组件的资源清单里（dockerd 自己记账，见上面「卸」），Watchtower 不例外，
-# 卸载 docker 不特殊清理它——它会跟其他容器一样，随 dockerd 停止而停止。
-#
-# **镜像是 `nickfedor/watchtower`，不是原始的 `containrrr/watchtower`**：
-# 原项目已停止维护，`latest` 停在 2023-11 那次构建，内嵌的 Docker 客户端
-# 只认到 API 1.25——本地验证过，在新一点的 Docker Engine（此处 29.x，要求
-# 最低 API 1.40）上直接进重启循环，一条容器都更新不了。`nickfedor/watchtower`
-# 是社区接手维护的延续，构建是新的。
+# 所以这一步不问也不部署，装完指一句路。部署与开关都归 `oneserver docker`
+# 那一屏，全项目只有那一处会创建更新器容器。
 
-readonly WATCHTOWER_NAME='oneserver-watchtower'
-readonly WATCHTOWER_IMAGE='docker.io/nickfedor/watchtower'
-readonly WATCHTOWER_INTERVAL='86400'
 readonly APT_KEYRING_DIR='/etc/apt/keyrings'
 readonly DOCKER_KEYRING='/etc/apt/keyrings/docker.gpg'
 readonly DOCKER_LIST='/etc/apt/sources.list.d/docker.list'
@@ -258,12 +239,6 @@ main() {
     os::select --arg compose '安装 Docker Compose 插件（docker compose 子命令）' want_compose \
         'y=安装' 'n=不安装'
 
-    # **默认 n**：Watchtower 会按标签定时拉新镜像重建容器，对跑着生产站点的
-    # 机器，那是一次没人看着的变更 —— 想要的人显式开（§15）
-    local want_watchtower=''
-    os::select --arg watchtower '部署 Watchtower（按标签自动更新容器，每天检查一次）' want_watchtower \
-        'n=不部署' 'y=部署'
-
     # --- 冲突：docker 这个命令名现在归 podman ---
     #
     # podman-docker 提供的也是 `/usr/bin/docker`，与 docker-ce-cli 在 dpkg
@@ -409,48 +384,6 @@ main() {
     # 包装完通常已经把它拉起来了，这一步是幂等的补齐
     os::systemd_enable --now docker.service ext
 
-    # --- Watchtower ---
-    #
-    # 幂等判据：容器已经在跑就跳过；建过但停着就 start；两者都不是才 create。
-    # 用 `docker inspect` 探测存在性，同 docker_container.sh 的 container_exists
-    if [[ ${want_watchtower} == y ]]; then
-        local -i wt_exists=0 wt_running=0
-        if os::query --timeout 10 -- docker inspect "${WATCHTOWER_NAME}"; then
-            wt_exists=1
-            os::query --timeout 10 -- docker inspect -f '{{.State.Status}}' "${WATCHTOWER_NAME}"
-            [[ ${OS_RUN_OUTPUT} == running ]] && wt_running=1
-        fi
-
-        if ((wt_running == 1)); then
-            os::ok "${WATCHTOWER_NAME} 已在运行，已是目标状态"
-        else
-            os::run '拉取 Watchtower 镜像' -- docker pull "${WATCHTOWER_IMAGE}" \
-                || os::die 1 'Watchtower 镜像拉取失败'
-            if ((wt_exists == 1)); then
-                os::record_change "启动了已存在的 ${WATCHTOWER_NAME} 容器"
-                os::run '启动 Watchtower' -- docker start "${WATCHTOWER_NAME}" \
-                    || os::die 1 'Watchtower 启动失败'
-            else
-                os::record_change "创建了 ${WATCHTOWER_NAME} 容器"
-                os::run '创建并启动 Watchtower' -- docker run -d --name "${WATCHTOWER_NAME}" \
-                    --restart always \
-                    -v /var/run/docker.sock:/var/run/docker.sock \
-                    "${WATCHTOWER_IMAGE}" --label-enable --cleanup --interval "${WATCHTOWER_INTERVAL}" \
-                    || os::die 1 'Watchtower 创建失败'
-            fi
-            if [[ ${OS_DRYRUN} -eq 1 ]]; then
-                # os::run 已经在上面打过 [dry-run] 跳过的行；容器没有真的建，
-                # 校验它在不在跑是拿预演当真实执行，诚实地停在这里
-                os::info '[dry-run] Watchtower 没有真的部署，状态无从确认'
-            else
-                os::query --timeout 10 -- docker inspect -f '{{.State.Status}}' "${WATCHTOWER_NAME}"
-                [[ ${OS_RUN_OUTPUT} == running ]] \
-                    || os::die 1 "${WATCHTOWER_NAME} 没能起来，详情看 docker logs ${WATCHTOWER_NAME}"
-                os::ok "${WATCHTOWER_NAME} 已启动，只更新带 com.centurylinklabs.watchtower.enable=true 标签的容器"
-            fi
-        fi
-    fi
-
     # --- daemon.json ---
     local -i daemon_json_created=0 daemon_changed=0
     if [[ ${own_daemon_json} -eq 1 ]]; then
@@ -547,8 +480,7 @@ main() {
         'compose' "$([[ ${want_compose} == y ]] && printf '已安装' || printf '未安装')" \
         '网络定位' "${netmode}" \
         '端口默认绑定' "${bind_ip}" \
-        '守护进程配置' "${daemon_text}" \
-        'Watchtower' "$([[ ${want_watchtower} == y ]] && printf '已部署' || printf '未部署')"
+        '守护进程配置' "${daemon_text}"
 
     # 这句不能省。ufw 在这台机器上多半是开着的，而「开着防火墙」会让人以为
     # 没放行的端口进不来 —— 对 Docker 发布的端口，那个推论是错的
@@ -558,9 +490,10 @@ main() {
         os::info '显式写成 -p 0.0.0.0:8080:80 的端口就是对全网开放的，防火墙拦不住'
     fi
     os::info '下一步：oneserver docker run 建容器；看日志、启停与删除见 oneserver docker'
+    os::info '要自动更新：建容器时选上，或事后在 oneserver docker 里切换，再「开启自动更新服务」'
 
     os::output 0 version="${cur}" method="${method}" compose="${want_compose}" \
-        bind_ip="${bind_ip}" netmode="${netmode}" watchtower="${want_watchtower}"
+        bind_ip="${bind_ip}" netmode="${netmode}"
     return 0
 }
 

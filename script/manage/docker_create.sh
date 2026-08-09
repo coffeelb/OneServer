@@ -9,7 +9,7 @@
 # @requires     docker
 # @privilege    root
 # @requires_lib >= 1.20
-# @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|unless-stopped|on-failure|no>] [--auto-update]
+# @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|unless-stopped|on-failure|no>] [--auto-update=<y|n>]
 # @description  粘贴 docker run 命令，补齐参数后直接建容器
 #
 
@@ -45,14 +45,37 @@ source /opt/oneserver/lib/bootstrap.sh
 # 一处设定，此后每一条 `docker run` 都算数，包括用户自己在终端里敲的、
 # 以及 docker compose 起的。逐条命令去改写端口反而只能管住走这个入口的那些。
 #
-# **自动更新是标签驱动的，且只能在这里设**：Docker 没有 Quadlet 那样的
-# 声明式配置文件可编辑，`docker update` 也不支持改标签，已存在的容器无法
-# 原地切换 —— 想要自动更新，只能在创建时打上标签。运维需要重新配置一个
-# 容器的自动更新时，只能删了重建（同改任何其他 run 参数一样）。
+# **自动更新是名单驱动的**：名字进本工具在 state 里存的那份名单，更新器启动时
+# 拿着名单只盯这几个容器。这里问一句是因为**这是最省事的时机**，不是唯一时机 ——
+# 建完之后随时可以在 `oneserver docker` 里切换，容器不用重建（那正是名单模式
+# 相对标签模式换来的东西，见 docker_container.sh 文件头）。
+#
+# **这里不部署更新器**：名单里多一个名字与「机器上要不要跑一个定时更新器」
+# 是两个决定，建一个容器不该顺带做后一个。更新器没跑就提醒一句，由用户去
+# 「开启自动更新服务」。
+#
+# ==================================================================
+# 原始命令要留一份，凭据不能留
+# ==================================================================
+#
+# docker 容器没有 Quadlet 那样可读可 diff 的配置文件，事后想改参数只能凭
+# `docker inspect` 反推，而它推不全（自定义网络、复杂 mount）。所以把用户
+# 粘进来的这条命令**打成容器自己的一个标签**存下来：跟着容器走，容器删了
+# 记录也跟着没，生命周期是对的，也不用在本工具这边另立一份账。
+#
+# **存之前先掩码**：run 命令里带 `-e DB_PASSWORD=…` 是常态，而这份记录是给人
+# 翻阅的，明文密码不能进。掩码的代价是存下来的命令不能原样重跑，改的时候要
+# 自己把密码补回去 —— 另一个选择是把密码写进一个随时会被 `docker inspect`
+# 打出来的地方，那不能接受。
+#
+# 同一次扫描顺便把凭据值交给执行封装登记脱敏（`--secret-val`）。**在这之前
+# 它们是明文进日志的** —— 整条命令原样交给 docker 执行，而日志记的就是那条
+# 命令。podman 侧不中招是因为它翻译成文件、不把命令交给引擎。
 
 readonly NAME_RE='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
-readonly WATCHTOWER_LABEL='com.centurylinklabs.watchtower.enable=true'
-readonly WATCHTOWER_UNIT='oneserver-watchtower'
+readonly WATCHTOWER_NAME='oneserver-watchtower'
+readonly RUNCMD_LABEL='io.oneserver.run-cmd'
+readonly DOCKER_ID='docker'
 
 # ------------------------------------------------------------------
 
@@ -83,6 +106,108 @@ container_exists() {
         [[ ${line} == "${name}" ]] && return 0
     done <<<"${OS_RUN_OUTPUT}"
     return 1
+}
+
+watchtower_running() {
+    os::query --timeout 10 -- docker inspect -f '{{.State.Status}}' "${WATCHTOWER_NAME}" || return 1
+    [[ ${OS_RUN_OUTPUT} == running ]]
+}
+
+# 把名字加进自动更新名单。名单是空格分隔的一个值，与 `oneserver docker` 那边
+# 读写的是同一份（state 的 docker 组件下）。
+#
+# 全局 IFS 是 `\n\t`，空格不在里面 —— 拆名单必须自己把 IFS 设成空格，
+# 否则整份名单会当成一个词，「已经在里面了吗」永远判否，名单里于是出现重复名
+au_add() {
+    local name=${1} list one acc=''
+    list=$(os::state_get "${DOCKER_ID}" autoupdate '')
+    local IFS=' '
+    for one in ${list}; do
+        [[ ${one} == "${name}" ]] && return 0
+        acc+="${acc:+ }${one}"
+    done
+    IFS=$'\n\t'
+    acc+="${acc:+ }${name}"
+    os::state_set "${DOCKER_ID}" "autoupdate=${acc}" || os::die 1 '写入自动更新名单失败'
+    return 0
+}
+
+# 环境变量名看着像不像凭据。先转小写再比，否则 `Password`、`apiKey` 这类
+# 大小写混写的名字两边模式都不命中，而它们恰恰是最常见的写法
+cred_key() {
+    local k=${1,,}
+    case ${k} in
+        *pass* | *token* | *secret* | *key*) return 0 ;;
+    esac
+    return 1
+}
+
+# 扫一遍参数，产出两样东西：掩码后的参数（DC_SAFE，用来存进标签）与需要登记
+# 脱敏的凭据值（DC_SECRETS，交给执行封装）。
+#
+# 三种写法都要认：`-e KEY=V`（值在下一个词）、`--env=KEY=V`、`-eKEY=V`。
+# 掩码后**保持原来的形态**（两个词的仍是两个词），存下来的命令才跟用户粘进来的
+# 那条对得上，改的时候不用先在脑子里翻译一遍
+DC_SAFE=()
+DC_SECRETS=()
+scan_env_secrets() {
+    local -i k
+    local t prefix kv key val
+    DC_SAFE=()
+    DC_SECRETS=()
+    for ((k = 0; k < ${#args[@]}; k++)); do
+        t=${args[k]}
+        prefix=''
+        case ${t} in
+            -e | --env)
+                DC_SAFE+=("${t}")
+                k=$((k + 1))
+                [[ ${k} -lt ${#args[@]} ]] || break
+                kv=${args[k]}
+                ;;
+            --env=*)
+                prefix='--env='
+                kv=${t#--env=}
+                ;;
+            -e?*)
+                prefix='-e'
+                kv=${t#-e}
+                ;;
+            *)
+                DC_SAFE+=("${t}")
+                continue
+                ;;
+        esac
+        key=${kv%%=*}
+        val=${kv#*=}
+        if [[ ${kv} == *=* ]] && cred_key "${key}"; then
+            DC_SAFE+=("${prefix}${key}=***")
+            if [[ ${#val} -ge 6 ]]; then
+                DC_SECRETS+=("${val}")
+            elif [[ -n ${val} ]]; then
+                # 执行封装拒绝登记短于 6 个字符的值：短值全局替换会把整行命令
+                # 打成马赛克，看着脱敏了实际是把证据毁了。所以这里如实说它进了日志
+                os::warn "「${key}」的值不足 6 个字符，无法在日志里脱敏，它会明文留在日志里 —— 换一个更长的值"
+            fi
+        else
+            DC_SAFE+=("${prefix}${kv}")
+        fi
+    done
+    return 0
+}
+
+# 把掩码后的参数拼回一条可读的命令。含空白或引号的词补上引号，
+# 不然存下来的命令再粘出去就散架了
+safe_cmdline() {
+    local __dc_out=${1} __dc_one __dc_acc='docker run'
+    for __dc_one in ${DC_SAFE[@]+"${DC_SAFE[@]}"}; do
+        case ${__dc_one} in
+            *[[:space:]]* | *\"*) __dc_acc+=" \"${__dc_one//\"/\\\"}\"" ;;
+            *) __dc_acc+=" ${__dc_one}" ;;
+        esac
+    done
+    printf -v "${__dc_out}" '%s' "${__dc_acc}"
+    return 0
 }
 
 # ------------------------------------------------------------------
@@ -254,22 +379,14 @@ main() {
             'on-failure=仅异常退出时重启' 'no=不自动重启'
     fi
 
-    # --- 自动更新：标签驱动，只能在这里打 ---
+    # --- 自动更新：名单驱动 ---
     #
-    # Watchtower 用 `--label-enable` 起的，只更新带这个标签的容器；没装
-    # Watchtower 时打了标签也没有任何东西会去动它，这里如实提醒
+    # **默认 y**：容器不跟着上游镜像走，跑的就是一个再也不打补丁的东西。
+    # 名单本身不会让任何事情发生（要更新器跑起来才算数），所以这一问默认为是
+    # 并不构成「替用户放宽了什么」
     local -i autoupdate=0
-    os::flag --arg auto-update && autoupdate=1
-    if ((autoupdate == 1)); then
-        # **不能塞进 `args`**：`args` 是用户原样给的词，镜像名混在里面，
-        # 镜像名之后的一切 docker 都当成容器自己的命令 —— 加在 `args` 末尾
-        # 等于把 `--label ...` 当参数传给了容器里的入口脚本（撞过一次：
-        # nginx 的 entrypoint 报 `illegal option --`）。跟 -d/--name/--restart
-        # 一样落进 cmd，在镜像名之前，才稳当是 docker 自己的 flag
-        if ! container_exists "${WATCHTOWER_UNIT}"; then
-            os::warn "没有检测到 ${WATCHTOWER_UNIT} 容器 —— 标签打了但不会生效：oneserver install docker --watchtower=y"
-        fi
-    fi
+    os::confirm --arg auto-update '开启自动更新（镜像有新版本时自动拉取并重建这个容器）' y \
+        && autoupdate=1
 
     # --- 端口：只提醒，不改写 ---
     #
@@ -302,17 +419,36 @@ main() {
     done
 
     # --- 跑 ---
+    #
+    # 补的 flag 一律落进 cmd、排在 args 之前，**不能塞进 `args`**：`args` 是
+    # 用户原样给的词，镜像名混在里面，而镜像名之后的一切 docker 都当成容器
+    # 自己的命令 —— 加在 args 末尾等于把 flag 传给了容器里的入口脚本
+    # （撞过一次：nginx 的 entrypoint 报 `illegal option --`）
+    local safe_cmd=''
+    scan_env_secrets
+    safe_cmdline safe_cmd
+
     local -a cmd=(run)
     ((has_detach == 1)) || cmd+=(-d)
     ((has_name == 1)) || cmd+=(--name "${name}")
     ((has_restart == 1)) || cmd+=(--restart "${policy}")
-    ((autoupdate == 1)) && cmd+=(--label "${WATCHTOWER_LABEL}")
+    cmd+=(--label "${RUNCMD_LABEL}=${safe_cmd}")
     cmd+=("${args[@]}")
+
+    # 凭据值按**值**匹配脱敏，不按位置（位置索引在任何人往命令中间插一个参数时
+    # 立即错位，而错位不报错，唯一表现是密码开始明文进日志）
+    local -a secret_args=()
+    local s
+    for s in ${DC_SECRETS[@]+"${DC_SECRETS[@]}"}; do
+        secret_args+=(--secret-val "${s}")
+    done
 
     # 容器是本次创建的、撤销干净且安全 —— 属「必须回滚」类，注册回滚。
     # 后面那道「它真的在跑吗」的校验不通过时，不该留一个半死的容器在那儿
     os::record_change "创建了容器 ${name}"
-    os::run '创建并启动容器' -- docker "${cmd[@]}" \
+    # 选项写在 desc 之后：执行封装的解析是循环到 `--` 为止，顺序无关，
+    # 而 desc 排在最前面才看得出它是个固定字符串（规范要求，也是 lint 的判据）
+    os::run '创建并启动容器' ${secret_args[@]+"${secret_args[@]}"} -- docker "${cmd[@]}" \
         || os::die 1 "docker run 失败，容器 ${name} 没有建起来（详情看日志）"
     os::defer docker rm -f -- "${name}"
 
@@ -341,11 +477,26 @@ main() {
         os::die 1 '容器没能跑起来，已自动撤销。照日志改完命令再来一次'
     fi
 
+    # --- 名单 ---
+    #
+    # 放在「它真的在跑吗」之后：容器没起来就被撤销了，名单里留个名字是假事实
+    if ((autoupdate == 1)); then
+        au_add "${name}"
+        # 两种情形都要用户再走一步「开启自动更新服务」：没开的要开，开着的要
+        # 重建才能带上新名单（名单是更新器的启动参数）。**这里不替他做** ——
+        # 部署更新器是一个全机决定，不该由「建了一个容器」顺带触发
+        if watchtower_running; then
+            os::info '名字已加入自动更新名单。到 oneserver docker 里再走一次「开启自动更新服务」，更新器才会带上它'
+        else
+            os::info '名字已加入自动更新名单。自动更新服务还没开，到 oneserver docker 里「开启自动更新服务」才会真正开始更新'
+        fi
+    fi
+
     os::section '容器已就绪'
     os::kv '名字' "${name}" \
         '重启策略' "${policy:-（命令里自带）}" \
         '状态' "${status}" \
-        '自动更新' "$([[ ${autoupdate} -eq 1 ]] && printf '开' || printf '关')"
+        '自动更新' "$([[ ${autoupdate} -eq 1 ]] && printf '已加入名单' || printf '关')"
     os::info "看日志与管理：oneserver docker logs --name=${name}"
     os::output 0 name="${name}" status="${status}" auto_update="${autoupdate}" changed=yes
     return 0

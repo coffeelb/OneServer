@@ -11,7 +11,7 @@
 # @requires_lib >= 1.14
 # @provides     container:<name>
 # @provides_unit ext:<name>.service
-# @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|on-failure|no>] [--auto-update] [--create-dirs=<y|n>]
+# @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|on-failure|no>] [--auto-update=<y|n>] [--create-dirs=<y|n>]
 # @description  粘贴 run 命令，翻译成 Quadlet 交给 systemd
 #
 
@@ -71,6 +71,7 @@ source /opt/oneserver/lib/bootstrap.sh
 
 readonly QUADLET_DIR='/etc/containers/systemd'
 readonly NAME_RE='^[a-z0-9][a-z0-9_-]{0,62}$'
+readonly AUTOUPDATE_TIMER='podman-auto-update.timer'
 
 # ------------------------------------------------------------------
 
@@ -487,6 +488,70 @@ normalize_image() {
     return 0
 }
 
+# ------------------------------------------------------------------
+# 原始命令存档
+# ------------------------------------------------------------------
+
+# Quadlet 文件是这个容器的权威配置，但它是**翻译结果** —— 想改一个参数再重建，
+# 手上有当初那条 run 命令要方便得多（改一个词重新粘，而不是学一遍 Quadlet 的
+# key 名）。所以把它掩码后写进文件头的注释里，跟着配置走。
+#
+# **为什么掩码**：同一份文件里 `Environment=` 那几行确实是明文（Quadlet 就是
+# 这么工作的，建容器时已经警告过），所以掩码在这个文件内部不多挡什么。它挡的是
+# 另一件事 —— 这行注释是整份文件里最可能被整条复制出去的一行（贴进工单、
+# 聊天窗口、笔记），掩码之后随手一复制不会把密码带走。代价是它不能原样重跑，
+# 重跑前要把值补回来，所以注释里把这句写明。
+
+# 环境变量名看着像不像凭据。先转小写再比，否则 `Password`、`apiKey` 这类
+# 大小写混写的名字两边模式都不命中，而它们恰恰是最常见的写法
+cred_key() {
+    local k=${1,,}
+    case ${k} in
+        *pass* | *token* | *secret* | *key*) return 0 ;;
+    esac
+    return 1
+}
+
+# 三种写法都要认：`-e KEY=V`（值在下一个词）、`--env=KEY=V`、`-eKEY=V`。
+# 掩码后**保持原来的形态**，存下来的命令才跟用户粘进来的那条对得上
+PC_SAFE=()
+mask_tokens() {
+    local -i k
+    local t prefix kv key
+    PC_SAFE=()
+    for ((k = 0; k < ${#PC_TOKENS[@]}; k++)); do
+        t=${PC_TOKENS[k]}
+        prefix=''
+        case ${t} in
+            -e | --env)
+                PC_SAFE+=("${t}")
+                k=$((k + 1))
+                [[ ${k} -lt ${#PC_TOKENS[@]} ]] || break
+                kv=${PC_TOKENS[k]}
+                ;;
+            --env=*)
+                prefix='--env='
+                kv=${t#--env=}
+                ;;
+            -e?*)
+                prefix='-e'
+                kv=${t#-e}
+                ;;
+            *)
+                PC_SAFE+=("${t}")
+                continue
+                ;;
+        esac
+        key=${kv%%=*}
+        if [[ ${kv} == *=* ]] && cred_key "${key}"; then
+            PC_SAFE+=("${prefix}${key}=***")
+        else
+            PC_SAFE+=("${prefix}${kv}")
+        fi
+    done
+    return 0
+}
+
 # systemd 的值是空白分隔的，含空白的词要带引号才不会被拆开
 quote_words() {
     local __pc_out=${1}
@@ -566,7 +631,11 @@ main() {
         os::select --arg restart-policy '这条命令没写 --restart，失败后怎么办' policy \
             'always=总是重启' 'on-failure=仅异常退出时重启' 'no=不自动重启'
     fi
-    os::flag --arg auto-update && autoupdate=1
+    # **默认 y**：容器不跟着上游镜像走，跑的就是一个再也不打补丁的东西。
+    # 选了 y 之后还要有定时器在跑标签才算数，所以下面会顺手把它开起来 ——
+    # 只打标签不开定时器正是「切了自动更新却什么都没发生」的来源
+    os::confirm --arg auto-update '开启自动更新（镜像有新版本时自动拉取并重启这个容器）' y \
+        && autoupdate=1
 
     local qfile unit
     quadlet_file_of qfile "${name}"
@@ -723,13 +792,16 @@ main() {
     #
     # 走临时文件 + os::install_file 换 inode，**0640**：
     # Quadlet 文件里可能有环境变量，默认的 0644 等于摊给机器上每个用户
-    local dir tmp exec_line='' args_line=''
+    local dir tmp exec_line='' args_line='' safe_cmd=''
     ((${#PC_EXEC[@]} > 0)) && quote_words exec_line ${PC_EXEC[@]+"${PC_EXEC[@]}"}
     ((${#PC_PODMAN_ARGS[@]} > 0)) && quote_words args_line ${PC_PODMAN_ARGS[@]+"${PC_PODMAN_ARGS[@]}"}
+    mask_tokens
+    quote_words safe_cmd ${PC_SAFE[@]+"${PC_SAFE[@]}"}
     dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
     tmp="${dir}/${name}.container"
     {
         printf '# 由 oneserver podman run 生成。改完执行 systemctl daemon-reload。\n'
+        printf '# 原始命令（凭据值已掩码，重跑前补回）：%s\n' "${safe_cmd}"
         printf '[Unit]\n'
         printf 'Description=%s（oneserver 托管）\n' "${name}"
         printf '\n[Container]\n'
@@ -785,6 +857,26 @@ main() {
         os::query --timeout 20 -- journalctl -u "${unit}" --no-pager -n 30
         os::err "${OS_RUN_OUTPUT}"
         os::die 1 "容器 ${name} 没能跑起来，已撤销"
+    fi
+
+    # --- 自动更新的执行者 ---
+    #
+    # 标签只是「这个容器愿意被更新」，真正去拉镜像重启容器的是那个定时器。
+    # 用户在上面选了 y，就把执行者也备齐 —— 只打标签不开定时器，等于让他
+    # 以为开好了而实际什么都不会发生。定时器是全机一份、`ext:` 的
+    if [[ ${autoupdate} -eq 1 ]]; then
+        probe::unit_exists "${AUTOUPDATE_TIMER}"
+        if [[ ${OS_PROBE_VALUE} != yes ]]; then
+            os::warn "这个 podman 版本没有 ${AUTOUPDATE_TIMER}，标签打上了但没有东西会去执行更新"
+        else
+            probe::service_active "${AUTOUPDATE_TIMER}"
+            if [[ ${OS_PROBE_VALUE} == active ]]; then
+                os::info '自动更新服务已经在跑，这个容器下一轮就会被检查'
+            else
+                os::systemd_enable --now "${AUTOUPDATE_TIMER}" ext
+                os::ok '顺带开启了自动更新服务（全机一份，只动打了标记的容器）'
+            fi
+        fi
     fi
 
     # --- state：容器是一个组件实例 ---

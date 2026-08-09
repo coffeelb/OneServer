@@ -10,8 +10,8 @@
 # @requires     docker
 # @privilege    root
 # @requires_lib >= 1.28
-# @args         [--action=<ls|start|stop|restart|logs|rm|autoupdate>] [--name=<名字>] [--lines=<行数>] [--confirm-rm=<名字>]
-# @description  创建、查看、启停、日志、删除与自动更新状态
+# @args         [--action=<ls|start|stop|restart|logs|rm|autoupdate|au-on|au-off|au-now>] [--name=<名字>] [--lines=<行数>] [--confirm-rm=<名字>]
+# @description  创建、查看、启停、日志、删除与自动更新
 #
 
 set -Eeuo pipefail
@@ -31,11 +31,43 @@ source /opt/oneserver/lib/bootstrap.sh
 #
 # **容器本体没有第二份配置，dockerd 就是它们的唯一账本**，本工具不另记一份
 # （不像 podman 那边有 Quadlet 文件可读）。
+#
+# ==================================================================
+# 自动更新是**名单驱动**的，名单在本工具这边
+# ==================================================================
+#
+# 更新器（Watchtower）有两种筛选模式：按容器标签筛，或者启动时直接给它一串
+# 容器名、只盯这几个。**这里用名单模式**，因为 docker 不支持给已有容器改标签
+# （`docker update` 只管资源限制与重启策略），标签模式下用户想给一个跑着的
+# 容器开自动更新，唯一的路是删了重建 —— 而按 `docker inspect` 反推参数重建
+# 覆盖不了自定义网络、复杂 mount 这些，重建出来的容器会悄悄走样。
+#
+# 名单存在 state 的 `docker` 组件下，改名单只需要重建**更新器自己那个容器**，
+# 用户的业务容器一根汗毛都不动。于是 docker 侧终于也有了「随时可切」。
+#
+# 三条落地约束，每条都实测过：
+#
+#   1. **名单空时绝不能起更新器** —— 不带名单等于扫全机，与「不在名单里的
+#      一概不动」正好相反。名单空就把更新器删掉。
+#   2. **新起的常驻更新器会删掉机器上其它更新器容器**（它自带的单实例保护）。
+#      对我们是好事：改名单靠重建，不会留下两个。但用户自己另装的更新器会被
+#      我们的干掉，反之亦然，所以开启时要说这句。
+#   3. **一次性实例不碰常驻实例**。所以「立即检查更新」用一个用完即弃的
+#      `--run-once` 容器，不会打断常驻的那个，常驻的没部署时也照样能用。
+#
+# 开关服务用「建/删更新器容器」而不是「起/停」：名单是**启动参数**，停了再起
+# 用的还是老名单。删了重建才能保证跑着的那个与名单永远一致。
 
 readonly NAME_RE='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
 readonly UNIT='docker.service'
-readonly WATCHTOWER_LABEL='com.centurylinklabs.watchtower.enable'
-readonly WATCHTOWER_UNIT='oneserver-watchtower'
+readonly WATCHTOWER_NAME='oneserver-watchtower'
+readonly WATCHTOWER_IMAGE='docker.io/nickfedor/watchtower'
+readonly WATCHTOWER_INTERVAL='86400'
+readonly DOCKER_ID='docker'
+# 标签模式留下的痕迹。**本工具不再打也不再认这个标签**，只在开启服务时扫一眼
+# 提醒用户 —— 从网上抄来的 run 与 compose 命令常常自带它，而在名单模式下它
+# 一点作用都没有，不说的话用户会以为自己已经开好了
+readonly LEGACY_LABEL='com.centurylinklabs.watchtower.enable'
 
 # ------------------------------------------------------------------
 
@@ -76,6 +108,92 @@ require_container() {
     return 0
 }
 
+# ------------------------------------------------------------------
+# 自动更新名单
+# ------------------------------------------------------------------
+
+# 名单是**空格分隔的一个值**，不是多值键：state 的多值键只有资源清单那五个
+# （`unit` `pkg` `file` `divert` `alt`），而名单不是资源，卸载器对它无事可做。
+# 容器名过了 NAME_RE 必然不含空格，所以空格是安全的分隔符。
+#
+# 全局 IFS 是 `\n\t`，**空格不在里面** —— 拆名单的每一处都要自己把 IFS 设成
+# 空格，否则整份名单会当成一个词，判断「在不在名单里」永远为假。
+au_list() {
+    local __dc_out=${1} __dc_v
+    __dc_v=$(os::state_get "${DOCKER_ID}" autoupdate '')
+    printf -v "${__dc_out}" '%s' "${__dc_v}"
+    return 0
+}
+
+au_has() {
+    local name=${1} list one
+    au_list list
+    local IFS=' '
+    for one in ${list}; do
+        [[ ${one} == "${name}" ]] && return 0
+    done
+    return 1
+}
+
+# 加入或移出，结果写回 state。已经是目标状态时返回 1，让调用方走幂等分支
+au_toggle() {
+    local name=${1} want=${2} list one acc=''
+    au_list list
+    local IFS=' '
+    for one in ${list}; do
+        [[ ${one} == "${name}" ]] && continue
+        acc+="${acc:+ }${one}"
+    done
+    if [[ ${want} == in ]]; then
+        au_has "${name}" && return 1
+        acc+="${acc:+ }${name}"
+    else
+        au_has "${name}" || return 1
+    fi
+    IFS=$'\n\t'
+    os::state_set "${DOCKER_ID}" "autoupdate=${acc}" || os::die 1 '写入自动更新名单失败'
+    return 0
+}
+
+# ------------------------------------------------------------------
+# 更新器
+# ------------------------------------------------------------------
+
+watchtower_running() {
+    os::query --timeout 10 -- docker inspect -f '{{.State.Status}}' "${WATCHTOWER_NAME}" || return 1
+    [[ ${OS_RUN_OUTPUT} == running ]]
+}
+
+watchtower_remove() {
+    container_exists "${WATCHTOWER_NAME}" || return 0
+    os::record_change "移除了 ${WATCHTOWER_NAME}"
+    os::run '移除自动更新器' -- docker rm -f -- "${WATCHTOWER_NAME}" \
+        || os::die 1 "移除 ${WATCHTOWER_NAME} 失败（详情看日志）"
+    return 0
+}
+
+# 按当前名单把更新器重建出来。名单空只删不建（见文件头第 1 条）
+watchtower_apply() {
+    local list
+    au_list list
+    watchtower_remove
+    [[ -n ${list} ]] || return 0
+
+    local -a names=()
+    IFS=' ' read -r -a names <<<"${list}"
+
+    os::run '拉取自动更新器镜像' -- docker pull "${WATCHTOWER_IMAGE}" \
+        || os::die 1 '自动更新器镜像拉取失败'
+    os::record_change "部署了 ${WATCHTOWER_NAME}"
+    # `--cleanup` 换完镜像顺手删掉旧的那一层，不然每更新一次就多留一份
+    os::run '部署自动更新器' -- docker run -d --name "${WATCHTOWER_NAME}" \
+        --restart always \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        "${WATCHTOWER_IMAGE}" --cleanup --interval "${WATCHTOWER_INTERVAL}" "${names[@]}" \
+        || os::die 1 '自动更新器部署失败（详情看日志）'
+    return 0
+}
+
 # 总览表的编号就是当前操作周期的选择符，避免把同一批容器再打印一遍。
 DC_LIST_READY=0
 DC_IDS=()
@@ -84,7 +202,8 @@ DC_IMAGES=()
 DC_STATUS=()
 DC_PORTS=()
 DC_PROJECTS=()
-DC_AUTOUPDATE=()
+DC_AU=()
+DC_LEGACY=()
 DC_RESTART=()
 
 short_cell() {
@@ -100,7 +219,7 @@ short_cell() {
 
 load_container_rows() {
     os::query --timeout 20 -- \
-        docker ps -a --format "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"${WATCHTOWER_LABEL}\"}}"
+        docker ps -a --format "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"${LEGACY_LABEL}\"}}"
     local list=${OS_RUN_OUTPUT}
 
     DC_IDS=()
@@ -109,27 +228,50 @@ load_container_rows() {
     DC_STATUS=()
     DC_PORTS=()
     DC_PROJECTS=()
-    DC_AUTOUPDATE=()
+    DC_AU=()
+    DC_LEGACY=()
     DC_RESTART=()
     DC_LIST_READY=1
 
-    local line line_safe id name image status ports project autoupdate restart
+    local line line_safe id name image status ports project legacy restart au
     local IFS=$'\n'
     for line in ${list}; do
         [[ -n ${line} ]] || continue
         line_safe=${line//$'\t'/$'\x01'}
-        IFS=$'\x01' read -r id name image status ports project autoupdate <<<"${line_safe}"
+        IFS=$'\x01' read -r id name image status ports project legacy <<<"${line_safe}"
         os::query --timeout 10 -- docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${name}"
         restart=${OS_RUN_OUTPUT:-no}
+        au=no
+        au_has "${name}" && au=yes
         DC_IDS+=("${id}")
         DC_NAMES+=("${name}")
         DC_IMAGES+=("${image}")
         DC_STATUS+=("${status}")
         DC_PORTS+=("${ports}")
         DC_PROJECTS+=("${project}")
-        DC_AUTOUPDATE+=("${autoupdate}")
+        DC_AU+=("${au}")
+        DC_LEGACY+=("${legacy}")
         DC_RESTART+=("${restart}")
     done
+    return 0
+}
+
+# 名单里有、机器上却没有的容器名。用户绕过本工具删容器就会留下这种孤儿名。
+# 实测更新器对不存在的名字是安静跳过的，不影响其余，所以这里只提示不自动清 ——
+# 自动清会在容器临时删掉重建的窗口里把用户的设置一起抹掉
+au_orphans() {
+    local __dc_out=${1} list one acc='' found
+    au_list list
+    local -i i
+    local IFS=' '
+    for one in ${list}; do
+        found=0
+        for ((i = 0; i < ${#DC_NAMES[@]}; i++)); do
+            [[ ${DC_NAMES[i]} == "${one}" ]] && found=1 && break
+        done
+        ((found == 0)) && acc+="${acc:+ }${one}"
+    done
+    printf -v "${__dc_out}" '%s' "${acc}"
     return 0
 }
 
@@ -174,8 +316,8 @@ action_ls() {
         [[ ${restart_label} == no ]] && restart_label='—'
         [[ ${restart_label} != '—' ]] && restart_label="✔ ${restart_label}"
         autoupdate_label='—'
-        if [[ ${DC_AUTOUPDATE[i]} == true ]]; then
-            autoupdate_label='✔ 已标记'
+        if [[ ${DC_AU[i]} == yes ]]; then
+            autoupdate_label='✔ 在名单'
             any_autoupdate=1
         fi
         cells+=("[$((i + 1))]" "${DC_IDS[i]:0:12}" "${DC_NAMES[i]}"
@@ -183,13 +325,24 @@ action_ls() {
             "${restart_label}" "${autoupdate_label}")
         os::output_item "id=${DC_IDS[i]}" "name=${DC_NAMES[i]}" "image=${DC_IMAGES[i]}" \
             "status=${DC_STATUS[i]}" "ports=${DC_PORTS[i]}" "restart=${DC_RESTART[i]}" \
-            "compose_project=${DC_PROJECTS[i]}" "auto_update=${DC_AUTOUPDATE[i]}"
+            "compose_project=${DC_PROJECTS[i]}" "auto_update=${DC_AU[i]}"
     done
-    os::table '编号' 'ID' '名称' '镜像' '状态' '自启' '自动更新标记' -- "${cells[@]}"
-    if ((any_autoupdate == 1)) && ! container_exists "${WATCHTOWER_UNIT}"; then
-        os::warn "有容器打了自动更新标签，但没检测到 ${WATCHTOWER_UNIT} 容器在跑，标签不会生效：oneserver install docker --watchtower=y"
+    os::table '编号' 'ID' '名称' '镜像' '状态' '自启' '自动更新' -- "${cells[@]}"
+
+    # 服务状态与名单状态是两件事，都要说：名单里有东西而服务没开，等于设了不生效
+    local svc='未开启'
+    watchtower_running && svc='已开启'
+    os::kv '自动更新服务' "${svc}"
+    if ((any_autoupdate == 1)) && [[ ${svc} == 未开启 ]]; then
+        os::warn '名单里有容器，但自动更新服务没开 —— 名单不会生效，用「开启自动更新服务」把它起来'
     fi
-    os::output 0 count="${#DC_NAMES[@]}"
+
+    local orphans=''
+    au_orphans orphans
+    [[ -n ${orphans} ]] \
+        && os::warn "名单里这些容器已经不在了：${orphans}（用「切换自动更新」把它们移出去）"
+
+    os::output 0 count="${#DC_NAMES[@]}" auto_update_service="${svc}"
     return 0
 }
 
@@ -271,36 +424,132 @@ action_rm() {
     os::run '删除容器' -- docker rm -f -- "${name}" \
         || os::die 1 "删除容器 ${name} 失败（详情看日志）"
 
+    # 顺手从名单里摘掉，不然它就成了一个孤儿名，下次列表页要报一句
+    if au_toggle "${name}" out; then
+        os::info "已把 ${name} 从自动更新名单里摘掉"
+        if watchtower_running; then
+            watchtower_apply
+        fi
+    fi
+
     os::ok "容器 ${name} 已删除"
     os::info '它用过的卷与镜像都还在：oneserver docker volume（卷）· oneserver docker image（镜像）'
     os::output 0 name="${name}" removed=yes
     return 0
 }
 
-# 只读展示 + 引导，不做假装能做到的「原地切换」：docker 不支持给已有容器
-# 改标签，`docker update` 只管资源限制与重启策略，不管 label。想改只能删了
-# 重建（同改任何其他 run 参数一样），这里把现状说清楚、把重建的路指明白
+# 把一个容器加进名单或移出名单。**动的只有名单和更新器自己那个容器**，
+# 用户的业务容器不重启、不重建 —— 这正是名单模式换来的东西
 action_autoupdate() {
     require_docker
     local name=''
-    select_container name '选择要查看自动更新状态的容器'
+    select_container name '选择要切换自动更新的容器'
     require_container "${name}"
 
-    os::query --timeout 10 -- \
-        docker inspect -f "{{index .Config.Labels \"${WATCHTOWER_LABEL}\"}}" "${name}"
-    local label=${OS_RUN_OUTPUT}
-    local status='关'
-    [[ ${label} == true ]] && status='开'
-
-    os::section "${name} 的自动更新"
-    os::kv '当前状态' "${status}"
-    os::info 'docker 不支持给已有容器原地改标签，只能删了重建 —— 这是 Docker 本身的限制，不是本工具的'
-    if [[ ${status} == 开 ]]; then
-        os::info "要关闭：oneserver docker rm --name=${name} 后用 oneserver docker run 重建（不勾选 --auto-update）"
-    else
-        os::info "要开启：oneserver docker rm --name=${name} 后用 oneserver docker run 重建（勾选 --auto-update）"
+    local want='in' verb='加入'
+    if au_has "${name}"; then
+        want='out'
+        verb='移出'
     fi
-    os::output 0 name="${name}" auto_update="$([[ ${status} == 开 ]] && printf true || printf false)"
+
+    if ! au_toggle "${name}" "${want}"; then
+        os::ok "容器 ${name} 已经是目标状态，未改动"
+        os::output 0 name="${name}" auto_update="$([[ ${want} == in ]] && printf yes || printf no)" changed=no
+        return 0
+    fi
+    os::ok "容器 ${name} 已${verb}自动更新名单"
+
+    # 名单是更新器的启动参数，服务开着就得重建它，新名单才算数；
+    # 服务没开就只改名单，等开启时自然带上
+    if watchtower_running; then
+        os::info '正在让新名单生效（重建自动更新器，不影响你的容器）'
+        watchtower_apply
+        os::ok '自动更新器已按新名单重建'
+    else
+        os::info '自动更新服务没开，名单先记下了 —— 用「开启自动更新服务」让它生效'
+    fi
+
+    os::output 0 name="${name}" auto_update="$([[ ${want} == in ]] && printf yes || printf no)" changed=yes
+    return 0
+}
+
+action_au_on() {
+    require_docker
+    local list=''
+    au_list list
+    [[ -n ${list} ]] \
+        || os::die 2 '自动更新名单是空的，起来也没有任何容器要更新 —— 先用「切换自动更新」把容器加进名单'
+
+    # 标签模式的残留：这个标签在名单模式下毫无作用，不说的话用户会以为已经开好了
+    local -i i
+    local legacy=''
+    load_container_rows
+    for ((i = 0; i < ${#DC_NAMES[@]}; i++)); do
+        [[ ${DC_LEGACY[i]} == true && ${DC_AU[i]} == no ]] \
+            && legacy+="${legacy:+ }${DC_NAMES[i]}"
+    done
+    [[ -n ${legacy} ]] \
+        && os::warn "这些容器带着 ${LEGACY_LABEL} 标签，但本工具只认名单，标签不起作用：${legacy}"
+
+    os::warn "更新器只允许机器上跑一个 —— 起它会删掉你自己另装的更新器容器（如果有）"
+    watchtower_apply
+
+    if [[ ${OS_DRYRUN} -eq 1 ]]; then
+        os::info '[dry-run] 更新器没有真的部署，状态无从确认'
+        os::output 0 changed=dry-run
+        return 0
+    fi
+    watchtower_running \
+        || os::die 1 "${WATCHTOWER_NAME} 没能起来，详情看 docker logs ${WATCHTOWER_NAME}"
+
+    os::ok "自动更新服务已开启，只更新名单里的容器：${list}"
+    os::output 0 auto_update_service=on names="${list}"
+    return 0
+}
+
+action_au_off() {
+    require_docker
+    if ! container_exists "${WATCHTOWER_NAME}"; then
+        os::ok '自动更新服务本来就没开，未改动'
+        os::output 0 auto_update_service=off changed=no
+        return 0
+    fi
+
+    # 删而不是停：停下来的容器带着 --restart always，重启机器它自己就回来了，
+    # 用户以为关掉了其实没有。删掉之后名单还在 state 里，再开启时原样带上
+    watchtower_remove
+    os::ok '自动更新服务已关闭（名单留着，再开启时照旧生效）'
+    os::output 0 auto_update_service=off changed=yes
+    return 0
+}
+
+action_au_now() {
+    require_docker
+    local list=''
+    au_list list
+    [[ -n ${list} ]] \
+        || os::die 2 '自动更新名单是空的，没有容器要检查 —— 先用「切换自动更新」把容器加进名单'
+
+    local -a names=()
+    IFS=' ' read -r -a names <<<"${list}"
+
+    # 用完即弃的一次性实例。实测它不会碰常驻的那个，所以服务开着也能随时手动
+    # 跑一轮；服务没开时这条同样可用 —— 只想手动更新、不想要定时的人正需要它
+    os::warn "要检查的容器：${list}。有新镜像的会被拉取并重建，期间这些容器会短暂中断"
+    os::record_change "对名单里的容器执行了一次自动更新检查"
+    os::run_out '执行一次自动更新检查' -- docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        "${WATCHTOWER_IMAGE}" --run-once --cleanup "${names[@]}" \
+        || os::die 1 '自动更新检查失败（详情看日志）'
+
+    if [[ ${OS_DRYRUN} -eq 1 ]]; then
+        os::info '[dry-run] 检查没有真的执行，结果无从确认'
+        os::output 0 names="${list}" changed=dry-run
+        return 0
+    fi
+    os::section '检查结果'
+    os::info "${OS_RUN_OUTPUT}"
+    os::output 0 names="${list}"
     return 0
 }
 
@@ -315,7 +564,9 @@ main() {
 
     os::action_menu --overview action_ls --arg action '操作' dispatch \
         'start=启动' 'stop=停止' 'restart=重启' \
-        'logs=查看日志' 'rm=删除容器' 'autoupdate=查看自动更新'
+        'logs=查看日志' 'rm=删除容器' \
+        'autoupdate=切换自动更新' \
+        'au-on=开启自动更新服务' 'au-off=关闭自动更新服务' 'au-now=立即检查更新'
 }
 
 dispatch() {
@@ -327,7 +578,10 @@ dispatch() {
         logs) action_logs ;;
         rm) action_rm ;;
         autoupdate) action_autoupdate ;;
-        *) os::die 2 "未知操作「${1}」，可用：ls start stop restart logs rm autoupdate" ;;
+        au-on) action_au_on ;;
+        au-off) action_au_off ;;
+        au-now) action_au_now ;;
+        *) os::die 2 "未知操作「${1}」，可用：ls start stop restart logs rm autoupdate au-on au-off au-now" ;;
     esac
 }
 
