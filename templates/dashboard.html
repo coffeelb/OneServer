@@ -645,7 +645,7 @@ const PULL   = { live:2, fast:5, slow:60, log:2 };   // 页面 re-fetch 间隔(�
 //   live 只读 /proc，零进程，而这几个数秒级会变也值得盯着
 //   fast 要起进程（ss / systemctl / 容器巡检），但都是秒级会变的事
 //   slow 一轮两三秒（apt 模拟升级就占 576ms），而这些东西一天变几次都算多
-const COLLECT= { live:3, fast:30, slow:300 };
+const COLLECT= { live:10, fast:30, slow:300 };
 const TIERNAME={ live:'实时档', fast:'快档', slow:'慢档' };
 const ROW_H  = 29;                             // 日志行高,必须等于 CSS 的 --row：虚拟滚动按它算偏移
 const LOG_CAP= 20000;                          // 内存中保留的最大行数

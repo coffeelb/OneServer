@@ -303,6 +303,11 @@ flush_history() {
     return 0
 }
 
+# 从一份快照里取某个 key 的值。**没有这个 key 就是空值，不是失败** ——
+# 末尾这个 `return 0` 不能省：不写的话函数的退出码是 while 那个条件的
+# （找不到时为假 → 返回 1），而每个调用点都是裸的 `v=$(snapshot_value …)`，
+# 在 `set -e` 下会当场把整个采集打断。真机上撞出来的：新加一个第一轮必然
+# 不存在的 key，慢档立刻从 3.4 秒变成 39 毫秒就退出，还写了半份快照。
 snapshot_value() {
     local file=${1} want=${2} key val
     [[ -r ${file} ]] || return 0
@@ -312,6 +317,7 @@ snapshot_value() {
             return 0
         }
     done <"${file}"
+    return 0
 }
 
 publish_alerts() {
@@ -360,9 +366,33 @@ collect_slow() {
     snap 'os.kernel'
     probe::reboot_required
     snap 'os.reboot_required'
-    probe::apt_upgrade_stats
-    local apt_total apt_security
-    IFS=$'\t' read -r apt_total apt_security <<<"${OS_PROBE_VALUE}"
+    # apt 那两个数是这一档里最贵的一项（实测 576 ms —— `apt-get -s upgrade` 真的
+    # 跑了一遍依赖求解器，因为「可升级」不等于「有新版本」：apt 不会升那些要连带
+    # 删掉别的包才能升的）。而它们只在两种情况下会变：索引被刷新过（`apt update`，
+    # 系统自己的 apt-daily.timer 一天两次），或者装过/删过/升过包。
+    # 慢档 5 分钟一轮 = 一天 288 次求解，去问一个一天变两次的数。
+    #
+    # 判据是这两个文件的 mtime，一次 stat 拿全（0.8 ms 对 576 ms）。指纹没变就
+    # 沿用上一轮 probe-slow.tsv 里的值 —— 那是**上一次真算过的结果**，不是猜的。
+    # 装完包那条命令收尾时框架会踢一轮慢档（D232），而装包必然动 dpkg/status，
+    # 所以「装完补丁那条红告警立刻消」这条路是通的。
+    #
+    # 只缓存**周期性**这条路径。`safe status` / `safe updates` 是人敲的，那时的
+    # 576 ms 是他要的答案，照旧现算 —— 人主动问的时刻恰恰最不该给旧数。
+    local prev_slow="${OS_PUBLIC_DIR}/${TIER_SLOW}" apt_total='' apt_security=''
+    os::query --timeout 5 -- stat -c '%Y' /var/lib/apt/lists /var/lib/dpkg/status
+    local fp=${OS_RUN_OUTPUT//$'\n'/-} fp_old
+    fp_old=$(snapshot_value "${prev_slow}" 'apt.fingerprint')
+    if [[ -n ${fp} && ${fp} == "${fp_old}" ]]; then
+        apt_total=$(snapshot_value "${prev_slow}" 'apt.upgradable')
+        apt_security=$(snapshot_value "${prev_slow}" 'apt.upgradable_security')
+    fi
+    if [[ -z ${apt_total} ]]; then
+        probe::apt_upgrade_stats
+        IFS=$'\t' read -r apt_total apt_security <<<"${OS_PROBE_VALUE}"
+    fi
+    OS_PROBE_VALUE=${fp}
+    snap 'apt.fingerprint'
     OS_PROBE_VALUE=${apt_total}
     snap 'apt.upgradable'
     OS_PROBE_VALUE=${apt_security}

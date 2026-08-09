@@ -750,7 +750,7 @@ do_status() {
     # 或采集本身出了问题
     local spec name limit label mtime now age fresh='' lag=''
     printf -v now '%(%s)T' -1
-    for spec in 'probe-live.tsv 9 实时档' 'probe-fast.tsv 90 快档' 'probe-slow.tsv 900 慢档'; do
+    for spec in 'probe-live.tsv 30 实时档' 'probe-fast.tsv 90 快档' 'probe-slow.tsv 900 慢档'; do
         IFS=' ' read -r name limit label <<<"${spec}"
         [[ -f "${OS_PUBLIC_DIR}/${name}" ]] || continue
         mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${name}" 2>/dev/null || printf '0')

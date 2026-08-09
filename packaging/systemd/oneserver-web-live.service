@@ -8,11 +8,16 @@ Type=oneshot
 ExecStart=/opt/oneserver/script/ops/web_collect.sh --tier=live --non-interactive
 
 # 这一档**只读 /proc**，一个外部进程都不起（probe::_probe_proc 走 bash 内建），
-# 所以硬化可以比另外两档更狠：整个文件系统只读就够，只留数据目录可写。
+# 所以硬化可以比另外两档更狠：整个文件系统只读，只留该写的两个目录。
 # 另外两档做不到 strict 是因为 podman 要访问自己的运行时状态（见 fast 那份的
 # 说明）——这一档根本不碰容器，那条限制不适用。
+#
+# **日志目录不能漏**：strict 会把 /var 一起锁成只读，而框架的日志初始化
+# 打不开文件时是**静默降级**的（那个降级本身是对的，见 log.sh 里 K16 那段）。
+# 漏了它的表现不是报错，是这一档从此一行日志都没有 —— 真出问题时零线索。
+# 实测：只放开数据目录时写 0 行，加上这一条写 12 行。
 ProtectSystem=strict
-ReadWritePaths=/run/oneserver-public
+ReadWritePaths=/run/oneserver-public /var/log/oneserver
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

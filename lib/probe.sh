@@ -77,11 +77,11 @@ probe::snapshot_flush() {
     local target=${OS_PROBE_SNAPSHOT}
     probe::_is_root || return 0
     [[ ${#OS_PROBE__KEYS[@]} -gt 0 ]] || return 0
-    # **`mkdir` 不带 `-p`，这是有意的**：带 `-p` 会把父目录一起建出来，
-    # 而这个钩子挂在退出路径上 —— `uninstall --all --purge` 刚把 $OS_ROOT 整个
-    # 删掉，紧接着它就把 /opt/oneserver/public/ 连同父目录一起建了回来，
+    # **`mkdir` 不带 `-p`，这是有意的**：这个钩子挂在退出路径上，包括卸载那次。
+    # 带 `-p` 就会为了放一份可有可无的快照，把一整棵刚被删掉的目录树造回来 ——
     # 现场表现是「卸载说成功了，可目录还在」（容器实测撞见）。
-    # 快照是个可有可无的东西，**没地方放就不放**，绝不为它造出一棵目录树。
+    # 数据目录搬到 tmpfs 之后父目录 `/run` 必然存在，`-p` 更没有必要。
+    # 快照是个可有可无的东西，**没地方放就不放**。
     mkdir "${OS_PUBLIC_DIR}" 2>/dev/null || true
     [[ -d ${OS_PUBLIC_DIR} ]] || return 0
     chmod "${OS_PUBLIC_DIR_MODE}" "${OS_PUBLIC_DIR}" 2>/dev/null || true
@@ -227,6 +227,10 @@ probe::_probe() {
 #   `intfield:<第几列>`     取第一行第 N 个字段并截掉小数部分
 #   `range:<起>:<止>`       取第一行的第 起..止 个字段，空格连接
 #   `cpustat`               /proc/stat 首行：`总时间 空闲时间`（空闲含 iowait）
+#   `kv:<字段名>`           `KEY=值` 形态的配置文件（/etc/os-release），剥外层引号
+#
+# `kv:` 同样**不 source 那个文件**（K12：配置文件写什么就执行什么）。按字段名
+# 逐行精确匹配、剥掉包裹的引号，全程不经 shell 解释文件内容一个字节。
 probe::_probe_proc() {
     local key=${1} file=${2} sel=${3}
 
@@ -269,6 +273,23 @@ probe::_probe_proc() {
                 [[ ${line} == "${want}"* ]] || continue
                 IFS=$' \t' read -r -a f <<<"${line}"
                 out=${f[col - 1]-}
+                break
+            done
+            ;;
+        kv:*)
+            want=${sel#kv:}
+            local IFS=$'\n'
+            for line in ${content}; do
+                [[ ${line} == "${want}="* ]] || continue
+                out=${line#*=}
+                # 剥外层引号，**只剥成对包住整个值的那一对**：值中间的引号
+                # 是内容本身（PRETTY_NAME 里就可能有），剥它等于篡改
+                if [[ ${#out} -ge 2 ]]; then
+                    case ${out} in
+                        '"'*'"') out=${out:1:${#out}-2} ;;
+                        "'"*"'") out=${out:1:${#out}-2} ;;
+                    esac
+                fi
                 break
             done
             ;;
@@ -364,8 +385,12 @@ probe::_human_age() {
 # lint 工具当成没转义的 shell 变量报告警，前者不会，不用另写 disable 说明。
 probe::_os_release() {
     local field=${1} key=${2}
-    probe::_probe "${key}" 2 -- \
-        sed -nE "s/^${field}=\"?([^\"]*)\"?\$/\\1/p" /etc/os-release
+    # 走零进程读（同 /proc 那批，见 probe::_probe_proc）：`/etc/os-release` 是
+    # 一个本地小文件，不走网络不走磁盘队列不会阻塞，超时保护买的是不存在的
+    # 风险。而它的代价不是零 —— **每一条 oneserver 命令启动时都要过一次发行版
+    # 校验**，从前那条 `子 shell + timeout + sed` 的三进程通道实测 3.1 ms，
+    # 全都摊在每个命令的启动延迟上。
+    probe::_probe_proc "${key}" /etc/os-release "kv:${field}"
     # **找不到字段时 sed 照样退出 0**，于是「这份 os-release 里没有这一项」会被
     # 记成「探测到一个空值」并报 ok —— 而 os-release 的字段不是每个发行版都齐，
     # Debian 的滚动版就没有 VERSION_ID。空值配 ok 的后果是消费者拿着空串继续拼，
