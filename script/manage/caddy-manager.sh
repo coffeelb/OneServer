@@ -10,7 +10,7 @@
 # @privilege    root
 # @requires_lib >= 1.26
 # @provides_unit ext:caddy.service
-# @args         [--action=<status|show|validate|apply|edit|rollback|reload|restart|logs|certs|cert-rm|token>] [--source=<url|file>] [--url=<地址>] [--file=<路径>] [--provider=<cloudflare|alidns|tencentcloud>] [--token-anyway=<y|n>] [--lines=<行数>] [--cert=<all|域名>] [--confirm-cert-rm=<all|域名>] [--wait-file=<y|n>] [--edit-open=<y|n>] [--apply-edited=<y|n>]
+# @args         [--action=<status|show|validate|apply|edit|rollback|reload|restart|logs|certs|cert-rm|token>] [--source=<url|file>] [--url=<地址>] [--file=<路径>] [--provider=<cloudflare|alidns|tencentcloud>] [--token-anyway=<y|n>] [--restart-now=<y|n>] [--lines=<行数>] [--cert=<all|域名>] [--confirm-cert-rm=<all|域名>] [--wait-file=<y|n>] [--edit-open=<y|n>] [--apply-edited=<y|n>]
 # @description  校验与更新 Caddyfile、控制服务、管理证书
 #
 

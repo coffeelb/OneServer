@@ -37,6 +37,7 @@
 - `os::pkg_installed_names` —— 列出本次真正装上的包
 - `os::pkg_refresh` —— 刷新软件包索引
 - `os::pkg_install <包>...` —— 安装，已装的自动跳过
+- `os::pkg_install_deb <deb 文件>` —— 安装一个本地 .deb
 - `os::pkg_purge <包>...` —— 卸载并清配置，没装的自动跳过
 - `os::require_cmd <命令>...` —— 缺任一命令即以退出码 3 终止
 

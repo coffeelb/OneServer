@@ -7,7 +7,7 @@
 # @group        backup
 # @order        10
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 3.6
 # @provides     backup
 # @provides_unit own:oneserver-backup.service
 # @provides_unit own:oneserver-backup.timer
@@ -40,8 +40,8 @@ source /opt/oneserver/lib/bootstrap.sh
 # D236 讲了为什么。
 #
 # 于是 rclone 的定位就清楚了：**它只负责把一个已经做好的归档搬到远端。**
-# 选它而不是 rsync/sftp/awscli，是因为它一个二进制覆盖 70 个后端、
-# 在 Debian/Ubuntu 主源里有包（`os::pkg_install` 装得到，同 D110 的理由）。
+# 选它而不是 rsync/sftp/awscli，是因为它一个二进制覆盖 70 个后端。
+# 装的是**官方最新版而不是发行版源里那份**，理由见 ensure_rclone 与 D238。
 #
 # ## 二、加密交给 rclone 的 crypt remote，本脚本不自己写加密
 #
@@ -89,8 +89,9 @@ source /opt/oneserver/lib/bootstrap.sh
 # 产生互相竞争的交互流程。无头授权只需要操作提示，统一放在 action_remote。
 #
 # 备份遍历 state 的命名空间，数据库转储以 OS root 走 unix_socket；定时交给
-# systemd timer，全局并发由 bootstrap 的锁管理。第三方工具只经包管理器安装，
-# 这些边界共同避免凭据进脚本环境、覆盖用户 crontab 或运行未校验安装脚本。
+# systemd timer，全局并发由 bootstrap 的锁管理。第三方工具只经包管理器落地
+# （官方 deb 也是先校验 SHA256 再交给 apt），这些边界共同避免凭据进脚本环境、
+# 覆盖用户 crontab 或运行未校验安装脚本。
 
 readonly BK_UNIT='oneserver-backup.service'
 readonly BK_TIMER='oneserver-backup.timer'
@@ -850,7 +851,11 @@ action_overview() {
         os::info '未配置，只做本地备份（用「配置 rclone 远端」添加）'
     else
         os::kv '远端' "${remote}:${remote_dir}"
-        if command -v rclone >/dev/null 2>&1; then
+        # 版本要显示出来：上传失败最常见的原因就是这台机器上的 rclone 太旧，
+        # 而 rclone 自己的报错里看不出这一点（ensure_rclone 那段注释讲了现场）
+        probe::component_version rclone
+        if [[ -n ${OS_PROBE_VALUE} ]]; then
+            os::kv 'rclone' "${OS_PROBE_VALUE}"
             detect_crypt
             if [[ ${BK_REMOTE_CRYPT} -eq 1 ]]; then
                 os::kv '加密' 'rclone crypt —— 归档在对端是密文'
@@ -1095,10 +1100,129 @@ action_remove() {
     return 0
 }
 
+# rclone 装**官方最新版**，不用发行版源里那份（D238）。
+#
+# 源里那份太旧是实打实的故障，不是版本洁癖：rclone 的后端与配置格式跟着上游
+# 走，而人配远端的常规做法是「在自己电脑上跑 rclone config 完成 OAuth 授权，
+# 再把 rclone.conf 拷到服务器」—— 电脑上是当年的版本，服务器上是发行版停在
+# 一两年前的那份，认不出配置里的后端或选项。现场表现是备份跑到上传那一步失败，
+# 而屏幕上只有一句 rclone 的报错，没人会想到是版本差。
+#
+# 官方**没有 apt 源**，只发 .deb 和同目录的 SHA256SUMS —— 正好是规范给第三方
+# 软件留的那条路（校验 SHA256），不必碰 `curl | bash` 的官方安装脚本。
+# 包名仍是 `rclone`，dpkg 把发行版那份当升级覆盖掉，不需要 divert。
+#
+# **取不到官方版时不回落发行版源**：回落等于装上一个已知会失败的版本，
+# 然后在几天后那次没人看着的定时备份里再失败一次。机器上已经有 rclone 就
+# 沿用它并说清，一个都没有就当场失败。
+readonly BK_RCLONE_DL='https://downloads.rclone.org'
+
+ensure_rclone() {
+    os::pkg_install ca-certificates curl
+    os::require_cmd curl sha256sum
+
+    probe::component_version rclone
+    local current=${OS_PROBE_VALUE}
+
+    # 版本号出自 version.txt（内容形如 "rclone v1.75.0"），不问 GitHub API：
+    # 下载、校验和版本号出自同一个域名，否则会撞上「GitHub 已经打了 tag、
+    # downloads 上还没有那个目录」的窗口期，表现是下载 404
+    os::query --timeout 20 -- curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 "${BK_RCLONE_DL}/version.txt" || true
+    local latest=''
+    [[ ${OS_RUN_OUTPUT} =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] && latest=${BASH_REMATCH[1]}
+
+    if [[ -z ${latest} ]]; then
+        [[ -n ${current} ]] || os::die 1 '取不到 rclone 官方版本号，且这台机器上没有 rclone'
+        os::warn "取不到 rclone 官方版本号，继续用现有的 ${current}"
+        return 0
+    fi
+    # 判据是「不低于」而不是「不等于」：用等号的话，手工装过 beta 或 rc 的机器
+    # 每次都要重装一遍，而 apt 面对一个更低的版本什么都不做 —— 于是装完复验必然
+    # 失败，一条来配远端的命令就此走不通。比较交给 dpkg，不自己拆点分段。
+    if [[ -n ${current} ]] \
+        && os::query --timeout 10 -- dpkg --compare-versions "${current}" ge "${latest}"; then
+        os::ok "rclone ${current} 不低于官方最新版 ${latest}"
+        return 0
+    fi
+
+    # 架构不认就不装，但**已有 rclone 时不当失败**：这条命令是来配远端的，
+    # 不是来装 rclone 的，为一个跑得动的旧版本拦住整件事说不过去
+    probe::arch
+    local arch=''
+    case ${OS_PROBE_VALUE} in
+        x86_64) arch='amd64' ;;
+        aarch64 | arm64) arch='arm64' ;;
+        *)
+            [[ -n ${current} ]] || os::die 4 "不支持的架构：${OS_PROBE_VALUE}（官方 deb 只取 amd64 / arm64）"
+            os::warn "架构 ${OS_PROBE_VALUE} 没有对应的官方 deb，继续用现有的 rclone ${current}"
+            return 0
+            ;;
+    esac
+
+    local dir
+    dir=$(os::tmpdir) || os::die 1 '创建临时目录失败'
+    local name="rclone-v${latest}-linux-${arch}.deb"
+
+    os::info "rclone 官方最新版 ${latest}（当前 ${current:-未安装}）"
+    local -i failed=0
+    os::retry 3 '下载 rclone 官方 deb' -- \
+        curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
+        -o "${dir}/${name}" "${BK_RCLONE_DL}/v${latest}/${name}" || failed=1
+    if [[ ${failed} -eq 0 ]]; then
+        os::retry 3 '下载 rclone 校验和清单' -- \
+            curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
+            -o "${dir}/SHA256SUMS" "${BK_RCLONE_DL}/v${latest}/SHA256SUMS" || failed=1
+    fi
+    if [[ ${failed} -eq 1 ]]; then
+        [[ -n ${current} ]] || os::die 1 "下载 rclone ${latest} 失败，且这台机器上没有 rclone"
+        os::warn "下载 rclone ${latest} 失败，继续用现有的 ${current}"
+        return 0
+    fi
+
+    # 下载是副作用，dry-run 下没真跑，临时目录里是空的。诚实地停在这里
+    if [[ ${OS_DRYRUN} -eq 1 ]]; then
+        os::info '[dry-run] 校验与安装无法预演：它们要的是真实下载到的文件'
+        return 0
+    fi
+
+    # **不用 `sha256sum -c`**：官方那份 SHA256SUMS 是 PGP clearsign 的，前后各有
+    # 一段 armor 行，`-c` 会判成格式错误并整份失败 —— 于是每次都「校验不过」。
+    # 只取自己这一行来比。签名本身不验：仓库里没有 rclone 的公钥，而规范对第三方
+    # 软件要的是 SHA256（它给的是完整性，不是真实性 —— 摘要和文件走同一条 TLS）。
+    local want='' line
+    while IFS= read -r line; do
+        [[ ${line} == *"  ${name}" ]] || continue
+        want=${line%% *}
+        break
+    done <"${dir}/SHA256SUMS"
+    want=${want,,}
+
+    os::query --timeout 120 -- sha256sum "${dir}/${name}" || os::die 1 '算不出 rclone deb 的 SHA256'
+    local got=${OS_RUN_OUTPUT%% *}
+    got=${got,,}
+    if [[ -z ${want} || ${want} != "${got}" ]]; then
+        os::debug "期望 ${want:-空}，实际 ${got}"
+        os::die 1 'rclone deb 未通过 SHA256 校验，已丢弃（不会改用没有校验的来源）'
+    fi
+    os::ok "SHA256 校验通过（${got:0:16}…）"
+
+    os::pkg_install_deb "${dir}/${name}" || os::die 1 "安装 rclone ${latest} 失败"
+
+    # 复验的是 `rclone version` 而不是 apt 的退出码：这个函数存在的全部意义就是
+    # 版本，「装完了」与「装完之后跑起来的确实是这个版本」必须分得开 ——
+    # 不验的话，下一次失败会推迟到几天后那次没人看着的定时备份
+    probe::component_version rclone
+    [[ ${OS_PROBE_VALUE} == "${latest}" ]] \
+        || os::die 1 "rclone 装完后版本仍是 ${OS_PROBE_VALUE:-空}，期望 ${latest}"
+    os::ok "rclone 已装到 ${latest}${current:+（原 ${current}）}"
+    return 0
+}
+
 # 配置 rclone 远端。**不代跑 `rclone config`** —— 那是一个自带交互界面的程序，
 # 包进来只会两套交互打架（同 D149）。这里做的是「在已有的 remote 里挑一个」。
 action_remote() {
-    os::pkg_install rclone
+    ensure_rclone
     os::require_cmd rclone
 
     os::query --timeout 30 -- rclone listremotes || true

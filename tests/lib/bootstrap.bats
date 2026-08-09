@@ -853,6 +853,52 @@ printf "names=[%s]
     [[ "${output}" == *'ok'* ]]
 }
 
+# 裸文件名会被 apt 当成包名拿去源里搜，而报错里看不出是路径写法的问题
+@test "pkg_install_deb: 不含斜杠的文件名补成 ./，交给 apt 的是文件" {
+    local f
+    f=$(make_script '
+cd "${OS_TEST_TMP}" || exit 9
+: >x.deb
+os::run() { printf "cmd=%s\n" "${*: -1}"; OS_RUN_SKIPPED=0; return 0; }
+os::pkg_install_deb x.deb')
+    run bash "${f}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'cmd=./x.deb'* ]]
+}
+
+@test "pkg_install_deb: 文件不存在时以 1 终止，不跑 apt" {
+    local f
+    f=$(make_script '
+os::pkg_install_deb "${OS_TEST_TMP}/nope.deb"
+printf "不该到这行\n"')
+    run bash "${f}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" != *'不该到这行'* ]]
+    [[ "${output}" != *'安装本地软件包'* ]]
+}
+
+# dry-run 下下载没真跑，文件本就不存在 —— 这时报错是拿预演当失败
+@test "pkg_install_deb: dry-run 不因文件不存在而失败，也不装" {
+    local f
+    f=$(make_script 'os::pkg_install_deb "${OS_TEST_TMP}/nope.deb"; printf "ok\n"')
+    run bash "${f}" --dry-run
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'[dry-run]'* ]]
+    [[ "${output}" == *'ok'* ]]
+}
+
+@test "pkg_install_deb: apt 失败时变更清单里不留假账" {
+    local f
+    f=$(make_script '
+cd "${OS_TEST_TMP}" || exit 9
+: >x.deb
+os::run() { OS_RUN_SKIPPED=0; return 100; }
+os::pkg_install_deb x.deb || true
+printf "changes=%s\n" "${#OS_ERR__CHANGES[@]}"')
+    run bash "${f}"
+    [[ "${output}" == *'changes=0'* ]]
+}
+
 # --- os::ask_secret---
 
 @test "ask_secret: 从 stdin 读，不回显，值进变量" {

@@ -1410,7 +1410,7 @@ os::pkg_refresh() {
 # candidate`），而退出码 100 更是把「源里没这个包」和「装到一半炸了」混成
 # 一件事 —— 前者属依赖缺失（退出码 3），压根不该跑 apt。
 #
-# rclone 与 valkey 在 Ubuntu 上都在 universe，所以这件事归框架管，
+# valkey 在 Ubuntu 上就在 universe，所以这件事归框架管，
 # 不是某个安装脚本自己的事。**只有真取不到时才动 apt 源**：装得到的机器
 # 一个字节都不该改，否则第二次执行就不是零变更了。
 # universe 是 Ubuntu 官方组件，不是第三方源，D99 那条不受影响。
@@ -1505,6 +1505,44 @@ os::pkg_install() {
             os::record_change "apt 安装了 ${got[*]}"
             OS_PKG__INSTALLED+=("${got[@]}")
         fi
+    fi
+    return "${rc}"
+}
+
+# os::pkg_install_deb <deb 文件>   安装一个本地 .deb
+#
+# 给「上游发了 .deb 却没有 apt 源」的软件用（rclone 就是这样，D238）。
+# 幂等与校验归调用方：这个函数拿到的是一个文件路径，「装没装」「该不该装」
+# 它一个都答不出来 —— 答得出来的只有调用方手里的版本号。
+#
+# **不是 `dpkg -i`**：那个不解依赖，缺一个就在系统上留下一个半配置状态的包，
+# 而收拾它要人手工敲 `apt-get -f install`。apt 认本地文件，依赖照常从源里取。
+#
+# 只收一个文件：apt 一次事务里装多个 deb 时，中途失败会留下「装上了几个」的
+# 中间态，而变更清单没法据实记录它 —— 一个文件就没有这个中间态。
+os::pkg_install_deb() {
+    local file=${1}
+
+    # apt 只把**含 `/`** 的参数当文件，否则当包名拿去源里搜。裸文件名
+    # （`rclone.deb`）会变成一次「找不到这个包」，而错误信息里完全看不出
+    # 是路径写法的问题
+    [[ ${file} == */* ]] || file="./${file}"
+
+    # dry-run 下前面的下载没真跑，文件本就不存在 —— 这时报错就是拿预演当失败
+    if [[ ${OS_DRYRUN} -ne 1 && ! -f ${file} ]]; then
+        os::die 1 "本地软件包不存在：${file}"
+    fi
+
+    os::critical_begin '安装本地软件包'
+    local -i rc=0
+    os::run --env "${OS_PKG__ENV[0]}" --env "${OS_PKG__ENV[1]}" \
+        '安装本地软件包' -- apt-get install -y -qq --no-install-recommends "${file}" || rc=$?
+    os::critical_end
+
+    # 事后记，不按意图记（同 os::pkg_install）：apt 没装成时，
+    # 失败清单不该要求人去处置一件没发生的事
+    if [[ ${rc} -eq 0 && ${OS_RUN_SKIPPED} -ne 1 ]]; then
+        os::record_change "apt 安装了本地软件包 ${file##*/}"
     fi
     return "${rc}"
 }

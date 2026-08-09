@@ -673,6 +673,15 @@ probe::component_version() {
             probe::_probe 'component.podman.version' "${OS_DEFAULT_PROBE_TIMEOUT}" -- podman --version
             probe::_version_token
             ;;
+        # **问二进制，不问 dpkg**，两个理由都致命：一、rclone 官方的装法就是
+        # 往 /usr/bin 扔一个二进制，dpkg 对它一无所知，落到默认分支只会答空，
+        # 而空会被读成「没装」；二、发行版包的版本形如 `1.60.1+dfsg-2`，
+        # 和官方 version.txt 的 `1.75.0` 不同形，拿去比对永远不相等（D238
+        # 要的正是这个比对）。`rclone version` 首行是 "rclone v1.75.0"
+        rclone)
+            probe::_probe 'component.rclone.version' "${OS_DEFAULT_PROBE_TIMEOUT}" -- rclone version
+            probe::_version_token
+            ;;
         # **判据是 `dockerd` 而不是 `docker`**：`docker --version` 在装了
         # podman-docker 的机器上打的是 "podman version 5.4.1"，拿它判断
         # 「装没装 Docker」会在最需要区分的那台机器上答错。dockerd 是引擎本体，
