@@ -439,7 +439,7 @@ setup_dirs() {
     # 面板的 unit 用 ReadWritePaths 精确列了它，而挂命名空间发生在 ExecStart
     # 之前，路径不存在就是 226/NAMESPACE，进程根本起不来
     mkdir -p "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state" "${ROOT}/data"
-    chown root:root "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
+    chown root:root "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state" "${ROOT}/data"
     chmod 0755 "${ROOT}"
     chmod 0750 "${ETC_DIR}" "${LOG_DIR}"
     chmod 0700 "${BACKUP_DIR}"

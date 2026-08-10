@@ -133,7 +133,7 @@ section "shellcheck"
 require shellcheck
 # 版本不符只提示不失败：装得到哪个版本由发行版仓库决定，不由改代码的人决定。
 # 但它必须被说出来 —— 否则本地一片绿、CI 一片红，而没人知道差别在哪
-sc_ver=$(shellcheck --version | sed -n 's/^version: //p')
+sc_ver=$(shellcheck --version | sed -n 's/^version: //p' | tr -d '\r')
 [[ ${sc_ver} == "${EXPECT_SHELLCHECK_VERSION}" ]] \
     || printf '注意：本机 shellcheck %s，CI 用的是 %s —— 本地通过不代表 CI 通过\n' \
         "${sc_ver:-未知}" "${EXPECT_SHELLCHECK_VERSION}"
@@ -464,6 +464,18 @@ for f in "${files[@]}"; do
 done
 printf '检查了 %d 个脚本与前端文件\n' "${prefix_checked}"
 
+# 包管理是领域边界，不只是调用前缀问题。脚本把 apt-get 塞进 os::run 仍然只会
+# 命中公开接口白名单，所以要单独拦命令本体；install.sh 是尚无 lib 时运行的
+# 自包含例外，lib/ 则正是唯一允许实现该边界的地方。
+for f in "${files[@]}"; do
+    [[ "${f}" == script/* ]] || continue
+    while IFS= read -r hit; do
+        [[ -n "${hit}" ]] || continue
+        report_fail "${f}:${hit%%:*} 包管理必须经 lib/ 的包接口，不得直接调用 apt-get"
+    done < <(grep -nE '(^[[:space:]]*|[;&|({][[:space:]]*|--[[:space:]]*)apt-get([[:space:]]|$)' "${f}" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+done
+
 # --- 9. docs/API.md 与 lib/ 一致 ---
 #
 # 接口参考是生成的，这条检查是它「不可能过期」的全部依据：
@@ -684,6 +696,11 @@ printf '检查了 %d 个带二级菜单的脚本\n' "${menu_checked}"
 # 一个不持锁的进程在写持久文件，正是这一档要防的那件事，而检查全程绿灯。
 # 黑名单只拦得住已经想到的那些：新增任何落地写接口时都得回来看一眼这里。
 # public/ 下的只读产物走 os::write_public，那是这一档唯一允许的写通道。
+# 静态门禁不假装自己能理解任意 shell：除公开写接口外，再覆盖常见外部写命令
+# 与直接指向 OS_* / 持久绝对路径的重定向。动态构造、间接调用仍由 review 兜底。
+raw_writer_re='(^|[;&|({]|[[:space:]](then|do|else))[[:space:]]*(rm|mv|cp|install|mkdir|rmdir|touch|truncate|tee|chmod|chown|ln|systemctl|service|apt-get|dpkg|dpkg-divert|update-alternatives|mount|umount|kill|pkill|reboot|shutdown)([[:space:]]|$)'
+persistent_redirect_re='(^|[^<])>>?[[:space:]]*"?([$][{]?OS_|/opt/oneserver|/etc/oneserver|/var/log/oneserver|/var/backups/oneserver|/run/oneserver|/var/tmp/oneserver)'
+
 section "root-nolock 零副作用"
 nolock_checked=0
 for f in "${files[@]}"; do
@@ -694,6 +711,16 @@ for f in "${files[@]}"; do
         report_fail "${f}：@privilege root-nolock 不得调用 ${hit}"
     done < <(grep -oE '\bos::(run|run_out|state_set|state_del|state_resource_add|state_resource_del|state_unit_add|install_template|install_file|secure_set|secure_del|destroy_confirm)\b' "${f}" \
         | sort -u || true)
+    while IFS= read -r hit; do
+        [[ -n "${hit}" ]] || continue
+        report_fail "${f}:${hit%%:*} @privilege root-nolock 不得裸调外部写命令：${hit#*:}"
+    done < <(grep -nE "${raw_writer_re}" "${f}" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+    while IFS= read -r hit; do
+        [[ -n "${hit}" ]] || continue
+        report_fail "${f}:${hit%%:*} @privilege root-nolock 不得向持久路径直接重定向：${hit#*:}"
+    done < <(grep -nE "${persistent_redirect_re}" "${f}" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 done
 printf '检查了 %d 个 root-nolock 脚本\n' "${nolock_checked}"
 
@@ -863,6 +890,36 @@ lib_api_version=$(tr -d ' \t\n\r' <"${REPO_ROOT}/lib/API_VERSION" 2>/dev/null ||
 [[ -n "${lib_api_version}" ]] || report_fail 'lib/API_VERSION 读不到'
 declare -a meta_orders=() meta_commands=()
 meta_group=''
+# 内部步骤脚本没有 @command，不参与菜单字段检查，但 bootstrap 仍会读取它的
+# @privilege 与 @requires_lib。单独覆盖这类文件，避免 systemd 周期任务在安装后
+# 才发现依赖版本写旧、写高或元数据掉出前 40 行。
+internal_meta_checked=0
+for f in "${files[@]}"; do
+    [[ "${f}" == script/* ]] || continue
+    grep -qE '^#[[:space:]]*@command[[:space:]]' "${f}" && continue
+    internal_meta_checked=$((internal_meta_checked + 1))
+    n_privilege=$(grep -cE '^#[[:space:]]*@privilege[[:space:]]+' "${f}" || true)
+    n_requires_lib=$(grep -cE '^#[[:space:]]*@requires_lib[[:space:]]+' "${f}" || true)
+    [[ ${n_privilege} -eq 1 ]] \
+        || report_fail "${f} 的 @privilege 有 ${n_privilege} 条，内部步骤脚本必须恰好一条"
+    [[ ${n_requires_lib} -eq 1 ]] \
+        || report_fail "${f} 的 @requires_lib 有 ${n_requires_lib} 条，内部步骤脚本必须恰好一条"
+
+    meta_code=$(grep -nE '^set -Eeuo' "${f}" | head -n1 | cut -d: -f1)
+    meta_last=$(head -n "$((${meta_code:-41} - 1))" "${f}" \
+        | grep -nE '^#[[:space:]]*@[a-z_]+[[:space:]]' | tail -n1 | cut -d: -f1)
+    if [[ -n "${meta_last}" ]] && ((meta_last > 40)); then
+        report_fail "${f}：元数据写到了第 ${meta_last} 行，超出 bootstrap 只读的前 40 行"
+    fi
+    while IFS= read -r v; do
+        [[ -n "${v}" ]] || continue
+        newest=$(printf '%s\n%s\n' "${v}" "${lib_api_version}" | sort -V | tail -1)
+        [[ "${newest}" == "${lib_api_version}" ]] \
+            || report_fail "${f} 要求 lib API >= ${v}，而 lib/API_VERSION 是 ${lib_api_version}"
+    done < <(sed -nE 's/^#[[:space:]]*@requires_lib[[:space:]]+>=[[:space:]]*([0-9]+\.[0-9]+).*$/\1/p' "${f}")
+done
+printf '检查了 %d 个内部步骤脚本的元数据\n' "${internal_meta_checked}"
+
 for f in "${files[@]}"; do
     [[ "${f}" == script/* ]] || continue
     grep -qE '^#[[:space:]]*@command[[:space:]]' "${f}" || continue

@@ -1405,6 +1405,23 @@ os::pkg_refresh() {
     return "${rc}"
 }
 
+# os::pkg_upgrade   升级所有已安装的软件包
+#
+# 与 install/purge 一样，脚本层不直接拼 apt 参数：环境、临界区、dry-run 与
+# 变更记录都由包边界给出同一份答案。升级可能部分成功后才返回非零，因此只要
+# 真实调用过 apt 就记录；dry-run 被 os::run 跳过时不留下假账。
+os::pkg_upgrade() {
+    os::critical_begin '升级软件包'
+    local -i rc=0
+    os::run --env "${OS_PKG__ENV[0]}" --env "${OS_PKG__ENV[1]}" \
+        '升级已安装的软件包' -- apt-get upgrade -y -qq || rc=$?
+    os::critical_end
+    if [[ ${OS_RUN_SKIPPED} -ne 1 ]]; then
+        os::record_change 'apt 升级了已安装的软件包'
+    fi
+    return "${rc}"
+}
+
 # 源里取不到的包，先弄清是「Ubuntu 把它放在 universe 而这台机器没开」还是
 # 真的没有。**apt 对这两种情况的说法一模一样**（`has no installation
 # candidate`），而退出码 100 更是把「源里没这个包」和「装到一半炸了」混成

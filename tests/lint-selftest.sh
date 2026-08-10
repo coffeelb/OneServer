@@ -76,6 +76,24 @@ printf '=== lint 反例自检 ===\n'
 fresh_copy
 printf '\nos::install_file --mode 0640 /tmp/a /tmp/b\n' >>"${work}/script/ops/web_collect.sh"
 expect_red 'root-nolock 调 os::install_file' 'root-nolock 不得调用 os::install_file'
+# 黑名单之外的原生命令与重定向同样必须红，证明检查不只认识 os::*。
+fresh_copy
+printf '\ntouch /opt/oneserver/data/lint-selftest\n' >>"${work}/script/ops/web_collect.sh"
+expect_red 'root-nolock 裸调 touch' '不得裸调外部写命令'
+
+fresh_copy
+printf "\n: >\"\${OS_DATA_DIR}/lint-selftest\"\n" >>"${work}/script/ops/web_collect.sh"
+expect_red 'root-nolock 重定向持久路径' '不得向持久路径直接重定向'
+
+# 脚本即使用 os::run 包着 apt-get，也仍然绕过了唯一包接口。
+fresh_copy
+printf "\nos::run '反例' -- apt-get upgrade -y\n" >>"${work}/script/ops/safe_updates.sh"
+expect_red '脚本直接调用 apt-get' '包管理必须经 lib/ 的包接口'
+
+# 无 @command 的 systemd 步骤也会读 @requires_lib，不能跳过版本检查。
+fresh_copy
+sed -i 's/@requires_lib >= 4.0/@requires_lib >= 99.0/' "${work}/script/ops/web_collect.sh"
+expect_red '内部步骤脚本要求未来 API' '要求 lib API >= 99.0'
 
 # --- 2. 运行时路径不得硬编码（含根卸载器与 OS_ROOT 之外的系统落点）---
 fresh_copy

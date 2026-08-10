@@ -1528,6 +1528,19 @@ echo done
     [[ "${output}" == *'[dry-run]'* ]]
 }
 
+@test "pkg_upgrade: dry-run 走统一包边界且不执行 apt" {
+    local f
+    f=$(make_script '
+os::pkg_upgrade
+echo skipped=${OS_RUN_SKIPPED}
+')
+    run bash "${f}" --dry-run
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'升级已安装的软件包'* ]]
+    [[ "${output}" == *'skipped=1'* ]]
+    [[ "${output}" == *'[dry-run]'* ]]
+}
+
 # reinstall 与 install 的幂等方向**相反**：install 见装了就跳过，
 # reinstall 要的正是「装着但文件被动过，请 apt 再放一遍」。唯一现实用途是
 # dpkg-divert --rename 把包自带的二进制挪走之后，让 apt 补一份回原位。

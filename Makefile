@@ -20,7 +20,7 @@ help:
 	@echo "  make test-all                               三个发行版都跑一遍"
 	@echo "  make manifest                               生成分发清单 manifest.txt"
 	@echo "  make api                                    由 lib/ 生成 docs/API.md"
-	@echo "  make testenv [DISTRO=debian13|ubuntu2404]   销毁重建测试容器，得到干净系统"
+	@echo "  make testenv [DISTRO=debian13|ubuntu2404|ubuntu2604] 销毁重建测试容器"
 	@echo "  make testenv-build                          构建全部测试镜像"
 	@echo "  make testenv-shell [DISTRO=...]             进测试容器"
 	@echo "  make testenv-list                           列出镜像与容器状态"
@@ -35,7 +35,7 @@ lint-selftest:
 	@bash tests/lint-selftest.sh
 
 # 测试跑在一次性容器里：那里有 MariaDB 给 lib/sql.sh 的用例当裁判，
-# 开发机与测试机上都没有。DISTRO 可切 ubuntu2404。
+# 开发机与测试机上都没有。DISTRO 可切三个受支持发行版。
 test:
 	@bash tests/testenv.sh exec $(DISTRO) bash -c 'cd /src && bats tests/lib'
 

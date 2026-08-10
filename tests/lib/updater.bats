@@ -93,6 +93,40 @@ os_marks_are() {
     [ "$(cat "${ROOT}/secure.conf")" = 'db.password=s3cret' ]
 }
 
+@test "switch: 老版本没有 data 时在切换前建成 root:root 0750" {
+    os_mk_root
+    os_mk_staging 0
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -eq 0 ]
+    [ -d "${ROOT}/data" ]
+    [ "$(stat -c %a "${ROOT}/data")" = '750' ]
+    [ "$(stat -c %U:%G "${ROOT}/data")" = 'root:root' ]
+}
+
+@test "switch: 既有 data 内容保留并校正权限" {
+    os_mk_root
+    mkdir -p "${ROOT}/data"
+    printf 'history\n' >"${ROOT}/data/history.tsv"
+    chmod 0777 "${ROOT}/data"
+    os_mk_staging 0
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${ROOT}/data/history.tsv")" = 'history' ]
+    [ "$(stat -c %a "${ROOT}/data")" = '750' ]
+}
+
+@test "switch: data 被文件占用时在任何目录切换前失败" {
+    os_mk_root
+    printf 'blocker\n' >"${ROOT}/data"
+    os_mk_staging 0
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *'不是目录'* ]]
+    os_marks_are old
+    [ ! -e "${ROOT}/.old" ]
+    [ ! -e "${ROOT}/.update-in-progress" ]
+}
+
 # --- 自检不过就地回滚 ---------------------------------------------
 #
 # 规范承诺「自检失败就地回滚并以非零码退出」。这是整条更新链上唯一
@@ -118,11 +152,14 @@ os_marks_are() {
 
 @test "switch: 回滚不碰运行时数据" {
     os_mk_root
+    mkdir -p "${ROOT}/data"
+    printf 'history\n' >"${ROOT}/data/history.tsv"
     os_mk_staging 1
     run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
     [ "${status}" -ne 0 ]
     [ "$(cat "${ROOT}/secure.conf")" = 'db.password=s3cret' ]
     [ -f "${ROOT}/state/components.tsv" ]
+    [ "$(cat "${ROOT}/data/history.tsv")" = 'history' ]
 }
 
 # --- 暂存区残缺：一步都不许迈 -------------------------------------

@@ -36,6 +36,7 @@
 - `os::output <退出码> [key=value...]` —— 打印信封并返回
 - `os::pkg_installed_names` —— 列出本次真正装上的包
 - `os::pkg_refresh` —— 刷新软件包索引
+- `os::pkg_upgrade` —— 升级所有已安装的软件包
 - `os::pkg_install <包>...` —— 安装，已装的自动跳过
 - `os::pkg_install_deb <deb 文件>` —— 安装一个本地 .deb
 - `os::pkg_purge <包>...` —— 卸载并清配置，没装的自动跳过

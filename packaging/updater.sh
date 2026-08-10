@@ -15,8 +15,8 @@
 # 而 `@requires_lib` 的存在本身就承认了新旧 lib 的接口会有差异，
 # 所以这个组合的行为是未定义的。
 #
-# 切换器必须站在两个版本之外：只用 bash 内建与 `mv`，不 source 任何东西，
-# 不调用任何 `os::*`。它是全项目唯一允许违反规范的代码。
+# 切换器必须站在两个版本之外：只用 bash 内建与基础 coreutils，
+# 不 source 任何东西、不调用任何 `os::*`。它是框架接口条款的自包含例外。
 #
 # 它还必须**先被复制到 $OS_ROOT 之外**（调用方复制到 /run/oneserver）再执行：
 # 它要替换的正是自己所在的那棵树，留在原地等于在自己脚下抽地板 ——
@@ -134,6 +134,15 @@ do_switch() {
     done
     [[ -e "${STAGING}/VERSION" ]] || die '暂存区缺 VERSION，什么都没有替换'
 
+    # data/ 是跨版本保留的运行时状态，不在 TOP_ORDER 里。必须在第一次 rename
+    # 之前保证它能被 unit 的 ReadWritePaths 使用；否则代码已经切换后才发现
+    # 目录创建失败，会把机器留在「新版代码 + 不可用数据目录」的状态。
+    [[ ! -L "${ROOT}/data" ]] || die "运行时数据目录不得是符号链接：${ROOT}/data"
+    [[ ! -e "${ROOT}/data" || -d "${ROOT}/data" ]] || die "运行时数据路径不是目录：${ROOT}/data"
+    mkdir -p -- "${ROOT}/data" || die "建不了 ${ROOT}/data"
+    chown root:root -- "${ROOT}/data" || die "无法设置 ${ROOT}/data 的属主"
+    chmod 0750 -- "${ROOT}/data" || die "无法设置 ${ROOT}/data 的权限"
+
     rm -rf -- "${ROOT}/.old"
     mkdir -p "${ROOT}/.old" || die "建不了 ${ROOT}/.old"
 
@@ -149,11 +158,6 @@ do_switch() {
         [[ -f "${ROOT}/VERSION" ]] && cp -- "${ROOT}/VERSION" "${ROOT}/.old/VERSION"
         mv -f -- "${STAGING}/VERSION" "${ROOT}/VERSION" || die '换不上 VERSION'
     fi
-
-    # 老版本没有 data/，而面板的 unit 用 ReadWritePaths 精确列了它 —— 挂命名空间
-    # 在 ExecStart 之前，路径不存在就是 226/NAMESPACE。升级路径不走 install.sh，
-    # 所以这一行必须在这儿：少了它，从旧版升上来的机器面板采集直接起不来。
-    mkdir -p -- "${ROOT}/data" 2>/dev/null || true
 
     rm -f -- "${ROOT}/.update-in-progress"
     log '目录已切换，开始自检'
@@ -179,7 +183,7 @@ do_switch() {
 
     log "自检未通过（退出码 ${rc}），正在回滚"
     do_rollback
-    die "已回滚到上一版。新版本没有通过自检，什么都没有留下" 1
+    die "已回滚到上一版；跨版本运行时数据按设计保留" 1
 }
 
 do_rollback() {

@@ -3,7 +3,7 @@
 # 采集只读面板的数据文件
 #
 # @privilege    root-nolock
-# @requires_lib >= 2.1
+# @requires_lib >= 4.0
 # @args         [--tier=<live|fast|slow|all>]
 # @description  把 probe 与 state 落成面板用的数据文件
 #
@@ -785,8 +785,12 @@ build_backups() {
                 [[ -f ${f} ]] || continue
                 count=$((count + 1))
                 local bytes mtime
-                bytes=$(stat -c %s -- "${f}" 2>/dev/null || printf '0')
-                mtime=$(stat -c %Y -- "${f}" 2>/dev/null || printf '0')
+                bytes=0
+                mtime=0
+                os::query -- stat -c %s -- "${f}" && bytes=${OS_RUN_OUTPUT}
+                os::query -- stat -c %Y -- "${f}" && mtime=${OS_RUN_OUTPUT}
+                [[ ${bytes} =~ ^[0-9]+$ ]] || bytes=0
+                [[ ${mtime} =~ ^[0-9]+$ ]] || mtime=0
                 size=$((size + bytes))
                 [[ -z ${last} || ${mtime} -gt ${last} ]] && last=${mtime}
             done

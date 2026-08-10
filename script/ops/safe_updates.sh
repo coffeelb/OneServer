@@ -11,7 +11,7 @@
 # @group        security
 # @order        30
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.2
 # @provides     auto-updates
 # @provides_unit ext:unattended-upgrades.service
 # @args         [--upgrade=<y|n>] [--auto-security=<y|n>]
@@ -47,13 +47,8 @@ main() {
 
     if ((upgradable > 0)); then
         if os::confirm --arg upgrade "现在升级这 ${upgradable} 个包？" y; then
-            # apt 装的东西属「禁止自动回滚」类（规范第二类）：
-            # 降级回旧版本比留在新版本破坏更大
-            os::record_change 'apt 升级了已安装的软件包'
-            os::critical_begin '升级软件包'
-            os::run --env 'DEBIAN_FRONTEND=noninteractive' --env 'NEEDRESTART_MODE=a' \
-                '升级已安装的软件包' -- apt-get upgrade -y -qq
-            os::critical_end
+            # 包边界统一处理 apt 环境、不可中断区段与禁止自动回滚的变更记录。
+            os::pkg_upgrade
             # dry-run 下 os::run 被跳过，一个包都没升——不看 OS_RUN_SKIPPED
             # 就打「已升级」，是 D15 说的「会撒谎的 dry-run」
             if [[ ${OS_RUN_SKIPPED} -eq 1 ]]; then
