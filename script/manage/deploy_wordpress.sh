@@ -7,7 +7,7 @@
 # @group        web
 # @order        12
 # @privilege    root
-# @requires_lib >= 1.8
+# @requires_lib >= 4.0
 # @provides     wordpress:<name>
 # @args         [--name=<站点名>] [--path=<目录>] [--db-name=<库名>] [--db-user=<账号>] [--auto-password=<y|n>] [--writable-config=<y|n>] [--confirm-overwrite=<站点名>]
 # @description  部署多站点共存的 WordPress，自动建库配权限
@@ -356,7 +356,7 @@ main() {
     existing_salt_lines=$(printf '%s' "${existing_salts}" | grep -c '^define' || true)
 
     local dir
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     fetch_wordpress "${dir}"
 
     os::record_change "在 ${path} 部署了 WordPress"

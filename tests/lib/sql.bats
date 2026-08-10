@@ -184,7 +184,7 @@ os_sql_available() {
 
 @test "defaults_file: 生成 0600 的临时配置，密码不进命令行" {
     local f
-    f=$(os::sql_defaults_file 'dbuser' 'S3cret-Password')
+    os::sql_defaults_file f 'dbuser' 'S3cret-Password'
     [ -f "${f}" ]
     [ "$(stat -c %a "${f}")" = '600' ]
     grep -q '^user="dbuser"$' "${f}"
@@ -199,13 +199,14 @@ os_sql_available() {
 # 「密码明明是对的却连不上」。加引号 + 转义反斜杠与双引号才是对称的。
 @test "defaults_file: 含 # 空格 反斜杠 双引号的密码不被选项文件语法吃掉" {
     local f
-    f=$(os::sql_defaults_file 'db user' 'a#b c\d"e')
+    os::sql_defaults_file f 'db user' 'a#b c\d"e'
     grep -qF 'password="a#b c\\d\"e"' "${f}"
     grep -qF 'user="db user"' "${f}"
 }
 
 @test "defaults_file: 密码自动登记脱敏" {
-    os::sql_defaults_file 'dbuser' 'S3cret-Password' >/dev/null
+    local f
+    os::sql_defaults_file f 'dbuser' 'S3cret-Password'
     log::write info '密码是 S3cret-Password'
     run grep -F 'S3cret-Password' "${OS_LOG_MAIN}"
     [ "${status}" -ne 0 ]

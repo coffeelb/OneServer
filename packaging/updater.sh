@@ -150,6 +150,11 @@ do_switch() {
         mv -f -- "${STAGING}/VERSION" "${ROOT}/VERSION" || die '换不上 VERSION'
     fi
 
+    # 老版本没有 data/，而面板的 unit 用 ReadWritePaths 精确列了它 —— 挂命名空间
+    # 在 ExecStart 之前，路径不存在就是 226/NAMESPACE。升级路径不走 install.sh，
+    # 所以这一行必须在这儿：少了它，从旧版升上来的机器面板采集直接起不来。
+    mkdir -p -- "${ROOT}/data" 2>/dev/null || true
+
     rm -f -- "${ROOT}/.update-in-progress"
     log '目录已切换，开始自检'
 

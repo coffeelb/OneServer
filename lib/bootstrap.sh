@@ -1583,6 +1583,57 @@ os::pkg_purge() {
     return "${rc}"
 }
 
+# os::pkg_reinstall <包>...   重装已装的包，把包自带的文件恢复回来
+#
+# 与 os::pkg_install 的差别是**故意的**：那个见包已装就跳过（幂等），
+# 而这里要的正是「已经装着，但文件被动过，请 apt 再放一遍」。
+# 现实用途只有一个形状：`dpkg-divert --rename` 把包自带的二进制挪走之后，
+# 得让 apt 重新放一份回原位占住那个路径。
+#
+# 没装的包直接跳过而不是报错：重装一个不存在的东西没有意义，而调用方
+# 想装的话该用 os::pkg_install。
+#
+# **属「禁止自动回滚」类**（§10）：它动的是 dpkg 管的文件，撤销要靠 dpkg
+# 自己的账本，猜着还原比不还原更危险。只记进变更清单。
+os::pkg_reinstall() {
+    [[ $# -gt 0 ]] || return 0
+
+    local pkg
+    local -a want=()
+    for pkg in "$@"; do
+        probe::package_installed "${pkg}"
+        [[ ${OS_PROBE_VALUE} == yes ]] && want+=("${pkg}")
+    done
+    if [[ ${#want[@]} -eq 0 ]]; then
+        log::write info "未安装，跳过 reinstall：$*" framework
+        return 0
+    fi
+
+    local IFS=' '
+    os::record_change "apt 重装了 ${want[*]}"
+    os::critical_begin '重装软件包'
+    local -i rc=0
+    os::run --allow-fail --env "${OS_PKG__ENV[0]}" --env "${OS_PKG__ENV[1]}" \
+        '重装软件包' -- apt-get install --reinstall -y -qq "${want[@]}" || rc=$?
+    os::critical_end
+    return "${rc}"
+}
+
+# os::pkg_clean   清空 apt 的包缓存
+#
+# 单独给它一个接口，而不是让清理脚本自己敲 apt-get clean：规范里「包管理只经
+# 框架接口」没有例外条款，而缺一个接口就等于逼调用方违约 —— 之前正是这样。
+#
+# 它删的是 /var/cache/apt/archives 下已下载的 .deb，全部可以重新下载，
+# 因此**不属于任何一类需要回滚的副作用**，只记进变更清单。
+os::pkg_clean() {
+    os::record_change '清空了 apt 包缓存'
+    local -i rc=0
+    os::run --allow-fail --env "${OS_PKG__ENV[0]}" --env "${OS_PKG__ENV[1]}" \
+        '清理 APT 包缓存' -- apt-get clean || rc=$?
+    return "${rc}"
+}
+
 # ==================================================================
 # 9 · 前置检查（顺序固定）
 # ==================================================================

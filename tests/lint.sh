@@ -3,10 +3,11 @@
 # OneServer 静态检查（F0.4）
 #
 # 二十项：
-#   1. shellcheck 零告警
+#   1. shellcheck 零告警；zsh 补全另用 `zsh -n` 查语法（同一件事，换个工具）
 #   2. shfmt 格式一致（规则见 .editorconfig，shfmt 原生读取它）
-#   3. `# shellcheck disable=` 审计 —— 每条必须带理由，总数不得超过阈值
-#      （零告警不能靠满屏 disable 伪造）
+#   3. disable 审计 —— 文件内每条必须带理由且总数守棘轮，
+#      .shellcheckrc 的全局禁用另走精确允许列表
+#      （零告警不能靠满屏 disable 伪造，更不能靠往 .shellcheckrc 里加一行）
 #   4. 前端零副作用
 #   5. 可执行位与 git 索引一致：该可执行的是 100755，不该的是 100644
 #   6. `os::run` 等的 desc 是固定字符串，不含变量展开
@@ -21,11 +22,16 @@
 #  15. 运行时路径不得硬编码，只出自 lib/paths.sh
 #  16. `eval` 全项目零使用
 #  17. lib 分层与装配：L0 只有赋值、模块之间不 source、不依赖 jq/python/perl
-#  18. 命令脚本的文件头四件套齐全
+#  18. 脚本文件头四件套齐全（script/** 全部，加根卸载器）
 #  19. 脚本元数据静态可判定的部分自洽
 #  20. 公开接口的测试覆盖不倒退（棘轮，只降不升）
 #
-# 检查范围 = git 跟踪的全部 shell 脚本，无豁免。
+# 候选范围 = git 跟踪的全部 bash 脚本（`*.sh` `*.bash` `bin/*`），没有豁免名单。
+# 但**各项自有适用面**，写在各自的注释里：`desc`、脚本层前缀这类条款本就只约束
+# `script/**` 与 `bin/**`；分层只问 `lib/**`；`eval` 不查 tests/（检查器自己必然
+# 要写出那个词）；接口覆盖只搜 `tests/lib/`（lint 的注释里就有接口名）。
+# 两个自包含例外（install.sh 与切换器）不适用「source bootstrap」与路径单一来源，
+# 理由是它们根本 source 不了 lib/ —— 这是规范写明的，不是给它们开的口子。
 #
 # 用法：bash tests/lint.sh
 
@@ -34,10 +40,16 @@ IFS=$'\n\t'
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
-# 第 20 条在 uninstall.sh：`OS_PROBE_NO_SNAPSHOT=1` 由 lib/probe.sh 的退出钩子
-# 消费，本文件内必然「未使用」。不置它的话，钩子会把卸载刚删掉的
-# $OS_PUBLIC_DIR 在退出时 mkdir 回来 —— 卸载命令自己不报任何错。
-readonly MAX_DISABLES=20
+
+# 文件内 `# shellcheck disable=` 的棘轮上限。**只降不升**，与下面两个同义：
+# 它记的是「还欠多少」，不是「允许多少」。零告警不能靠满屏 disable 伪造。
+readonly MAX_DISABLES=21
+
+# `.shellcheckrc` 里的全局 disable 用精确允许列表，不用阈值：一条全局禁用
+# 关掉的是**所有文件**的那条规则，与逐处豁免不是一回事，混进同一个计数会让
+# 「清掉一条文件内 disable」和「删掉一条全局禁用」看起来等价。
+# 要加一条就得先改这里，而改这里必然被 review 看见 —— 这就是审议的执行点。
+readonly ALLOWED_GLOBAL_DISABLES='SC1091'
 
 # 变更流水注释的棘轮上限。**只降不升**：清理一批就把这个数往下调，
 # 它记录的是「还欠多少」，不是「允许多少」。
@@ -55,7 +67,12 @@ readonly EXPECT_SHELLCHECK_VERSION='0.11.0'
 
 # 运行时路径的字面量。单一来源是 lib/paths.sh（规范 §4.2），
 # 出现在别处就意味着「改一个目录要改两个地方」，而第二处不会有人记得改。
-readonly RUNTIME_PATHS='/opt/oneserver|/etc/oneserver|/var/log/oneserver|/var/backups/oneserver|/run/oneserver|/var/tmp/oneserver'
+#
+# 后三个是落在 OS_ROOT **之外**的系统落点。它们曾经不在这张表里，代价是
+# 卸载器把 /usr/local/bin 与两个 /etc 落点又各写了一份字面量 —— 而它明明
+# source 了 bootstrap，paths.sh 里的常量就在手边。漏掉的原因是这张表按
+# 「带 oneserver 字样的目录」攒的，而这三个不带。
+readonly RUNTIME_PATHS='/opt/oneserver|/etc/oneserver|/var/log/oneserver|/var/backups/oneserver|/run/oneserver|/var/tmp/oneserver|/usr/local/bin|/etc/bash_completion.d|/etc/logrotate.d'
 
 cd "${REPO_ROOT}"
 
@@ -83,13 +100,18 @@ require() {
 
 # CI 与开发机上用 git ls-files（自动尊重 .gitignore）；
 # 测试机上跑的是 tar 同步过去的副本，没有 .git 也没装 git，退回 find。
+#
+# **`*.bash` 也算 bash 脚本。** 按扩展名收集时漏掉它，结果是 bash 补全脚本
+# ——一份随分发装到用户机器上的代码——一项检查都过不到。它自己头上还写着
+# `# shellcheck shell=bash` 和一条带理由的 disable，写的人分明以为它在检查内。
+# zsh 补全另走一节：那份是 zsh 语法，shellcheck 与 shfmt 都读不了。
 list_candidates() {
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files -- '*.sh' 'bin/*'
+        git ls-files -- '*.sh' '*.bash' 'bin/*'
         return
     fi
     find . -type d -name .git -prune -o \
-        -type f \( -name '*.sh' -o -path './bin/*' \) -print \
+        -type f \( -name '*.sh' -o -name '*.bash' -o -path './bin/*' \) -print \
         | sed 's|^\./||' | sort
 }
 
@@ -121,6 +143,37 @@ else
     report_fail "shellcheck 有告警"
 fi
 
+# zsh 补全归在本项里，因为要守的是同一件事——语法层面的静态检查——只是
+# zsh 那份读不了（`${(f)...}`、`compadd` 都不是 bash 语法），只能换 zsh -n。
+# 本机没装就说明并跳过：为一份补全脚本让整条 lint 依赖 zsh 不划算。CI 上装。
+#
+# （上一行不写工具名开头：任何以 `#` 加那个词起头的注释都会被当成指令解析。）
+declare -a zsh_files=()
+while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    zsh_files+=("${f}")
+done < <(
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git ls-files -- '*.zsh'
+    else
+        find . -type d -name .git -prune -o -type f -name '*.zsh' -print | sed 's|^\./||' | sort
+    fi
+)
+if [[ ${#zsh_files[@]} -eq 0 ]]; then
+    :
+elif ! command -v zsh >/dev/null 2>&1; then
+    printf '注意：没装 zsh，%d 个 zsh 文件的语法检查跳过（CI 会装）\n' "${#zsh_files[@]}"
+else
+    zsh_bad=0
+    for f in "${zsh_files[@]}"; do
+        zsh -n "${f}" 2>&1 || {
+            report_fail "${f} zsh 语法检查不通过"
+            zsh_bad=1
+        }
+    done
+    [[ ${zsh_bad} -eq 1 ]] || printf 'zsh 语法零告警（%d 个文件）\n' "${#zsh_files[@]}"
+fi
+
 # --- 2. shfmt ---
 
 # 不传任何格式化开关：shfmt 一旦收到开关就整个忽略 .editorconfig，
@@ -149,9 +202,26 @@ for f in "${files[@]}"; do
     done < <(grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+disable=' "${f}" || true)
 done
 
-printf 'disable 共 %d 条（阈值 %d）\n' "${disable_total}" "${MAX_DISABLES}"
+printf '文件内 disable 共 %d 条（棘轮 %d）\n' "${disable_total}" "${MAX_DISABLES}"
 [[ "${disable_total}" -le "${MAX_DISABLES}" ]] \
-    || report_fail "disable 超过阈值 ${MAX_DISABLES}，需要人工说明而不是继续加"
+    || report_fail "文件内 disable 超过棘轮 ${MAX_DISABLES} —— 先清理旧的，或经批准后连同规则一起改"
+
+# `.shellcheckrc` 里的全局 disable 此前完全不在审计内：那个文件自称「全局禁用的
+# 规则必须逐条注明理由」「CI 统计 disable 总数」，而检查只搜了各文件里的注释指令。
+# 于是往 .shellcheckrc 里加一行 disable= 是全项目最省事的消警告手段，也是唯一
+# 不会被任何检查发现的那种。
+global_disables=0
+if [[ -f "${REPO_ROOT}/.shellcheckrc" ]]; then
+    # 去空白用逐行的 sed，不用 `tr -d '[:space:]'`：后者连换行一起删，
+    # 多条禁用会被拼成一行，只有一条时则连末尾换行都没有，read 直接读不进循环。
+    while IFS= read -r code || [[ -n "${code}" ]]; do
+        [[ -n "${code}" ]] || continue
+        global_disables=$((global_disables + 1))
+        printf '%s\n' "${ALLOWED_GLOBAL_DISABLES}" | tr ',' '\n' | grep -qx -- "${code}" \
+            || report_fail ".shellcheckrc 全局禁用了 ${code} —— 它关掉的是所有文件的这条规则，须先写进 lint.sh 的允许列表"
+    done < <(sed -nE 's/^[[:space:]]*disable=//p' "${REPO_ROOT}/.shellcheckrc" | tr ',' '\n' | sed 's/[[:space:]]//g')
+fi
+printf '全局 disable %d 条（允许列表：%s）\n' "${global_disables}" "${ALLOWED_GLOBAL_DISABLES}"
 
 # --- 4. 前端零副作用---
 
@@ -224,10 +294,11 @@ printf '检查了 %d 个文件的执行位\n' "${exec_checked}"
 # 规范：**禁止把凭据写进 `<desc>`**，判据是「desc 参数禁止包含任何变量展开」——
 # 比「检查变量名像不像凭据」严格，也才是可判定的（D47 要的就是这种检查）。
 #
-# **只查 script/** 与 bin/**。** `lib/**` 不在规范的管辖内 ——规范明写
-# 「本节是唯一约束 lib/** 的条款」。框架自己拼的 desc（`os::systemd_restart`
-# 的「重启 <unit>」）里放的是 unit 名与文件名，且脚本传进来的值本就要过
-# log::redact；把这条施加到 lib 上只会让日志变成「重启服务」这种查不出所以然的话。
+# **只查 script/** 与 bin/**。** 规范的适用范围段把 `desc` 固定字符串列进了
+# 「lib/** 不适用的面向脚本的接口条款」，这里照它划界。框架自己拼的 desc
+# （`os::systemd_restart` 的「重启 <unit>」）里放的是 unit 名与文件名，且脚本
+# 传进来的值本就要过 log::redact；把这条施加到 lib 上只会让日志变成
+# 「重启服务」这种查不出所以然的话。
 #
 # 判定方式：从函数名之后逐个词扫，跳过带值的选项（--env / --secret-val /
 # --stdin-secret / --timeout）与不带值的 --allow-fail，遇到的第一个词就是 desc。
@@ -452,33 +523,61 @@ printf '共 %d 条（阈值 %d）\n' "${changelog_total}" "${MAX_CHANGELOG_COMME
 # docs/API.md 是从 lib/ 生成且已入库的，所以「接口有没有变」看它的 diff 就够，
 # 不必在这里重新解析一遍 lib/。
 #
+# **比较基准不能想当然地取 HEAD。** 本地开发时工作区里躺着未提交的改动，
+# 与 HEAD 比正是要比的那一对；但 CI 检出之后工作区**就是** HEAD，两边逐字节
+# 相同，于是这条检查对每一个已提交的接口增删都报「接口无变动」—— 它看起来
+# 一直在跑，实际上从来没有在 CI 里拦下过任何东西。
+#
+# 因此基准由 OS_LINT_API_BASE 显式给出（CI 传 PR 目标分支或推送前的 SHA），
+# 没给的时候只在**工作区确实与 HEAD 有差异**时才拿 HEAD 当基准。两个条件都
+# 不成立就跳过并说明 —— 宁可不检查，也不能打印一句没有根据的「无变动」。
+#
 # 盖不住的：改签名、改返回语义这类**语义**变化 —— 函数名没动，diff 看不出来。
 # 那部分仍然只能靠 review。这条只保证最常犯的那种（新增/删除）不会漏。
 
 section "lib API 版本"
+api_fns() { grep -oE '^- .(os|probe)::[a-z_0-9]+' | sed 's/^- .//' | sort; }
+
+api_base=''
 if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    printf '跳过（不在 git 工作区）\n'
-elif ! git cat-file -e HEAD:docs/API.md 2>/dev/null; then
-    printf '跳过（上一个提交里还没有 docs/API.md）\n'
+    printf '跳过：不在 git 工作区\n'
+elif [[ -n "${OS_LINT_API_BASE:-}" ]]; then
+    # merge-base 优先：PR 的目标分支上可能已经有别人的接口改动，直接跟分支尖端比
+    # 会把那些也算成本次的。给的是具体 SHA 时 merge-base 得到的就是它自己。
+    api_base=$(git merge-base HEAD "${OS_LINT_API_BASE}" 2>/dev/null) \
+        || api_base=$(git rev-parse --verify "${OS_LINT_API_BASE}^{commit}" 2>/dev/null) \
+        || api_base=''
+    [[ -n "${api_base}" ]] \
+        || printf '跳过：给了基准 %s 但解析不到（浅克隆？CI 需要 fetch-depth: 0）\n' "${OS_LINT_API_BASE}"
+elif git diff --quiet HEAD -- docs/API.md lib/API_VERSION 2>/dev/null; then
+    printf '跳过：工作区与 HEAD 一致，没有可比的基准（CI 请传 OS_LINT_API_BASE）\n'
 else
-    api_ver_now=$(cat "${REPO_ROOT}/lib/API_VERSION" 2>/dev/null || printf '')
-    api_ver_head=$(git show HEAD:lib/API_VERSION 2>/dev/null || printf '')
-    fn_now=$(grep -oE '^- .(os|probe)::[a-z_0-9]+' "${REPO_ROOT}/docs/API.md" 2>/dev/null | sed 's/^- .//' | sort)
-    fn_head=$(git show HEAD:docs/API.md 2>/dev/null | grep -oE '^- .(os|probe)::[a-z_0-9]+' | sed 's/^- .//' | sort)
+    api_base=HEAD
+fi
 
-    added=$(comm -13 <(printf '%s\n' "${fn_head}") <(printf '%s\n' "${fn_now}") | tr -d ' ')
-    removed=$(comm -23 <(printf '%s\n' "${fn_head}") <(printf '%s\n' "${fn_now}") | tr -d ' ')
-
-    if [[ -z "${api_ver_now}" ]]; then
-        report_fail "lib/API_VERSION 读不到"
-    elif [[ -n "${added}" && "${api_ver_now}" == "${api_ver_head}" ]]; then
-        report_fail "新增了公开接口但 lib/API_VERSION 仍是 ${api_ver_now}，次版本要 +1：$(printf '%s' "${added}" | tr '\n' ' ')"
-    elif [[ -n "${removed}" && "${api_ver_now%%.*}" == "${api_ver_head%%.*}" ]]; then
-        report_fail "删除了公开接口但 lib/API_VERSION 主版本仍是 ${api_ver_now%%.*}，主版本要 +1：$(printf '%s' "${removed}" | tr '\n' ' ')"
-    elif [[ -n "${added}" || -n "${removed}" ]]; then
-        printf '接口有变动，版本已从 %s 提到 %s\n' "${api_ver_head}" "${api_ver_now}"
+if [[ -n "${api_base}" ]]; then
+    if ! git cat-file -e "${api_base}:docs/API.md" 2>/dev/null; then
+        printf '跳过：基准 %s 里还没有 docs/API.md\n' "${api_base}"
     else
-        printf '接口无变动（%s）\n' "${api_ver_now}"
+        api_ver_now=$(cat "${REPO_ROOT}/lib/API_VERSION" 2>/dev/null || printf '')
+        api_ver_base=$(git show "${api_base}:lib/API_VERSION" 2>/dev/null || printf '')
+        fn_now=$(api_fns <"${REPO_ROOT}/docs/API.md" 2>/dev/null)
+        fn_base=$(git show "${api_base}:docs/API.md" 2>/dev/null | api_fns)
+
+        added=$(comm -13 <(printf '%s\n' "${fn_base}") <(printf '%s\n' "${fn_now}") | tr -d ' ')
+        removed=$(comm -23 <(printf '%s\n' "${fn_base}") <(printf '%s\n' "${fn_now}") | tr -d ' ')
+
+        if [[ -z "${api_ver_now}" ]]; then
+            report_fail "lib/API_VERSION 读不到"
+        elif [[ -n "${added}" && "${api_ver_now}" == "${api_ver_base}" ]]; then
+            report_fail "新增了公开接口但 lib/API_VERSION 仍是 ${api_ver_now}，次版本要 +1：$(printf '%s' "${added}" | tr '\n' ' ')"
+        elif [[ -n "${removed}" && "${api_ver_now%%.*}" == "${api_ver_base%%.*}" ]]; then
+            report_fail "删除了公开接口但 lib/API_VERSION 主版本仍是 ${api_ver_now%%.*}，主版本要 +1：$(printf '%s' "${removed}" | tr '\n' ' ')"
+        elif [[ -n "${added}" || -n "${removed}" ]]; then
+            printf '接口有变动，版本已从 %s 提到 %s（基准 %s）\n' "${api_ver_base}" "${api_ver_now}" "${api_base}"
+        else
+            printf '接口无变动（%s，基准 %s）\n' "${api_ver_now}" "${api_base}"
+        fi
     fi
 fi
 
@@ -580,6 +679,11 @@ printf '检查了 %d 个带二级菜单的脚本\n' "${menu_checked}"
 #
 # 只允许 os::query 的只读查询与 probe::。os::run 与 os::run_out 都有副作用，
 # 两个都要拦 —— `` 在 `run` 与 `_` 之间不成立，所以必须分别列出。
+#
+# **os::install_file 曾经不在这张表里**，于是采集器用它往盘上刷了一份历史曲线 ——
+# 一个不持锁的进程在写持久文件，正是这一档要防的那件事，而检查全程绿灯。
+# 黑名单只拦得住已经想到的那些：新增任何落地写接口时都得回来看一眼这里。
+# public/ 下的只读产物走 os::write_public，那是这一档唯一允许的写通道。
 section "root-nolock 零副作用"
 nolock_checked=0
 for f in "${files[@]}"; do
@@ -588,7 +692,7 @@ for f in "${files[@]}"; do
     while IFS= read -r hit; do
         [[ -n "${hit}" ]] || continue
         report_fail "${f}：@privilege root-nolock 不得调用 ${hit}"
-    done < <(grep -oE '\bos::(run|run_out|state_set|state_del|state_resource_add|state_resource_del|state_unit_add|install_template|secure_set|secure_del|destroy_confirm)\b' "${f}" \
+    done < <(grep -oE '\bos::(run|run_out|state_set|state_del|state_resource_add|state_resource_del|state_unit_add|install_template|install_file|secure_set|secure_del|destroy_confirm)\b' "${f}" \
         | sort -u || true)
 done
 printf '检查了 %d 个 root-nolock 脚本\n' "${nolock_checked}"
@@ -607,6 +711,14 @@ printf '检查了 %d 个 root-nolock 脚本\n' "${nolock_checked}"
 # bootstrap.sh` 这行规范逐字规定的引导语句自动落在范围之外，一条特例都不用写。
 #
 # lib/paths.sh 是来源，它自己当然要写字面量。
+#
+# **根卸载器也在范围内。** 它不在 script/ 下，早先因此整个落在检查之外 ——
+# 而它恰恰是删东西的那个脚本，路径写错的后果比别处都大。它 source 了
+# bootstrap，常量拿得到，没有豁免的理由。
+#
+# install.sh 与切换器仍在范围外，那是规范写明的两个自包含例外：前者跑在还没有
+# /opt/oneserver 的机器上，后者要替换的正是自己脚下那棵树，两者都 source 不了
+# lib/，路径只能自带。
 
 section "运行时路径"
 hardpath_re="^[[:space:]]*(readonly[[:space:]]+|local[[:space:]]+|declare[[:space:]]+-[a-zA-Z]+[[:space:]]+)?[A-Za-z_][A-Za-z_0-9]*=[\"']?(${RUNTIME_PATHS})"
@@ -615,7 +727,7 @@ path_checked=0
 for f in "${files[@]}"; do
     case "${f}" in
         lib/paths.sh) continue ;;
-        script/* | bin/* | lib/*) ;;
+        script/* | bin/* | lib/* | uninstall.sh) ;;
         *) continue ;;
     esac
     path_checked=$((path_checked + 1))
@@ -701,12 +813,22 @@ printf '检查了 %d 个 lib 模块\n' "${layer_checked}"
 # 少 `umask 027` 时落地的文件对同机其他用户可读；少受限 PATH 时以 root
 # 跑的是 PATH 上先找到的那个同名程序；source 两次会让 trap 与全局状态
 # 重新初始化一遍，而第一次的记录就此丢失。
+#
+# **不按 `@command` 筛。** `script/**` 下还有由 systemd 直接 ExecStart 的内部
+# 步骤脚本（采集器、通知器），它们同样以 root 跑、同样落文件，少一样的后果
+# 一模一样；按 `@command` 筛只是因为「命令」这个词，不是因为风险有区别。
+# 根卸载器同理：它不在 script/ 下，却是删东西的那个，更没有豁免的理由。
+#
+# install.sh 与切换器不在此列 —— 规范的两个自包含例外，它们 source 不了 lib/，
+# 「随后 source bootstrap.sh」这条对它们不成立。
 
-section "命令脚本文件头"
+section "脚本文件头"
 head_checked=0
 for f in "${files[@]}"; do
-    [[ "${f}" == script/* ]] || continue
-    grep -qE '^#[[:space:]]*@command[[:space:]]' "${f}" || continue
+    case "${f}" in
+        script/* | uninstall.sh) ;;
+        *) continue ;;
+    esac
     head_checked=$((head_checked + 1))
     grep -qx 'set -Eeuo pipefail' "${f}" || report_fail "${f} 缺 'set -Eeuo pipefail'"
     grep -qx "PATH='/usr/sbin:/usr/bin:/sbin:/bin'" "${f}" || report_fail "${f} 缺受限 PATH"
@@ -715,7 +837,7 @@ for f in "${files[@]}"; do
     [[ "${n_boot}" -eq 1 ]] \
         || report_fail "${f} source bootstrap.sh ${n_boot} 次，规范要求全文件恰好一次"
 done
-printf '检查了 %d 个命令脚本\n' "${head_checked}"
+printf '检查了 %d 个脚本的文件头\n' "${head_checked}"
 
 # --- 19. 元数据自洽 ---
 #

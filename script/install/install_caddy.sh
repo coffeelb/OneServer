@@ -7,7 +7,7 @@
 # @group        app
 # @order        110
 # @privilege    root
-# @requires_lib >= 1.14
+# @requires_lib >= 4.0
 # @provides     caddy
 # @provides_unit ext:caddy.service
 # @args         [--plugins=<+加|-减|序号|列表|none>] [--skip-official] [--relax-apparmor] [--on-build-error=<retry|prebuilt|abort>] [--fallback-prebuilt=<y|n>]
@@ -470,12 +470,9 @@ switch_binary() {
             dpkg-divert --divert "${CADDY_DEFAULT_BIN}" --rename /usr/bin/caddy
         os::critical_end
 
-        # --rename 把文件挪走了，apt 得重装一份回来占住 /usr/bin/caddy
-        os::record_change '重装 caddy 包以补回官方二进制'
-        os::critical_begin '重装 caddy 包'
-        os::run --env DEBIAN_FRONTEND=noninteractive '重装 Caddy 官方二进制' -- \
-            apt-get install --reinstall -y -qq caddy
-        os::critical_end
+        # --rename 把文件挪走了，apt 得重装一份回来占住 /usr/bin/caddy。
+        # 变更登记与临界区都在 os::pkg_reinstall 里
+        os::pkg_reinstall caddy
     fi
 
     # 覆盖已有二进制前先备份：验证不过时框架逆序还原（「先备份再改」）
@@ -656,7 +653,7 @@ main() {
     [[ -n ${current} ]] && os::info "当前已安装：${current}"
 
     local dir
-    dir=$(os::tmpdir)
+    os::tmpdir dir
 
     setup_apt_repo "${dir}" || os::die 1 '配置 Caddy apt 源失败'
     os::pkg_install caddy
@@ -702,7 +699,7 @@ main() {
         # systemd 给 /run 挂 noexec —— 下载完 chmod 0755 也跑不起来，
         # verify_binary 必然失败，且报错指向文件而不是挂载选项
         local bindir
-        bindir=$(os::tmpdir --exec) || os::die 1 '无法创建可执行的临时目录'
+        os::tmpdir bindir --exec || os::die 1 '无法创建可执行的临时目录'
 
         local -i ok=0 rc=0 round=0
         local choice='' repick=''

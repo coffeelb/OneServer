@@ -7,7 +7,7 @@
 # @group        monitor
 # @order        5
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @provides     web
 # @provides_unit own:oneserver-web-live.service
 # @provides_unit own:oneserver-web-live.timer
@@ -552,7 +552,7 @@ drop_caddy_import() {
     # 只是反着来。框架的替换接口只会替换或追加，删一行得自己滤
     local dir candidate line
     local -a keep=()
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     candidate="${dir}/Caddyfile.no-import"
     while IFS= read -r line || [[ -n ${line} ]]; do
         [[ ${line} =~ ${CADDY_IMPORT_RE} ]] && continue
@@ -753,7 +753,11 @@ do_status() {
     for spec in 'probe-live.tsv 30 实时档' 'probe-fast.tsv 90 快档' 'probe-slow.tsv 900 慢档'; do
         IFS=' ' read -r name limit label <<<"${spec}"
         [[ -f "${OS_PUBLIC_DIR}/${name}" ]] || continue
-        mtime=$(stat -c %Y -- "${OS_PUBLIC_DIR}/${name}" 2>/dev/null || printf '0')
+        # 走 os::query 而不是裸 stat：规范要求只读查询经带超时的通道。
+        # 这几个文件都在 tmpfs 上，默认的 probe 超时绰绰有余
+        mtime=0
+        os::query -- stat -c %Y -- "${OS_PUBLIC_DIR}/${name}" && mtime=${OS_RUN_OUTPUT}
+        [[ ${mtime} =~ ^[0-9]+$ ]] || mtime=0
         age=$((now - mtime))
         if ((age > limit)); then
             lag+="${lag:+，}${label} ${age} 秒前（上限 ${limit} 秒）"

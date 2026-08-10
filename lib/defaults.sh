@@ -57,6 +57,12 @@ OS_DEFAULT_PROBE_TIMEOUT=3
 # 不是删除，是标注——诚实标注来源与时间，好过假装数据是新的。
 OS_DEFAULT_PROBE_SNAPSHOT_MAX_AGE=300
 
+# 空间清理的目录扫描超时。**比 probe 的 3 秒宽得多**：`du -sk /var/log` 在
+# 一台攒了半年日志的机器上十几秒很正常，而 probe 那个值是按「读一个 /proc
+# 文件」定的。用 3 秒的后果是清理页在真正需要清理的机器上全部显示为 0，
+# 也就是**越该清的越看不见**。
+OS_DEFAULT_SCAN_TIMEOUT=60
+
 # --- 重试---
 #
 # 指数退避：第 n 次失败后等 BASE * 2^(n-1) 秒，封顶 MAX。

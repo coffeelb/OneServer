@@ -7,7 +7,7 @@
 # @group        backup
 # @order        20
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--file=<归档文件名>] [--mode=<all|db|files>] [--only=<归档内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
 # @description  从归档或外部备份恢复，覆盖前自动留副本
 #
@@ -296,7 +296,7 @@ fetch_archive() {
     fi
 
     local dir src
-    dir=$(os::tmpdir) || return 1
+    os::tmpdir dir || return 1
     src="${RS_REMOTE}:${RS_REMOTE_DIR}/${type}/${name}"
     os::info "从远端下载 ${file}"
     os::query --timeout 3600 -- rclone copy "${src}/${file}" "${dir}" || return 1
@@ -316,7 +316,7 @@ fetch_archive() {
 read_manifest() {
     local file=${1}
     local dir
-    dir=$(os::tmpdir) || return 1
+    os::tmpdir dir || return 1
     os::query --timeout 300 -- tar -xzf "${file}" -C "${dir}" manifest || {
         os::err '归档里没有 manifest —— 它不是 oneserver 生成的归档，或者版本太老'
         return 1
@@ -1755,7 +1755,7 @@ main() {
     local rc=0
     if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${RS_MF_DB} ]]; then
         local dir
-        dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+        os::tmpdir dir || os::die 1 '无法创建临时目录'
         os::query --timeout 3600 -- tar -xzf "${RS_ARCHIVE}" -C "${dir}" database.sql \
             || os::die 1 '归档里取不出 database.sql'
         restore_db "${RS_MF_DB}" "${dir}/database.sql" || rc=1

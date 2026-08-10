@@ -7,7 +7,7 @@
 # @group        app
 # @order        170
 # @privilege    root
-# @requires_lib >= 1.20
+# @requires_lib >= 4.0
 # @provides     docker
 # @provides_unit ext:docker.service
 # @provides_unit ext:docker.socket
@@ -355,7 +355,7 @@ main() {
         esac
 
         local tmp
-        tmp=$(os::tmpdir)
+        os::tmpdir tmp
         setup_apt_repo "${tmp}" "${os_id}" "${docker_codename}" "${arch}" \
             || os::die 1 '配置 Docker apt 源失败'
 

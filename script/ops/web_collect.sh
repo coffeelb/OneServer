@@ -40,15 +40,8 @@ source /opt/oneserver/lib/bootstrap.sh
 readonly TIER_LIVE='probe-live.tsv'
 readonly TIER_FAST='probe-fast.tsv'
 readonly TIER_SLOW='probe-slow.tsv'
-readonly HISTORY_FILE='history.tsv'
+readonly HISTORY_FILE="${OS_WEB_HISTORY_NAME}"
 readonly HISTORY_SAMPLES='2880'
-# 历史是 public/ 里**唯一想要跨重启存活**的东西：那条 24 小时曲线的用处正在于
-# 「重启前那段内存是怎么爬上去的」，而 public/ 在 tmpfs 上、重启即空。所以给它
-# 单独留一份盘上的副本，慢档（5 分钟一轮）刷一次、开机时回填。
-#
-# 刷频率跟着慢档而不是快档：跟快档的话每 30 秒重写一次 99 KB，正是搬 tmpfs
-# 要消掉的那笔写入；跟慢档就是十分之一，代价只是最多丢最后 5 分钟的曲线。
-readonly HISTORY_BACKUP="${OS_STATE_DIR}/history.tsv"
 
 readonly ALERT_FILE='alerts.tsv'
 UFW_RULES=''
@@ -252,11 +245,12 @@ collect_fast() {
 # 膨胀；这里在内存中截为固定行数后原子替换，保留窗口稳定且断电不会留下半行。
 #
 # 开机后第一轮：tmpfs 里那份还不存在，从盘上的副本回填 —— 否则每次重启曲线
-# 都从零开始，而重启前后那一段恰恰是最想看的。
+# 都从零开始，而重启前后那一段恰恰是最想看的。副本由 web_persist.sh 写，
+# 本脚本**只读它**：写盘是副作用，而 root-nolock 的前提就是零副作用。
 append_history() {
     local -a rows=()
     local row out='' src="${OS_PUBLIC_DIR}/${HISTORY_FILE}"
-    [[ -r ${src} ]] || src=${HISTORY_BACKUP}
+    [[ -r ${src} ]] || src=${OS_WEB_HISTORY_FILE}
     if [[ -r ${src} ]]; then
         mapfile -t rows <"${src}" || true
     fi
@@ -292,14 +286,6 @@ append_history() {
         done
     fi
     os::write_public "${HISTORY_FILE}" "${out}" || true
-    return 0
-}
-
-# 把 tmpfs 里的历史刷一份到盘上，供下次开机回填。内容没变就不写（`os::install_file`
-# 换 inode 的语义与 write_public 一致），机器闲着时它一天也不会动一次
-flush_history() {
-    [[ -r "${OS_PUBLIC_DIR}/${HISTORY_FILE}" ]] || return 0
-    os::install_file --mode 0640 "${OS_PUBLIC_DIR}/${HISTORY_FILE}" "${HISTORY_BACKUP}" || true
     return 0
 }
 
@@ -853,7 +839,6 @@ main() {
         os::write_public 'volumes.tsv' "${CONTAINER_VOLUMES}"
         os::write_public "${UPDATES_FILE}" "${CONTAINER_UPDATES}"
         publish_alerts
-        flush_history
     fi
 
     # 例行成功不进日志。这条命令由 timer 每 3 到 300 秒跑一次（视档位）,「已更新」写进 JSONL

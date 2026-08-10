@@ -110,20 +110,31 @@ done_msg() {
     return 0
 }
 
-# du_kb <路径>   路径不在就是 0，不报错。**不用 os::query**：这是纯只读的
-# 尺寸计算，一次 overview 要跑十来次，每次都进审计日志会把日志淹掉
+# du_kb <路径>   路径不在就是 0，不报错
+#
+# 走 os::query 而不是裸 `du`：规范要求只读查询经带超时的通道，而这里正是最需要
+# 超时的地方——`du` 撞上一个挂死的 NFS 挂载点会永远回不来，那时清理页整个卡住。
+# （它不进审计日志：os::query 本就不产生审计记录。）
+#
+# **超时给的是 OS_DEFAULT_SCAN_TIMEOUT 而不是 probe 那 3 秒**：`du -sk /var/log`
+# 在攒了半年日志的机器上十几秒很正常，按 3 秒算的话，越该清的机器越会显示成 0。
+#
+# 量不出来时返回 0 但**当场 warn 一声**：这个函数几乎都在 `$( )` 里调用，
+# 想靠全局标记把「没量出来」传回去是传不出来的（子 shell），而 warn 走 stderr，
+# 命令替换不捕获它，用户看得见。静默返回 0 才是最坏的那种——它和「真的是空的」
+# 长得一模一样。
 du_kb() {
     local p=${1}
     [[ -e ${p} ]] || {
         printf '0'
         return 0
     }
-    local out
-    out=$(du -sk -- "${p}" 2>/dev/null) || {
+    if ! os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- du -sk -- "${p}"; then
+        os::warn "${p} 未能在 ${OS_DEFAULT_SCAN_TIMEOUT} 秒内扫完，这一项按 0 计"
         printf '0'
         return 0
-    }
-    printf '%s' "${out%%[[:space:]]*}"
+    fi
+    printf '%s' "${OS_RUN_OUTPUT%%[[:space:]]*}"
 }
 
 # ------------------------------------------------------------------
@@ -135,8 +146,9 @@ scan_apt() {
     CL_APT_N=0
     [[ -d ${APT_CACHE} ]] || return 0
     # 只算 .deb：目录里还有 lock 与 partial/，那些不是可回收的东西
-    local out
-    out=$(find "${APT_CACHE}" -maxdepth 1 -type f -name '*.deb' 2>/dev/null) || out=''
+    local out=''
+    os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- \
+        find "${APT_CACHE}" -maxdepth 1 -type f -name '*.deb' && out=${OS_RUN_OUTPUT}
     [[ -n ${out} ]] || return 0
     CL_APT_N=$(printf '%s\n' "${out}" | grep -c . || true)
     local f
@@ -160,8 +172,9 @@ scan_tmp() {
     CL_TMP_KB=0
     CL_TMP_DIRS=''
     [[ -d ${OS_TMP_EXEC_ROOT} ]] || return 0
-    local out
-    out=$(find "${OS_TMP_EXEC_ROOT}" -mindepth 1 -maxdepth 1 2>/dev/null) || out=''
+    local out=''
+    os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- \
+        find "${OS_TMP_EXEC_ROOT}" -mindepth 1 -maxdepth 1 && out=${OS_RUN_OUTPUT}
     [[ -n ${out} ]] || return 0
     CL_TMP_DIRS=${out}
     local d
@@ -183,8 +196,10 @@ scan_logs() {
     local dir out all=''
     for dir in "${OS_LOG_DIR}" "${CADDY_LOG_DIR}"; do
         [[ -d ${dir} ]] || continue
-        out=$(find "${dir}" -maxdepth 1 -type f \
-            \( -name '*.gz' -o -name '*.[0-9]' -o -name '*.[0-9][0-9]' \) 2>/dev/null) || out=''
+        out=''
+        os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- \
+            find "${dir}" -maxdepth 1 -type f \
+            \( -name '*.gz' -o -name '*.[0-9]' -o -name '*.[0-9][0-9]' \) && out=${OS_RUN_OUTPUT}
         [[ -n ${out} ]] && all+="${out}"$'\n'
     done
     all=$(printf '%s' "${all}" | grep -v '^[[:space:]]*$' || true)
@@ -262,6 +277,14 @@ scan_archives() {
         registered+="${id}"$'\n'
     done < <(os::state_list)
 
+    # **先把目录列表整个复制出来再遍历**：循环体里的 du_kb 也走 os::query，
+    # 而那是个单槽返回通道（规范 §10）—— 边读 OS_RUN_OUTPUT 边往里写，
+    # 遍历到第二个目录时列表就已经被自己的尺寸查询覆盖掉了
+    local dirs=''
+    os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- \
+        find "${OS_ARCHIVE_DIR}" -mindepth 2 -maxdepth 2 -type d && dirs=${OS_RUN_OUTPUT}
+    [[ -n ${dirs} ]] || return 0
+
     local dir rel target kb
     while IFS= read -r dir; do
         [[ -n ${dir} ]] || continue
@@ -273,7 +296,7 @@ scan_archives() {
         [[ ${registered} == *"backup-path:${rel#*/}"$'\n'* ]] && continue
         kb=$(du_kb "${dir}")
         CL_ARCH_ORPHAN+="${target}"$'\t'"${kb}"$'\n'
-    done < <(find "${OS_ARCHIVE_DIR}" -mindepth 2 -maxdepth 2 -type d 2>/dev/null)
+    done <<<"${dirs}"
     CL_ARCH_ORPHAN=$(printf '%s' "${CL_ARCH_ORPHAN}" | grep -v '^[[:space:]]*$' || true)
     return 0
 }
@@ -358,8 +381,7 @@ action_apt() {
         os::output 130 freed_kb=0
         return 0
     fi
-    os::record_change "清理 APT 包缓存 $(hsize "${CL_APT_KB}")"
-    os::run '清理 APT 包缓存' -- apt-get clean || os::die 1 'apt-get clean 失败'
+    os::pkg_clean || os::die 1 '清理 APT 包缓存失败'
     done_msg "${CL_APT_KB}"
     os::output 0 freed_kb="${CL_APT_KB}"
     return 0

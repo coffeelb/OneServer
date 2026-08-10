@@ -8,7 +8,7 @@
 # @order        50
 # @requires     podman,compose-usable
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @args         [--action=<ls|add|up|down|rm>] [--name=<项目名>] [--dir=<目录>] [--with-volumes] [--confirm-rm=<项目名>]
 # @description  把 compose 项目交给 systemd 托管
 #
@@ -317,7 +317,7 @@ project_config_sha() {
 
     local __pk_rendered=${OS_RUN_OUTPUT}
     local __pk_dir __pk_tmp
-    __pk_dir=$(os::tmpdir) || return 1
+    os::tmpdir __pk_dir || return 1
     __pk_tmp="${__pk_dir}/config.rendered"
     printf '%s\n' "${__pk_rendered}" >"${__pk_tmp}"
 
@@ -362,7 +362,7 @@ render_unit() {
     local __pk_out=${1} __pk_name=${2} __pk_dir=${3} __pk_file=${4}
     local __pk_unit __pk_tmpdir
     unit_of __pk_unit "${__pk_name}"
-    __pk_tmpdir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir __pk_tmpdir || os::die 1 '无法创建临时目录'
     local __pk_tmp="${__pk_tmpdir}/${__pk_unit}"
 
     os::install_template --mode 0644 \

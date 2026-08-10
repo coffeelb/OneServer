@@ -25,9 +25,11 @@ setup() {
     OS_ERR__ROLLBACK_FAILED=()
 }
 
-# 在独立进程里跑一段用了 errors.sh 的脚本
-# 用法：os_run_script <脚本正文>
-os_run_script() {
+# 生成一段装好 errors.sh 的脚本，打印文件路径（不执行）。
+# 拆出来是为了让需要「后台起进程再发信号」的用例复用同一份装配，
+# 不必把那串 source 再抄一遍 —— 抄一遍就会有一份迟早对不上的装配顺序。
+# 用法：os_script_file <脚本正文>
+os_script_file() {
     local body=${1}
     local f="${BATS_TEST_TMPDIR}/case-${RANDOM}.sh"
     cat >"${f}" <<EOF
@@ -49,7 +51,13 @@ log::init case
 errors::install
 ${body}
 EOF
-    bash "${f}"
+    printf '%s' "${f}"
+}
+
+# 在独立进程里跑一段用了 errors.sh 的脚本
+# 用法：os_run_script <脚本正文>
+os_run_script() {
+    bash "$(os_script_file "${1}")"
 }
 
 # --- 三分类 ---
@@ -393,18 +401,99 @@ EOF
     chmod 0777 "${fake_root}"
     chown 65534 "${fake_root}" 2>/dev/null || skip '当前环境不允许 chown 到任意 uid'
     OS_TMP_EXEC_ROOT="${fake_root}"
-    run os::tmpdir --exec
+    run os::tmpdir d --exec
     [ "${status}" -ne 0 ]
     # 没有被强行改成 root：函数必须拒绝，而不是 chown 抢管理权
     [ "$(stat -c '%u' "${fake_root}")" = '65534' ]
 }
 
-@test "tmpdir: 目录属主是 root 时正常建目录" {
+# **故意不用 `run`。** run 把被测函数放进子 shell 跑，而这个接口的全部要点就是
+# 路径要写回调用方的变量 —— 用 run 的话拿到的是 status 和 output，恰好绕开了
+# 要验的那件事，改回 stdout 返回也照样绿。
+@test "tmpdir: 目录属主是 root 时把路径写进调用方的变量" {
     [ "$(id -u)" -eq 0 ] || skip '需要 root 权限运行 os::tmpdir --exec'
     OS_TMP_EXEC_ROOT="${BATS_TEST_TMPDIR}/clean-var-tmp/oneserver"
-    run os::tmpdir --exec
-    [ "${status}" -eq 0 ]
-    [ -d "${output}" ]
+    local d=''
+    os::tmpdir d --exec
+    [ -n "${d}" ]
+    [ -d "${d}" ]
+}
+
+@test "tmpdir: 变量名不合法时以 2 拒绝，不建目录" {
+    OS_TMP_ROOT="${BATS_TEST_TMPDIR}/badname"
+    run os::tmpdir '不是标识符'
+    [ "${status}" -eq 2 ]
+    [ ! -d "${BATS_TEST_TMPDIR}/badname" ]
+}
+
+# --- os::tmpdir 的清理必须发生在调用方的进程里 ---
+#
+# 这是它用输出变量而不是 stdout 的全部理由：把新目录登记进 OS_ERR__TMPDIRS 的
+# 动作必须留在调用方进程里，而 `d=$(os::tmpdir)` 会把登记关进一个转瞬即逝的子
+# shell —— 目录照建，父进程的清理列表却始终是空的，每调用一次泄漏一个，而清理
+# 代码看上去一直在跑。
+#
+# 三条退出路径各测一次：EXIT trap 与信号 trap 是两段各自独立的清理调用，
+# 漏一条就是一类泄漏。
+#
+# 判据是「跑完之后临时根目录为空」，不去读那个路径 —— 读它就得让变量名穿过两层
+# heredoc 展开，而那正是这组用例要防的那类错误。
+
+os_tmpdir_root() {
+    local root="${BATS_TEST_TMPDIR}/tmproot"
+    mkdir -p "${root}"
+    printf '%s' "${root}"
+}
+
+@test "tmpdir: 正常退出后不留残留" {
+    [ "$(id -u)" -eq 0 ] || skip 'os::tmpdir 要求临时目录根属主是 root'
+    local root seen="${BATS_TEST_TMPDIR}/seen-ok"
+    root=$(os_tmpdir_root)
+    os_run_script "
+OS_TMP_ROOT='${root}'
+os::tmpdir d
+ls -A '${root}' > '${seen}'
+"
+    [ -s "${seen}" ]
+    [ -z "$(ls -A "${root}")" ]
+}
+
+@test "tmpdir: 失败退出后不留残留" {
+    [ "$(id -u)" -eq 0 ] || skip 'os::tmpdir 要求临时目录根属主是 root'
+    local root seen="${BATS_TEST_TMPDIR}/seen-fail"
+    root=$(os_tmpdir_root)
+    run os_run_script "
+OS_TMP_ROOT='${root}'
+os::tmpdir d
+ls -A '${root}' > '${seen}'
+exit 1
+"
+    [ "${status}" -eq 1 ]
+    [ -s "${seen}" ]
+    [ -z "$(ls -A "${root}")" ]
+}
+
+@test "tmpdir: 被 TERM 打断后不留残留" {
+    [ "$(id -u)" -eq 0 ] || skip 'os::tmpdir 要求临时目录根属主是 root'
+    local root seen="${BATS_TEST_TMPDIR}/seen-sig" f
+    root=$(os_tmpdir_root)
+    f=$(os_script_file "
+OS_TMP_ROOT='${root}'
+os::tmpdir d
+ls -A '${root}' > '${seen}'
+echo ready
+sleep 30
+")
+    bash "${f}" >"${BATS_TEST_TMPDIR}/sig-out" 2>&1 &
+    local pid=$! i
+    for ((i = 0; i < 100; i++)); do
+        grep -q ready "${BATS_TEST_TMPDIR}/sig-out" 2>/dev/null && break
+        sleep 0.1
+    done
+    kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    [ -s "${seen}" ]
+    [ -z "$(ls -A "${root}")" ]
 }
 
 # --- 分层与禁止项 ---

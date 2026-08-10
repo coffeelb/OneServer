@@ -36,6 +36,25 @@ OS_STATE_FILE="${OS_STATE_DIR}/components.tsv"
 OS_STATE_BAK="${OS_STATE_FILE}.bak"
 OS_STATE_FILE_MODE='0640'
 
+# 工具自己的持久运行数据，**与 state 分开**：state 是组件清单，卸载按它反向
+# 执行、doctor 校验它的权限，往里塞一个与组件无关的文件是拿卸载语义冒险。
+# 这里放的是「丢了只是可惜，不影响正确性」的东西。
+#
+# 在 OS_ROOT 下而不是 /var/lib：更新切换器只 rename lib/templates/packaging/
+# script/bin 五个顶层目录，这里和 state 一样不在其中，更新不碰；卸载时随
+# OS_ROOT 一起走，不必再记一处系统落点。
+OS_DATA_DIR="${OS_ROOT}/data"
+OS_DATA_DIR_MODE='0750'
+
+# 面板的历史曲线与告警去重基线。**两个脚本共用**（采集器读、持久化步骤写），
+# 所以路径必须在这里定一次，不能各拼各的。
+#
+# NAME 单列一个常量：public/ 里那份要用它当 os::write_public 的文件名，
+# 盘上那份要用它拼路径 —— 两处必须是同一个名字，写两遍迟早写岔。
+OS_WEB_HISTORY_NAME='history.tsv'
+OS_WEB_HISTORY_FILE="${OS_DATA_DIR}/${OS_WEB_HISTORY_NAME}"
+OS_WEB_ALERT_BASELINE="${OS_DATA_DIR}/telegram-alerts.tsv"
+
 # 非 root 可读的只读数据（probe 快照等，D44）。唯一放宽到 0755 的目录，
 # 因此权限值写在这里，而不是散在写它的模块里。
 #
@@ -62,6 +81,15 @@ OS_SECURE_CONF_MODE='0600'
 # --- 系统目录 ---
 
 OS_LOCAL_BIN_DIR='/usr/local/bin'
+
+# 两个落在 OS_ROOT 之外的系统文件：装的时候写进去，卸的时候要删掉。
+# 定成完整路径而不是所在目录 —— 消费方要的就是这一个文件，给目录只会让
+# 「文件名叫 oneserver」这个知识在每个调用点各写一遍。
+#
+# install.sh 不用它们：那是自包含例外，跑在还没有 lib/ 的机器上。
+OS_COMPLETION_FILE='/etc/bash_completion.d/oneserver'
+OS_LOGROTATE_FILE='/etc/logrotate.d/oneserver'
+
 OS_LOG_DIR='/var/log/oneserver'
 OS_LOG_DIR_MODE='0750'
 

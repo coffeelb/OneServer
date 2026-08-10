@@ -56,10 +56,6 @@ umask 027
 
 source /opt/oneserver/lib/bootstrap.sh
 
-readonly BIN_LINKS='/usr/local/bin'
-readonly COMPLETION_FILE='/etc/bash_completion.d/oneserver'
-readonly LOGROTATE_FILE='/etc/logrotate.d/oneserver'
-
 UN_PURGE=0    # 连 /etc/oneserver 与凭据库一起删
 UN_ARCHIVES=0 # 连备份归档一起删
 
@@ -184,7 +180,7 @@ handle_components() {
         [[ -n ${one} ]] || continue
         os::section "卸载组件 ${one}"
         rc=0
-        "${BIN_LINKS}/oneserver" uninstall --id="${one}" ${child[@]+"${child[@]}"} || rc=$?
+        "${OS_LOCAL_BIN_DIR}/oneserver" uninstall --id="${one}" ${child[@]+"${child[@]}"} || rc=$?
         if ((rc != 0)); then
             os::warn "组件 ${one} 没有卸干净（退出码 ${rc}）—— 它的资源仍在机器上"
         fi
@@ -265,18 +261,18 @@ handle_secrets() {
 self_lines() {
     local -a lines=()
     if [[ ${UN_PURGE} -eq 1 ]]; then
-        lines+=("程序目录 ${OS_ROOT} 整个（含 state 与凭据库）")
+        lines+=("程序目录 ${OS_ROOT} 整个（含 state、面板历史与凭据库）")
         lines+=("配置目录 ${OS_ETC_DIR}")
     else
         lines+=("程序目录 ${OS_ROOT} 里除 secure.conf 之外的一切（含 state）")
     fi
-    lines+=("入口 ${BIN_LINKS}/oneserver 与 ${BIN_LINKS}/os")
+    lines+=("入口 ${OS_LOCAL_BIN_DIR}/oneserver 与 ${OS_LOCAL_BIN_DIR}/os")
     lines+=("日志目录 ${OS_LOG_DIR}")
     lines+=("面板数据 ${OS_PUBLIC_DIR}")
     lines+=("运行时目录 ${OS_RUN_DIR}（锁与临时文件）")
     lines+=("可执行临时目录 ${OS_TMP_EXEC_ROOT}")
-    lines+=("logrotate 配置 ${LOGROTATE_FILE}")
-    lines+=("bash 补全 ${COMPLETION_FILE}")
+    lines+=("logrotate 配置 ${OS_LOGROTATE_FILE}")
+    lines+=("bash 补全 ${OS_COMPLETION_FILE}")
     lines+=('本工具自带的 systemd unit（备份 timer 与面板采集 timer）')
     [[ ${UN_ARCHIVES} -eq 1 ]] && lines+=("备份归档 ${OS_BACKUP_DIR} 整个")
     printf '%s\n' "${lines[@]}"
@@ -316,9 +312,9 @@ remove_self() {
     OS_PROBE_NO_SNAPSHOT=1
 
     os::record_change '卸载了 OneServer 自身'
-    os::run --allow-fail '删除入口链接' -- rm -f -- "${BIN_LINKS}/oneserver" "${BIN_LINKS}/os" || true
-    os::run --allow-fail '删除 bash 补全' -- rm -f -- "${COMPLETION_FILE}" || true
-    os::run --allow-fail '删除 logrotate 配置' -- rm -f -- "${LOGROTATE_FILE}" || true
+    os::run --allow-fail '删除入口链接' -- rm -f -- "${OS_LOCAL_BIN_DIR}/oneserver" "${OS_LOCAL_BIN_DIR}/os" || true
+    os::run --allow-fail '删除 bash 补全' -- rm -f -- "${OS_COMPLETION_FILE}" || true
+    os::run --allow-fail '删除 logrotate 配置' -- rm -f -- "${OS_LOGROTATE_FILE}" || true
     os::run --allow-fail '删除面板数据目录' -- rm -rf -- "${OS_PUBLIC_DIR}" || true
     os::run --allow-fail '删除可执行临时目录' -- rm -rf -- "${OS_TMP_EXEC_ROOT}" || true
 

@@ -63,7 +63,7 @@ os::sql_str() {
 # 凭据传递 ——规范的第一优先通道
 # ==================================================================
 
-# os::sql_defaults_file <用户> <密码> [主机]   打印临时配置文件路径
+# os::sql_defaults_file <变量名> <用户> <密码> [主机]   写临时配置文件，路径写进变量
 #
 # `mysql -p"$pass"` 会让密码出现在 ps 里，对同机任何用户可见 ——
 # 比日志泄漏严重。MySQL 系工具都支持 --defaults-extra-file，
@@ -72,6 +72,14 @@ os::sql_str() {
 # 文件落在 os::tmpdir（/run 上的 tmpfs，0700 目录 + 0600 文件），
 # **永远不落盘**，且随进程退出自动清理。
 #
+# **路径经变量交回，与 os::tmpdir 同因**：`f=$(os::sql_defaults_file ...)` 的
+# 命令替换会把目录登记留在子 shell 里，于是这个装着明文口令的文件谁也不删，
+# 一直躺到重启 —— 全项目最不该这样泄漏的就是它。
+#
+# 目前生产路径都以 root 走 unix socket 认证，没有一处传 `--defaults`，因此这条
+# 通道只有用例在走。留着它是因为「密码不进 argv」这条要求随时可能需要它，而那
+# 一天再来发现返回契约是错的，代价比现在改高得多。
+#
 # 值必须加双引号并转义，不能裸写 `password=${pass}`。选项文件不是「等号右边
 # 原样取走」：`#` 在行中任意位置开始注释、首尾空白被吃掉、反斜杠按转义表
 # （`\s` `\t` `\n` …）解释。实测（my_print_defaults）：
@@ -79,18 +87,27 @@ os::sql_str() {
 # 密码被截成前三个字符，而且**不报任何错**，现场表现是「密码明明是对的却连不上」。
 # 加引号后只剩反斜杠与双引号要转义，`#` 与空格都进得去。
 os::sql_defaults_file() {
-    local user=${1-} pass=${2-} host=${3:-localhost}
-    local dir
-    dir=$(os::tmpdir) || return 1
-    local f="${dir}/my.cnf"
+    local __os_df_out=${1-}
+    if [[ ! ${__os_df_out} =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        ui::line --err error 'os::sql_defaults_file 用法：<变量名> <用户> <密码> [主机]'
+        return 2
+    fi
+    shift
 
-    local u=${user} p=${pass} h=${host}
+    # 内部名带 __os_df_ 前缀，同 os::tmpdir：调用方写 `local f; os::sql_defaults_file f …`
+    # 是最自然的用法，而 `f` 恰好是这里原本的内部名 —— 撞上就写不回去了
+    local __os_df_user=${1-} __os_df_pass=${2-} __os_df_host=${3:-localhost}
+    local __os_df_dir
+    os::tmpdir __os_df_dir || return 1
+    local __os_df_f="${__os_df_dir}/my.cnf"
+
+    local u=${__os_df_user} p=${__os_df_pass} h=${__os_df_host}
     u=${u//\\/\\\\} && u=${u//\"/\\\"}
     p=${p//\\/\\\\} && p=${p//\"/\\\"}
     h=${h//\\/\\\\} && h=${h//\"/\\\"}
 
-    local prev_umask
-    prev_umask=$(umask)
+    local __os_df_prev_umask
+    __os_df_prev_umask=$(umask)
     umask 077
     {
         printf '[client]\n'
@@ -98,12 +115,12 @@ os::sql_defaults_file() {
         printf 'password="%s"\n' "${p}"
         printf 'host="%s"\n' "${h}"
         printf 'default-character-set=%s\n' "${OS_DEFAULT_DB_CHARSET}"
-    } >"${f}"
-    umask "${prev_umask}"
-    chmod 0600 "${f}" 2>/dev/null || true
+    } >"${__os_df_f}"
+    umask "${__os_df_prev_umask}"
+    chmod 0600 "${__os_df_f}" 2>/dev/null || true
 
-    log::secret_add "${pass}" || true
-    printf '%s\n' "${f}"
+    log::secret_add "${__os_df_pass}" || true
+    printf -v "${__os_df_out}" '%s' "${__os_df_f}"
     return 0
 }
 

@@ -7,7 +7,7 @@
 # @group        backup
 # @order        10
 # @privilege    root
-# @requires_lib >= 3.6
+# @requires_lib >= 4.0
 # @provides     backup
 # @provides_unit own:oneserver-backup.service
 # @provides_unit own:oneserver-backup.timer
@@ -319,7 +319,11 @@ resolve_targets() {
 write_manifest() {
     local stage=${1} type=${2} name=${3} source=${4} db=${5} root=${6} subtype=${7-}
     local host ver created
-    host=$(cat /etc/hostname 2>/dev/null || printf 'unknown')
+    # 走 probe 而不是读 /etc/hostname：那个文件按约定只有一行，但真出现第二行时
+    # 直接读会把两行拼成一个不存在的主机名写进 manifest，而 manifest 是恢复端的
+    # 唯一依据。探测降级（超时）时值为空，manifest 的字段不留空。
+    probe::hostname
+    host=${OS_PROBE_VALUE:-unknown}
     ver=$(cat "${OS_VERSION_FILE}" 2>/dev/null || printf 'unknown')
     printf -v created '%(%Y-%m-%dT%H:%M:%S%z)T' -1
 
@@ -427,7 +431,7 @@ make_archive() {
         find "${dir}" -maxdepth 1 -name '*.tar.gz.partial' -delete
 
     local stage
-    stage=$(os::tmpdir) || return 1
+    os::tmpdir stage || return 1
 
     # --- 库 ---
     if [[ -n ${db} ]]; then
@@ -1175,7 +1179,7 @@ ensure_rclone() {
     esac
 
     local dir
-    dir=$(os::tmpdir) || os::die 1 '创建临时目录失败'
+    os::tmpdir dir || os::die 1 '创建临时目录失败'
     local name="rclone-v${latest}-linux-${arch}.deb"
 
     os::info "rclone 官方最新版 ${latest}（当前 ${current:-未安装}）"
@@ -1316,7 +1320,7 @@ action_schedule() {
     fi
 
     local dir
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     os::install_template "${OS_UNIT_SRC_DIR}/${BK_TIMER}" "${dir}/${BK_TIMER}" \
         "ONCALENDAR=${oncal}" || os::die 1 '渲染 timer 失败'
 

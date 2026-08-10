@@ -23,8 +23,8 @@ ExecStartPost=/opt/oneserver/script/ops/web_notify.sh --non-interactive
 # 实测（systemd-run 逐项验证）：strict 挂，full 与 PrivateTmp 都没问题。
 # 硬化选项必须挨个实测，照抄模板会把功能悄悄弄坏。
 ProtectSystem=full
-# 数据目录在 tmpfs 上（规范 §4.2）；state 那条是给历史曲线的盘上副本用的
-ReadWritePaths=/run/oneserver-public /opt/oneserver/state
+# 数据目录在 tmpfs 上（规范 §4.2）；data 那条是给通知器的告警去重基线用的
+ReadWritePaths=/run/oneserver-public /opt/oneserver/data
 # **数据目录只能由 RuntimeDirectory 建**，不能指望采集器自己 mkdir：/run 是
 # tmpfs，重启后目录没了，而 ReadWritePaths 挂命名空间发生在 ExecStart **之前**，
 # 路径不存在就直接 226/NAMESPACE —— 进程压根没起来，轮不到它去建。现场表现是

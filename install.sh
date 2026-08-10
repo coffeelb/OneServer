@@ -434,12 +434,16 @@ setup_dirs() {
     # **没有 ${ROOT}/public**：probe 快照与面板数据在 /run/oneserver-public
     # （tmpfs），由采集器与框架自己建。这里再建一个同名目录，落下的是一个
     # 谁也不写、却全局可读的空壳 —— 卸载时还得记得清它
-    mkdir -p "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state"
+    # data/ 与 state/ 分开：前者是工具自己的运行数据（面板历史、告警去重基线），
+    # 丢了只是可惜；后者是组件清单，卸载按它反向执行。**必须在这里建出来**——
+    # 面板的 unit 用 ReadWritePaths 精确列了它，而挂命名空间发生在 ExecStart
+    # 之前，路径不存在就是 226/NAMESPACE，进程根本起不来
+    mkdir -p "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}" "${ROOT}/state" "${ROOT}/data"
     chown root:root "${ROOT}" "${ETC_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
     chmod 0755 "${ROOT}"
     chmod 0750 "${ETC_DIR}" "${LOG_DIR}"
     chmod 0700 "${BACKUP_DIR}"
-    chmod 0750 "${ROOT}/state"
+    chmod 0750 "${ROOT}/state" "${ROOT}/data"
     # 早先的版本在这里建过 ${ROOT}/public。它不在 OWNED_TOP 里，remove_orphans
     # 扫不到，装过那些版本的机器会一直留着一个空的全局可读目录。只在它确实空着
     # 时收掉 —— 万一有人往里放过东西，那是他的文件，不归安装器处置

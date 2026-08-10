@@ -7,7 +7,7 @@
 # @group        security
 # @order        20
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @provides_unit ext:ssh.service
 # @provides_unit ext:ssh.socket
 # @args         [--add-pubkey=<y|n>] [--user=<用户名>] [--pubkey=<公钥内容>] [--pubkey-file=<路径>] [--port=<端口>] [--password-auth=<keep|no|yes>] [--permit-root-login=<keep|prohibit-password|no|yes>]
@@ -168,7 +168,7 @@ safe_install_pubkey() {
     local ak="${ssh_dir}/authorized_keys"
 
     local dir tmp
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     tmp="${dir}/pubkey"
     printf '%s\n' "${key}" >"${tmp}"
 
@@ -387,7 +387,7 @@ safe_apply_socket_port() {
     [[ -f ${SOCKET_DROPIN} ]] && existed=1
 
     local dir tmp
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     tmp="${dir}/00-oneserver-port.conf"
     {
         printf '# 由 oneserver safe ssh 生成。删掉本文件即回到 ssh.socket 自带的端口。\n'

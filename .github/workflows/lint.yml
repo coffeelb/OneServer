@@ -3,6 +3,7 @@ name: lint
 on:
   push:
     branches: [main]
+    paths-ignore: ['VERSION']
   pull_request:
   workflow_dispatch:
 
@@ -12,24 +13,41 @@ permissions:
 jobs:
   shell:
     name: shellcheck + shfmt
-    timeout-minutes: 5
+    # 反例自检要把工作区复制若干份、每份跑一遍完整 lint，比正例慢得多
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
     steps:
+      # 全历史：lint 的「接口变了就得升 API_VERSION」要跟改动前的那个 commit
+      # 比。浅克隆下那个 commit 不在本地，检查只能跳过。
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
-      - name: 安装 shellcheck 与 shfmt
+      - name: 安装 shellcheck、shfmt 与 zsh
         run: |
           v=$(sed -nE "s/^readonly EXPECT_SHELLCHECK_VERSION='([0-9.]+)'.*/\1/p" tests/lint.sh)
           [ -n "${v}" ] || { echo "从 tests/lint.sh 读不到 EXPECT_SHELLCHECK_VERSION"; exit 1; }
           curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${v}/shellcheck-v${v}.linux.x86_64.tar.xz" | tar -xJ
           sudo install -m 0755 "shellcheck-v${v}/shellcheck" /usr/local/bin/shellcheck
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shfmt
+          # zsh 只用来 `zsh -n` 查 zsh 补全的语法：本机可以没有，CI 上不能没有，
+          # 否则那份脚本又回到「一项检查都过不到」的状态
+          sudo apt-get install -y -qq shfmt zsh
           shellcheck --version
           shfmt --version
+          zsh --version
 
+      # 检出之后工作区就是 HEAD，自己跟自己比永远「无变动」。基准必须显式给：
+      # PR 比目标分支，push 比推送前的 SHA。手动触发时给不出，lint 会说明并跳过。
       - name: 静态检查
+        env:
+          OS_LINT_API_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: bash tests/lint.sh
+
+      # 正例证明不了检查还活着：这个项目出过一条「一直绿、从没拦下过任何东西」
+      # 的检查。反例自检给每条规则喂一段确定违规的代码，要求它必须红。
+      - name: 反例自检
+        run: bash tests/lint-selftest.sh
 
   unit:
     name: ${{ matrix.distro }} 隔离测试

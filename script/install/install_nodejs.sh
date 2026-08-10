@@ -7,7 +7,7 @@
 # @group        app
 # @order        150
 # @privilege    root
-# @requires_lib >= 1.8
+# @requires_lib >= 4.0
 # @provides     nodejs:<major>
 # @args         [--version=<lts|latest|大版本号>]
 # @description  从官网装 Node.js，校验 SHA256，多版本共存
@@ -280,7 +280,7 @@ main() {
 
     if [[ ${want_install} -eq 1 ]]; then
         local dir
-        dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+        os::tmpdir dir || os::die 1 '无法创建临时目录'
         fetch_node "${dir}"
         install_tarball "${NODE_TARBALL}"
         target=${NODE_TARGET}

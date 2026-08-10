@@ -14,7 +14,7 @@ OneServer is a Bash administration tool for a single Debian or Ubuntu server. It
 - **Changes happen in the terminal.** The web dashboard is read-only, and passwords live in a root-only store.
 - **Small footprint.** Plain Bash, no third-party runtime. With the dashboard off, nothing of OneServer stays resident.
 - **Stays out of the way.** Services remain under systemd, APT, and their own config files.
-- **Predictable.** Preview a change before it runs, re-run it safely, and failed changes roll back.
+- **Predictable.** Preview a change before it runs, re-run it safely. When something fails, steps that can be undone safely are rolled back, and everything else is listed exactly as it happened.
 - **Removes cleanly.** Every package and file it installs is recorded, so uninstalling reverses it. Your data stays.
 - **Menu or CLI.** Interactive menus for day-to-day work, JSON output for scripts.
 - **One place to look.** The read-only dashboard shows components, services, ports, firewall rules, and logs.
@@ -70,7 +70,7 @@ To remove OneServer itself — no menu entry for this one:
 bash /opt/oneserver/uninstall.sh
 ```
 
-The uninstaller asks about components, backup archives, secrets and config, and the toolkit itself. Each can be kept, and irreversible steps require typing the full name to confirm; say yes to all four and the host is left as it was before installation. Remove components here if you want them gone — OneServer is the only thing that records which packages and files belong to which component, and that record goes with it.
+The uninstaller asks about components, backup archives, secrets and config, and the toolkit itself. Each can be kept, and irreversible steps require typing the full name to confirm; say yes to all four and every package, file and trace OneServer installed is removed. **Your data is not part of that** — databases, site directories, certificates and user config are never deleted automatically; the uninstaller just prints where they are and leaves them to you. Remove components here if you want them gone — OneServer is the only thing that records which packages and files belong to which component, and that record goes with it.
 
 If you are done with the server, run Tools › Disk cleanup before uninstalling.
 

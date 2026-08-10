@@ -24,8 +24,11 @@ source /opt/oneserver/lib/bootstrap.sh
 readonly ALERT_FILE="${OS_PUBLIC_DIR}/alerts.tsv"
 # 去重基线**不放 public/**：那个目录是 tmpfs、里面只放「此刻的快照」（规范
 # §4.2）。这份基线是记录 —— 丢了的话每次重启都会把当前所有告警重发一遍；
-# 它也是通知器的内部账本，本来就不该对本机所有用户公开
-readonly BASELINE="${OS_STATE_DIR}/telegram-alerts.tsv"
+# 它也是通知器的内部账本，本来就不该对本机所有用户公开。
+#
+# 落在 data/ 而不是 state/：state 是组件清单，卸载按它反向执行，
+# 与组件无关的账本混进去是拿卸载语义冒险。
+readonly BASELINE="${OS_WEB_ALERT_BASELINE}"
 
 readonly TOKEN_KEY='web.telegram_token'
 readonly CHAT_KEY='web.telegram_chat_id'

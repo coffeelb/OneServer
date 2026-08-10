@@ -319,7 +319,14 @@ os::replace_line() {
 
 OS_ERR__TMPDIRS=()
 
-# os::tmpdir [--exec]   打印新建的临时目录路径
+# os::tmpdir <变量名> [--exec]   新建 0700 临时目录，路径写进变量，退出时自动清理
+#
+# **路径经变量交回，不打印。** 这个函数有一件事必须留在调用方的进程里：把新目录
+# 登记进 OS_ERR__TMPDIRS，退出路径才删得掉它。`d=$(os::tmpdir)` 会 fork 一个子
+# shell，目录**真的建出来了**，登记却只发生在那个转瞬即逝的子 shell 里 —— 父进程
+# 的清理列表始终是空的。表现不是报错：每调用一次泄漏一个目录，而清理代码看起来
+# 一直在跑。tmpfs 那条占着内存直到重启；`--exec` 那条留在真实磁盘上，里面是
+# xcaddy 几十 MB 的构建产物，只能靠 `oneserver clean` 的孤儿扫描手工收。
 #
 # 默认落在 tmpfs（$OS_TMP_ROOT，/run 下）：那里的内容永远不写盘，凭据类
 # 临时文件必须走这条。
@@ -330,15 +337,24 @@ OS_ERR__TMPDIRS=()
 # 文件完好、体积正确、ELF 魔数也对，就是跑不了，一眼看不出跟挂载选项有关。
 # **--exec 的目录里禁止放凭据**，它在磁盘上。
 os::tmpdir() {
-    local root=${OS_TMP_ROOT}
-    local -i want_exec=0
+    # 内部名一律带 __os_ 前缀：输出变量靠动态作用域写回，调用方最自然的
+    # `local dir; os::tmpdir dir` 会被同名局部变量截住（同 os::state_health）
+    local __os_td_out=${1-}
+    if [[ ! ${__os_td_out} =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        errors::_stderr error 'os::tmpdir 用法：<变量名> [--exec]'
+        return 2
+    fi
+    shift
+
+    local __os_td_root=${OS_TMP_ROOT}
+    local -i __os_td_want_exec=0
     if [[ ${1-} == '--exec' ]]; then
-        want_exec=1
-        root=${OS_TMP_EXEC_ROOT}
+        __os_td_want_exec=1
+        __os_td_root=${OS_TMP_EXEC_ROOT}
     fi
 
-    if ! mkdir -p "${root}" 2>/dev/null; then
-        errors::_stderr error "无法创建临时目录根 ${root}"
+    if ! mkdir -p "${__os_td_root}" 2>/dev/null; then
+        errors::_stderr error "无法创建临时目录根 ${__os_td_root}"
         return 1
     fi
 
@@ -350,36 +366,36 @@ os::tmpdir() {
     # 而这个目录里发生的正是 chmod +x 后以 root 执行下载的二进制）。
     # 因此**不 chown 抢过来**——那是在给攻击者控制的目录换主人，不解决问题，
     # 只能拒绝并要求人工确认。
-    local owner
-    owner=$(stat -c '%u' "${root}" 2>/dev/null) || owner=''
-    if [[ ${owner} != '0' ]]; then
-        errors::_stderr error "${root} 属主不是 root（可能已被本地用户预置），拒绝使用；请人工确认后清理该目录"
+    local __os_td_owner
+    __os_td_owner=$(stat -c '%u' "${__os_td_root}" 2>/dev/null) || __os_td_owner=''
+    if [[ ${__os_td_owner} != '0' ]]; then
+        errors::_stderr error "${__os_td_root} 属主不是 root（可能已被本地用户预置），拒绝使用；请人工确认后清理该目录"
         return 1
     fi
-    chmod 0700 "${root}" 2>/dev/null || true
-    local d
-    if ! d=$(mktemp -d "${root}/os.XXXXXXXX" 2>/dev/null); then
+    chmod 0700 "${__os_td_root}" 2>/dev/null || true
+    local __os_td_d
+    if ! __os_td_d=$(mktemp -d "${__os_td_root}/os.XXXXXXXX" 2>/dev/null); then
         errors::_stderr error "无法创建临时目录"
         return 1
     fi
-    chmod 0700 "${d}" 2>/dev/null || true
+    chmod 0700 "${__os_td_d}" 2>/dev/null || true
 
     # 当场验一次能不能执行，而不是等调用方跑那个几十 MB 的二进制时才失败：
     # 那时的报错是「二进制跑不起来」，指向的是文件，真因却在挂载选项上
-    if ((want_exec == 1)); then
-        local probe="${d}/.execcheck"
-        printf '#!/bin/sh\nexit 0\n' >"${probe}" 2>/dev/null || true
-        chmod 0700 "${probe}" 2>/dev/null || true
-        if ! "${probe}" >/dev/null 2>&1; then
-            rm -rf -- "${d}" 2>/dev/null || true
-            errors::_stderr error "${root} 所在的文件系统禁止执行（noexec），放不下需要现场运行的二进制"
+    if ((__os_td_want_exec == 1)); then
+        local __os_td_probe="${__os_td_d}/.execcheck"
+        printf '#!/bin/sh\nexit 0\n' >"${__os_td_probe}" 2>/dev/null || true
+        chmod 0700 "${__os_td_probe}" 2>/dev/null || true
+        if ! "${__os_td_probe}" >/dev/null 2>&1; then
+            rm -rf -- "${__os_td_d}" 2>/dev/null || true
+            errors::_stderr error "${__os_td_root} 所在的文件系统禁止执行（noexec），放不下需要现场运行的二进制"
             return 1
         fi
-        rm -f -- "${probe}" 2>/dev/null || true
+        rm -f -- "${__os_td_probe}" 2>/dev/null || true
     fi
 
-    OS_ERR__TMPDIRS+=("${d}")
-    printf '%s\n' "${d}"
+    OS_ERR__TMPDIRS+=("${__os_td_d}")
+    printf -v "${__os_td_out}" '%s' "${__os_td_d}"
     return 0
 }
 

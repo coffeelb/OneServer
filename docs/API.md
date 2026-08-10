@@ -39,6 +39,8 @@
 - `os::pkg_install <包>...` —— 安装，已装的自动跳过
 - `os::pkg_install_deb <deb 文件>` —— 安装一个本地 .deb
 - `os::pkg_purge <包>...` —— 卸载并清配置，没装的自动跳过
+- `os::pkg_reinstall <包>...` —— 重装已装的包，把包自带的文件恢复回来
+- `os::pkg_clean` —— 清空 apt 的包缓存
 - `os::require_cmd <命令>...` —— 缺任一命令即以退出码 3 终止
 
 ## `lib/errors.sh` · L2 基础设施
@@ -48,7 +50,7 @@
 - `os::record_change <描述>`
 - `os::backup_file <路径>`
 - `os::replace_line [--append-if-missing] [--backup] <文件> <正则> <新行>` —— 按正则整行替换，是否写入见 OS_REPLACE_CHANGED
-- `os::tmpdir [--exec]` —— 打印新建的临时目录路径
+- `os::tmpdir <变量名> [--exec]` —— 新建 0700 临时目录，路径写进变量，退出时自动清理
 - `os::critical_begin <描述>` —— 进入不可中断区段，区段内的信号记录并延后
 - `os::critical_end` —— 离开不可中断区段，可嵌套
 
@@ -135,7 +137,7 @@
 
 - `os::sql_ident <标识符>` —— 打印带反引号的安全标识符
 - `os::sql_str <值>` —— 打印带单引号的安全字符串字面量
-- `os::sql_defaults_file <用户> <密码> [主机]` —— 打印临时配置文件路径
+- `os::sql_defaults_file <变量名> <用户> <密码> [主机]` —— 写临时配置文件，路径写进变量
 - `os::sql_exec [--defaults-file <路径>] [--allow-fail] <desc> -- <SQL>`
 - `os::sql_query [--defaults-file <路径>] [--timeout <秒>] <desc> -- <SQL>`
 

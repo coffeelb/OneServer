@@ -9,7 +9,7 @@
 # @order        10
 # @requires     podman
 # @privilege    root
-# @requires_lib >= 1.28
+# @requires_lib >= 4.0
 # @provides_unit ext:podman-auto-update.timer
 # @args         [--action=<ls|start|stop|restart|logs|rm|autoupdate|au-on|au-off|au-now>] [--name=<名字>] [--auto-update=<on|off>] [--lines=<行数>] [--confirm-rm=<名字>]
 # @description  创建、查看、启停、日志、删除与自动更新
@@ -347,7 +347,7 @@ action_autoupdate() {
     os::warn "这会重启容器 ${name} 让新标签生效（有短暂中断）"
 
     local dir tmp line
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     tmp="${dir}/${name}.container"
     : >"${tmp}"
     while IFS= read -r line || [[ -n ${line} ]]; do

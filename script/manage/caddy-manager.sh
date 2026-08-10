@@ -8,7 +8,7 @@
 # @order        20
 # @requires     caddy
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @provides_unit ext:caddy.service
 # @args         [--action=<status|show|validate|apply|edit|rollback|reload|restart|logs|certs|cert-rm|token>] [--source=<url|file>] [--url=<地址>] [--file=<路径>] [--provider=<cloudflare|alidns|tencentcloud>] [--token-anyway=<y|n>] [--restart-now=<y|n>] [--lines=<行数>] [--cert=<all|域名>] [--confirm-cert-rm=<all|域名>] [--wait-file=<y|n>] [--edit-open=<y|n>] [--apply-edited=<y|n>]
 # @description  校验与更新 Caddyfile、控制服务、管理证书
@@ -383,7 +383,7 @@ action_apply() {
     esac
 
     local dir src
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     src="${dir}/Caddyfile.new"
 
     if [[ -n ${url} ]]; then
@@ -413,7 +413,7 @@ action_edit() {
     [[ -f ${CADDYFILE} ]] || os::die 2 "配置文件不存在：${CADDYFILE}"
 
     local dir src
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     src="${dir}/Caddyfile.edit"
     os::run '取出当前配置供编辑' -- cp -- "${CADDYFILE}" "${src}"
 
@@ -720,7 +720,7 @@ action_token() {
     local -i env_created=0 dropin_created=0 dropin_dir_created=0
     local -i state_created=0 state_cleanup_registered=0
     os::state_has caddy || state_created=1
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
 
     # 环境文件：0600，只有 systemd（root）读得到
     tmp="${dir}/oneserver.env"

@@ -8,7 +8,7 @@
 # @order        20
 # @requires     podman
 # @privilege    root
-# @requires_lib >= 1.14
+# @requires_lib >= 4.0
 # @provides     container:<name>
 # @provides_unit ext:<name>.service
 # @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|on-failure|no>] [--auto-update=<y|n>] [--create-dirs=<y|n>]
@@ -809,7 +809,7 @@ main() {
     ((${#PC_PODMAN_ARGS[@]} > 0)) && quote_words args_line ${PC_PODMAN_ARGS[@]+"${PC_PODMAN_ARGS[@]}"}
     mask_tokens
     quote_words safe_cmd ${PC_SAFE[@]+"${PC_SAFE[@]}"}
-    dir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir dir || os::die 1 '无法创建临时目录'
     tmp="${dir}/${name}.container"
     {
         printf '# 由 oneserver podman run 生成。改完执行 systemctl daemon-reload。\n'

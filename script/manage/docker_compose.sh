@@ -8,7 +8,7 @@
 # @order        100
 # @requires     docker,docker-compose-plugin
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.0
 # @args         [--action=<ls|add|up|down|rm>] [--name=<项目名>] [--dir=<目录>] [--with-volumes] [--confirm-rm=<项目名>]
 # @description  把 compose 项目交给 systemd 托管
 #
@@ -159,7 +159,7 @@ project_config_sha() {
 
     local __dk_rendered=${OS_RUN_OUTPUT}
     local __dk_dir __dk_tmp
-    __dk_dir=$(os::tmpdir) || return 1
+    os::tmpdir __dk_dir || return 1
     __dk_tmp="${__dk_dir}/config.rendered"
     printf '%s\n' "${__dk_rendered}" >"${__dk_tmp}"
 
@@ -201,7 +201,7 @@ render_unit() {
     local __dk_out=${1} __dk_name=${2} __dk_dir=${3} __dk_file=${4}
     local __dk_unit __dk_tmpdir
     unit_of __dk_unit "${__dk_name}"
-    __dk_tmpdir=$(os::tmpdir) || os::die 1 '无法创建临时目录'
+    os::tmpdir __dk_tmpdir || os::die 1 '无法创建临时目录'
     local __dk_tmp="${__dk_tmpdir}/${__dk_unit}"
 
     os::install_template --mode 0644 \

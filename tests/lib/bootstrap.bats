@@ -1528,6 +1528,46 @@ echo done
     [[ "${output}" == *'[dry-run]'* ]]
 }
 
+# reinstall 与 install 的幂等方向**相反**：install 见装了就跳过，
+# reinstall 要的正是「装着但文件被动过，请 apt 再放一遍」。唯一现实用途是
+# dpkg-divert --rename 把包自带的二进制挪走之后，让 apt 补一份回原位。
+@test "pkg_reinstall: 没装的包一个都不传给 apt" {
+    local f
+    f=$(make_script '
+os::pkg_reinstall this-package-does-not-exist
+echo returned=$?
+')
+    run bash "${f}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *returned=0* ]]
+    [[ "${output}" != *'重装软件包'* ]]
+}
+
+@test "pkg_reinstall: 已装的包确实交给 apt（与 install 的幂等方向相反）" {
+    local f
+    f=$(make_script '
+os::pkg_reinstall bash
+echo done
+')
+    run bash "${f}" --dry-run
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'重装软件包'* ]]
+    [[ "${output}" == *'--reinstall'* ]]
+}
+
+@test "pkg_clean: dry-run 下不真清缓存" {
+    local f
+    f=$(make_script '
+os::pkg_clean
+echo done
+')
+    run bash "${f}" --dry-run
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *done* ]]
+    [[ "${output}" == *'[dry-run]'* ]]
+    [[ "${output}" == *'清理 APT 包缓存'* ]]
+}
+
 # OS_FROM_MENU 来自环境，而框架拿它拼 OS_MENU_BACK_FLAG 再 `: >` 截断。
 # 原样代入的话 `OS_FROM_MENU=../../etc/xxx` 就是一条穿出 /run/oneserver 的
 # 路径穿越，被截断的是攻击者点名的那个文件。
