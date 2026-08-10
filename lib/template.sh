@@ -152,7 +152,7 @@ os::install_template() {
     return 0
 }
 
-# os::install_file [--backup] [--mode <八进制>] <源文件> <目标>
+# os::install_file [--backup] [--quiet] [--mode <八进制>] <源文件> <目标>
 #
 # 把一个**现成的文件**放到目标路径。与 os::install_template 的唯一区别是
 # 内容从哪来，以及**按字节比对而不是逐行**：install_caddy 要放的是一个
@@ -161,12 +161,22 @@ os::install_template() {
 #
 # 禁止 `install -m 755 src dst`：GNU install 以 O_TRUNC 写原 inode，
 # 而这里替换的往往正是一个**正在运行**的程序（K13 的形态）。
+#
+# **`--quiet` 是给周期性调用者的**：不打屏，日志降到 debug —— 也就是
+# os::write_public 那套待遇。默认的 info 级是按「一次性配置落地」定的，
+# 值得在时间线上留一笔；而定时器每 5 分钟刷一次同一个文件时，那一笔会变成
+# 一天 288 条例行记录，把真实事件挤出面板日志页的显示窗口。
+# **两条路径都要降**：内容没变时的「已是目标状态」同样每轮都会写一条。
 os::install_file() {
-    local backup=0 mode=''
+    local backup=0 mode='' quiet=0
     while [[ ${1-} == --* ]]; do
         case ${1} in
             --backup)
                 backup=1
+                shift
+                ;;
+            --quiet)
+                quiet=1
                 shift
                 ;;
             --mode)
@@ -185,9 +195,11 @@ os::install_file() {
     done
 
     local src=${1-} target=${2-}
+    local lv=info
+    [[ ${quiet} -eq 1 ]] && lv=debug
     OS_TEMPLATE_CHANGED=0
     if [[ -z ${src} || -z ${target} ]]; then
-        ui::line --err error 'os::install_file 用法：[--backup] [--mode <八进制>] <源文件> <目标>'
+        ui::line --err error 'os::install_file 用法：[--backup] [--quiet] [--mode <八进制>] <源文件> <目标>'
         return 2
     fi
     if [[ ! -f ${src} ]]; then
@@ -196,7 +208,7 @@ os::install_file() {
     fi
 
     if [[ -f ${target} ]] && cmp -s -- "${src}" "${target}"; then
-        log::write info "已是目标状态，未改动 ${target}" framework
+        log::write "${lv}" "已是目标状态，未改动 ${target}" framework
         return 0
     fi
 
@@ -215,8 +227,8 @@ os::install_file() {
     fi
 
     template::_place "${target}" "${mode}" --from "${src}" || return 1
-    ui::line info "已写入 ${target}"
-    log::write info "已把 ${src} 放到 ${target}" framework
+    [[ ${quiet} -eq 1 ]] || ui::line info "已写入 ${target}"
+    log::write "${lv}" "已把 ${src} 放到 ${target}" framework
     return 0
 }
 

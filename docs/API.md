@@ -176,5 +176,5 @@
 ## `lib/template.sh` · L3 能力
 
 - `os::install_template [--backup] [--mode <八进制>] <模板> <目标> [KEY=VALUE...]`
-- `os::install_file [--backup] [--mode <八进制>] <源文件> <目标>`
+- `os::install_file [--backup] [--quiet] [--mode <八进制>] <源文件> <目标>`
 - `os::write_public <文件名> <内容>` —— 把只读产物原子写入 public/，0644

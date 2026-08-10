@@ -15,6 +15,11 @@ setup() {
     OS_LOG_MAIN="${OS_LOG_DIR}/oneserver.log"
     OS_LOG_JSONL="${OS_LOG_DIR}/oneserver.jsonl"
     OS_AUDIT_LOG="${OS_LOG_DIR}/audit.log"
+    # 临时目录根指到用例自己的沙箱里：defaults_file 那几条会经 os::tmpdir 建目录，
+    # 而 bats 只 load lib、不装 EXIT trap，清理钩子根本不存在 —— 用真实的
+    # /run/oneserver/tmp 就是每跑一轮往机器上留一份含明文口令的 my.cnf。
+    # 实测过：跑三遍测试之后那里躺着 15 个目录。
+    OS_TMP_ROOT="${BATS_TEST_TMPDIR}/tmp"
     log::init test
     os_test_no_tty
 }

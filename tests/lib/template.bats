@@ -308,6 +308,30 @@ os_is_root() { [ "$(id -u)" -eq 0 ]; }
     [[ "${output}" == *'已写入'* ]]
 }
 
+# --quiet 给的是周期性调用者（面板的采集与通知每 30 秒到 5 分钟一轮）：
+# 默认的 info 级会在 JSONL 里堆出一天几千条例行记录，把真实事件挤出面板日志页。
+# **两条路径都要验**：写了要安静，内容没变时的「已是目标状态」同样每轮都会记一条。
+@test "install_file --quiet: 不打屏，日志降到 debug" {
+    printf 'x\n' >"${BATS_TEST_TMPDIR}/q.src"
+    run os::install_file --quiet "${BATS_TEST_TMPDIR}/q.src" "${BATS_TEST_TMPDIR}/q.dst"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *'已写入'* ]]
+    # 文件确实放到位了，安静不等于没做事
+    cmp -s "${BATS_TEST_TMPDIR}/q.src" "${BATS_TEST_TMPDIR}/q.dst"
+    run grep -F '已把' "${OS_LOG_JSONL}"
+    [ "${status}" -ne 0 ]
+}
+
+@test "install_file --quiet: 内容没变时那条「已是目标状态」也不进日志" {
+    printf 'x\n' >"${BATS_TEST_TMPDIR}/q2.src"
+    os::install_file --quiet "${BATS_TEST_TMPDIR}/q2.src" "${BATS_TEST_TMPDIR}/q2.dst"
+    : >"${OS_LOG_JSONL}"
+    os::install_file --quiet "${BATS_TEST_TMPDIR}/q2.src" "${BATS_TEST_TMPDIR}/q2.dst"
+    [ "${OS_TEMPLATE_CHANGED}" -eq 0 ]
+    run grep -F '已是目标状态' "${OS_LOG_JSONL}"
+    [ "${status}" -ne 0 ]
+}
+
 # 落地用的临时文件名此前是 `<目标>.os-place.<pid>` —— PID 只有三万多个取值、
 # 可以喷洒预置。目标目录常常非 root 可写（站点根属 www-data、
 # /etc/caddy/incoming 属 caddy 组），攻击者事先把那个名字建成指向 /etc 下

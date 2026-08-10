@@ -29,7 +29,8 @@
 # 停留期间锁一直被占，把它记成错误会让 JSONL 每轮多几条，而那份日志正是面板
 # 自己要发布的产物。
 #
-# @privilege root-trylock
+# @privilege    root-trylock
+# @requires_lib >= 4.1
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -50,8 +51,11 @@ main() {
     # 226/NAMESPACE 失败了，那是一条看得见的错误，比这里静默补建再静默降级好。
     #
     # 内容没变就不写（os::install_file 换 inode 的语义与 os::write_public 一致），
-    # 机器闲着时这个文件一天也不会动一次
-    os::install_file --mode 0640 "${src}" "${OS_WEB_HISTORY_FILE}" || return 0
+    # 机器闲着时这个文件一天也不会动一次。
+    #
+    # `--quiet`：这条每 5 分钟跑一次，默认的 info 级会在 JSONL 里堆出一天 288 条
+    # 例行记录，把真实事件挤出面板日志页 —— 而那份日志正是面板自己要发布的产物。
+    os::install_file --quiet --mode 0640 "${src}" "${OS_WEB_HISTORY_FILE}" || return 0
 
     os::debug '面板历史已刷到盘上'
     return 0

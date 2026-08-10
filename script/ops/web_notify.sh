@@ -5,7 +5,8 @@
 # 只由 oneserver-web-fast.service 在采集后调用，不是用户命令。把它注册进菜单
 # 会诱导用户手动运行一个只会等锁、也没有可交互操作的内部步骤。
 #
-# @privilege root-trylock
+# @privilege    root-trylock
+# @requires_lib >= 4.1
 #
 # **它有副作用（发通知、写去重基线），所以不能是 `root-nolock`；但它每 30 秒
 # 跑一次，而这一轮做不做都行 —— 告警晚半分钟没有代价。** 从前它是默认的
@@ -33,9 +34,13 @@ readonly BASELINE="${OS_WEB_ALERT_BASELINE}"
 readonly TOKEN_KEY='web.telegram_token'
 readonly CHAT_KEY='web.telegram_chat_id'
 
-# 把当前告警存成下一轮的比对基线。0640：它跟 state 同级，不对外
+# 把当前告警存成下一轮的比对基线。0640：它是内部账本，不对外
+#
+# `--quiet`：这个脚本跟快档走，30 秒一轮。默认的 info 级会往 JSONL 里堆出
+# 一天 2880 条例行记录（内容没变时的「已是目标状态」同样每轮一条），
+# 把真实事件挤出面板日志页 —— 而那份日志正是面板自己要发布的产物。
 save_baseline() {
-    os::install_file --mode 0640 "${ALERT_FILE}" "${BASELINE}" || true
+    os::install_file --quiet --mode 0640 "${ALERT_FILE}" "${BASELINE}" || true
     return 0
 }
 
