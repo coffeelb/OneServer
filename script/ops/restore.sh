@@ -668,6 +668,13 @@ ex_split_source() {
         case ${item} in
             *.tar.gz | *.tgz | *.tar) EX_KIND=tar ;;
             *.zip) EX_KIND=zip ;;
+            # 明摆着是归档、只是压缩格式不认识。同 *.sql.* 那条：落到下面的
+            # 「当单个文件处理」会把 .tar.zst 原样拷进站点目录、报成功，而站点是空的
+            *.tar.* | *.txz | *.tbz | *.tbz2 | *.tzst)
+                os::err "归档只支持 .tar / .tar.gz / .tgz / .zip，收到 ${item##*/}"
+                os::info '先解开再导入，例如：unxz / bunzip2 / unzstd'
+                return 1
+                ;;
             *.rar | *.7z)
                 os::err '不支持 .rar / .7z —— 解它们要装第三方运行时，本工具不引入运行时依赖'
                 os::info '先在别处解开成目录，再把那个目录作为来源'
@@ -1240,8 +1247,12 @@ ex_unpack() {
             if [[ -z ${EX_ROOT} ]]; then
                 os::run '解出来源' -- "${cmd[@]}" "${staging}" || return 1
             else
-                os::run '解出来源' -- "${cmd[@]}" "${raw}" || return 1
+                # tar 不会替你建 -C 的目录（unzip -d 会），少这一步整包必挂。
+                # 0700 与 staging 同：解包中途 /var/www 下不该有一份 web 可读的站点副本
+                os::run '创建解包目录' -- mkdir -m 0700 -p "${raw}" || return 1
+                # 先登记再解 —— 解到一半失败时 raw 里已经有半个站点了
                 os::defer rm -rf -- "${raw}"
+                os::run '解出来源' -- "${cmd[@]}" "${raw}" || return 1
                 # staging 此刻还是空的，腾掉它再把站点根整个改名过来 —— 比逐项 mv
                 # 少一个「点开头的文件被 * 漏掉」的坑（.htaccess / .user.ini）
                 os::run '腾出暂存目录' -- rmdir "${staging}" || return 1
@@ -1488,7 +1499,7 @@ ex_preview() {
 import_external() {
     local spec=''
     os::ask --validate ex_split_source \
-        --hint '压缩包 / 已解开的目录 / 单个文件 / .sql；文件与转储可用逗号一次给全' \
+        --hint '压缩包 .tar/.tar.gz/.tgz/.zip · 已解开的目录 · 单个文件 · 转储 .sql/.sql.gz；两者可用逗号一次给全' \
         --arg source '外部备份的路径' spec ''
 
     local target=''
