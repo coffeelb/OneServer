@@ -131,12 +131,23 @@ bk_source_valid() {
     return 0
 }
 
-# 远端目录去掉尾斜杠后必须还剩点东西：`/` 或 `///` 会让 prune_remote
-# 的清理范围变成整个远端。
+# 远端目录去尾斜杠后必须还剩点东西：`/` 或 `///` 会让 prune_remote 的清理范围
+# 变成整个远端。绝对路径与 `.` `..` 段一并拒掉。
+#
+# 删除本身跑不出 `<远端目录>/<类型>/<名字>/` —— 类型是代码里的字面量、名字不含
+# `/`、文件名要过时间戳正则。但**备份目录自己会被挪走**：sftp / local 这类有真实
+# 目录树的后端上 `..` 是真的往上跳一级，而 prune 随后就在挪过去的那个位置上删
+# 时间戳名的文件；对象存储又不解释它，只当成一段古怪的 key。同一个值在两种
+# 后端上是两个地方 —— 备份目的地不该是一个看后端脸色的东西。
 bk_remote_dir_valid() {
     local d=${1-}
     while [[ ${d} == */ ]]; do d=${d%/}; done
-    [[ -n ${d} ]]
+    [[ -n ${d} ]] || return 1
+    [[ ${d} != /* ]] || return 1
+    # 前后各补一个斜杠，`.` 与 `..` 不管在头、在中间还是在尾，都归成同一种形状
+    local probe="/${d}/"
+    [[ ${probe} != *'/./'* && ${probe} != *'/../'* ]] || return 1
+    return 0
 }
 
 # 注销时要的是「已经登记过的别名」，光有语法不够 —— 名字合法但没登记过，
@@ -614,8 +625,11 @@ prune_local() {
 
 prune_remote() {
     local type=${1} name=${2} keep=${3}
-    [[ -n ${BK_REMOTE_DIR} ]] || {
-        os::warn '远端目录为空，跳过远端清理（防止误删整个远端）'
+    # 在真正动手删的地方再校验一次，而且用的是输入端那个函数，不是只判空：
+    # 这个值来自 state，可能是更早的版本写进去的，而入口校验管不到已经落库的值
+    bk_remote_dir_valid "${BK_REMOTE_DIR}" || {
+        os::warn "远端目录「${BK_REMOTE_DIR:-空}」不合法，跳过远端清理（防止删到备份目录以外）"
+        os::info '用「配置 rclone 远端」重设一次即可：oneserver backup remote'
         return 0
     }
     local dest="${BK_REMOTE}:${BK_REMOTE_DIR}/${type}/${name}"
@@ -1253,7 +1267,8 @@ action_remote() {
 
     # 去掉尾斜杠后不能为空 —— 空目录会让清理逻辑指向整个远端
     local rdir=''
-    os::ask --validate bk_remote_dir_valid --hint '不能为空，也不能只是一串斜杠' \
+    os::ask --validate bk_remote_dir_valid \
+        --hint '相对远端根的路径：不能为空、不能以 / 开头，也不能含 . 或 .. 段' \
         --arg remote-dir '远端目录' rdir 'oneserver/backups'
     while [[ ${rdir} == */ ]]; do rdir=${rdir%/}; done
 
