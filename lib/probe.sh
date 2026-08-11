@@ -596,6 +596,22 @@ probe::unit_result() {
         -- systemctl show "${1}" -p Result --value
 }
 
+# probe::unit_restarts <unit>   systemd 至今为这个 unit 重启过几次，读不到为空
+#
+# **判断「服务起来之后有没有崩过」只能用它，不能靠采样状态。** 直觉写法是隔一秒
+# 查一次 `is-active`、掉出 active 就算失败；但 `Restart=` 的默认 `RestartSec`
+# 是 100 毫秒，从进程退出到重新起来的整个非 active 窗口只有一两百毫秒，
+# 秒级采样大概率整段错过 —— 实测：一个「起来 3 秒后退出」的容器，连采 5 次
+# 全是 active，判定为成功。`NRestarts` 是 systemd 自己累加的计数，不存在
+# 错过窗口的问题，稳定期结束时它大于 0 就证明崩过。
+#
+# 计数在 `systemctl reset-failed` 时归零，所以它的语义是「自上次复位以来」，
+# 而不是「这台机器开机以来」—— 消费者要的恰好是前者：刚创建的服务此前必然是 0。
+probe::unit_restarts() {
+    probe::_probe "unit.${1}.restarts" "${OS_DEFAULT_PROBE_TIMEOUT}" \
+        -- systemctl show "${1}" -p NRestarts --value
+}
+
 # probe::package_candidate <包名>   apt 源里可安装的版本，源里没有为空
 #
 # 与 package_version 的分工：那个问「装了什么」，这个问「装得到什么」。

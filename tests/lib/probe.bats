@@ -617,6 +617,25 @@ EOF
     systemctl daemon-reload
 }
 
+# 「起来之后有没有崩过」不能靠隔一秒查一次 is-active：RestartSec 默认 100 毫秒，
+# 非 active 的窗口只有一两百毫秒，秒级采样几乎必然错过。NRestarts 是累加计数，
+# 错不过去 —— 这条守的是它确实读得出来。
+#
+# **`0` 不能反过来当「这个 unit 存在」用**：systemd 对压根不存在的 unit 也答 0
+# （它给的是 stub unit 的属性默认值）。消费者要判存在得另问 unit_exists 或
+# service_active，这里把这个反直觉的形态钉住。
+@test "unit_restarts: 没重启过的 unit 是 0，不存在的 unit 同样是 0" {
+    os_is_root || skip '非 root'
+    os_have_systemd || skip '没有可用的 systemd'
+
+    probe::unit_restarts 'systemd-journald.service'
+    [ "${OS_PROBE_STATUS}" = 'ok' ]
+    [ "${OS_PROBE_VALUE}" = '0' ]
+
+    probe::unit_restarts 'this-unit-does-not-exist.service'
+    [ "${OS_PROBE_VALUE}" = '0' ]
+}
+
 @test "podman_ports: 没装 podman 或没有容器时是空值，不是失败" {
     os_is_root || skip '非 root'
     command -v podman >/dev/null 2>&1 || skip '本机没有 podman'

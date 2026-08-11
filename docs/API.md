@@ -87,6 +87,7 @@
 - `probe::package_installed <包名>` —— 包是否已安装，值为 yes / no
 - `probe::timer_next <timer>` —— 下次触发时间，没装或没启用为空
 - `probe::unit_result <unit>` —— 上次运行的结果（success / exit-code / timeout …），没跑过为空
+- `probe::unit_restarts <unit>` —— systemd 至今为这个 unit 重启过几次，读不到为空
 - `probe::package_candidate <包名>` —— apt 源里可安装的版本，源里没有为空
 - `probe::component_version <组件类型>` —— 组件的运行版本
 - `probe::php_fpm_versions` —— 已装的 PHP-FPM 版本列表，空格分隔
