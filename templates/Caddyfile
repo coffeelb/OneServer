@@ -4,8 +4,7 @@
 {
     email example@gmail.com
 
-    # 这里配的是 default logger —— 收的是 Caddy 自己的运行日志（启动、证书签发、
-    # 错误），**不含任何 HTTP 请求记录**。访问日志要写在站点块里，见下。
+    # Caddy 自己的运行日志，不含 HTTP 请求
     log {
         output file /var/log/caddy/caddy.log {
             roll_size 10MB
@@ -22,7 +21,7 @@ example.com {
     # 网站根目录
     root * /var/www/wordpress
 
-    # 访问日志。站点块里有 log 才会记 HTTP 请求，全局那个不管这件事
+    # 访问日志。HTTP 请求只记在站点块里，记得修改下方日志文件域名
     log {
         output file /var/log/caddy/example.com.access.log {
             roll_size 10MB
@@ -39,7 +38,7 @@ example.com {
 
     # 拒绝访问核心敏感文件
     @disallowed {
-        path_regexp (^/wp-config\.php$|^/xmlrpc\.php$|^/readme\.html$|^/license\.txt$|^/\.user\.ini$|^/wp-content/debug\.log$|^/wp-includes/.*\.php$|^/\.git($|/)|^/\.htaccess$|^/\.gitignore$|\.(sql|tar\.gz|bak|swp|key|env|bak~)$)
+        path_regexp (^/wp-config\.php$|^/xmlrpc\.php$|^/readme\.html$|^/license\.txt$|^/\.user\.ini$|^/wp-content/debug\.log$|^/wp-content/uploads/.*\.php$|^/wp-includes/.*\.php$|^/\.git($|/)|^/\.htaccess$|^/\.gitignore$|\.(sql|tar\.gz|bak|swp|key|env|bak~)$)
     }
     respond @disallowed 403 {
         close
@@ -55,6 +54,11 @@ example.com {
         -X-Powered-By
     }
 
+    # 请求体上限。超限的请求在这里就被拒，不必先收下再交给 PHP 判
+    request_body {
+        max_size 80MB
+    }
+
     # 压缩策略
     encode zstd gzip
 
@@ -62,7 +66,7 @@ example.com {
     @static path_regexp \.(avif|css|gif|ico|jpeg|jpg|js|png|svg|webp|woff|woff2)$
     header @static Cache-Control "public, max-age=31536000"
 
-    # PHP-FPM 处理
+    # PHP-FPM 处理。版本号按机器上实际装的 PHP 改
     php_fastcgi unix//run/php/php8.4-fpm.sock
 
     # 静态文件服务
