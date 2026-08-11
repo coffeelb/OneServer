@@ -532,6 +532,11 @@ action_restore() {
 # **幂等且可刷新**：以后新建了容器网络（`172.18.0.0/16` …），重跑一次这个动作
 # 就把缺的补上，已有的不动。这正是「容器一多就记不清哪个网段放行过」的解法。
 #
+# **网络与账号一起放行**。账号身份是「用户 + 来源」两段，`app@localhost` 匹配不了
+# 从 10.88.0.x 过来的连接 —— 只开网络的话，这条命令做完容器仍然 Access denied，
+# 而那个报错和「刚放行了网段」看起来毫无关系。所以同一个确认点覆盖两件事，
+# 账号来源同样取自那份探测结果，两半不会各用各的依据。
+#
 # **不走「只绑网桥网关」那条路**（更安全但不实用）：每个容器网络有自己的网关，
 # 新建一个网络就要多绑一个地址并重启数据库，容器一多就是持续的维护负担。
 # 这里统一绑 0.0.0.0，边界交给防火墙 —— 代价是数据库在公网网卡上也监听着，
@@ -546,6 +551,104 @@ db_subnet_allowed() {
             && return 0
     done <<<"${OS_PROBE_VALUE}"
     return 1
+}
+
+# 网段 → MySQL 账号能用的来源写法：`10.88.0.0/16` → `10.88.0.0/255.255.0.0`。
+#
+# **不能直接把 CIDR 塞进 host**：MySQL 的 host 只认 `%`/`_` 通配或
+# `地址/掩码`，`/16` 这种前缀长度它不认，写进去会变成一个永远匹配不上的字面量
+# —— 而这种错不报错，只表现为容器仍然 Access denied。
+#
+# IPv6 网段直接跳过（返回 1）：掩码写法是 IPv4 专用的。
+subnet_to_user_host() {
+    local __db_out=${1} __db_cidr=${2}
+    printf -v "${__db_out}" '%s' ''
+    [[ ${__db_cidr} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+    local __db_ip=${__db_cidr%/*}
+    # `10#` 不能省：前缀长度写成 `/08` 时，算术上下文会按八进制解析，
+    # 而 08 不是合法八进制 —— 那是一次中断，不是一个 0
+    local -i __db_bits=$((10#${__db_cidr#*/}))
+    ((__db_bits <= 32)) || return 1
+
+    local __db_mask=''
+    local -i __db_o __db_take
+    for __db_o in 1 2 3 4; do
+        __db_take=$((__db_bits - (__db_o - 1) * 8))
+        ((__db_take < 0)) && __db_take=0
+        ((__db_take > 8)) && __db_take=8
+        __db_mask+="${__db_mask:+.}$((256 - 2 ** (8 - __db_take)))"
+    done
+    printf -v "${__db_out}" '%s/%s' "${__db_ip}" "${__db_mask}"
+    return 0
+}
+
+# 把 state 里登记的账号补上容器网段来源，新增个数写进 DB_ACCOUNTS_ADDED。
+#
+# **没有单独的确认点**：放行容器访问这件事本身已经在上面确认过一次，而只放行
+# 网络、不放行账号的话这条命令做完容器照样连不上（账号身份是「用户+来源」两段，
+# `app@localhost` 匹配不了从 10.88.0.x 过来的连接）。把它拆成两次确认，等于让
+# 每个用户都踩一次「按提示做完了还是不通」。
+#
+# 密码从凭据库读回（建库时 action_create 存的那一份），新来源与原来同一个密码，
+# 不需要用户重新提供。**必须走 os::secure_load**：它读进变量的同时登记脱敏，
+# 而 lib/sql.sh 的契约写明凭据随 SQL 传入前要先登记，否则会落进日志。
+#
+# 原来的 `@localhost` 一律保留：删账号不可逆，而本机连接还要用它。
+DB_ACCOUNTS_ADDED=0
+db_extend_accounts() {
+    local -a nets=("$@")
+    DB_ACCOUNTS_ADDED=0
+
+    local db user host pass net newhost qu qh qdb qpass
+    local -a dbs=()
+    user_databases || return 1
+    mapfile -t dbs <<<"${OS_RUN_OUTPUT}"
+
+    for db in "${dbs[@]}"; do
+        [[ -n ${db} ]] || continue
+        user=$(os::state_get "db:${db}" user)
+        host=$(os::state_get "db:${db}" host)
+        # 不在 state 里的库是用户自己建的，本工具不知道它的账号是哪个，不猜
+        [[ -n ${user} && -n ${host} ]] || continue
+        # 已经是 `%` 的账号本来就哪儿都能连，不用再加来源
+        [[ ${host} == '%' ]] && continue
+
+        # 凭据库里没有这个库的密码（老记录、或账号是手工建的），就不猜也不改，
+        # 说清楚让用户自己补 —— 用错的密码建出来的来源同样连不上，还更难查
+        if ! os::secure_load "db.${db}.password" pass; then
+            os::warn "凭据库里没有 db.${db}.password，跳过 ${user}@${host} —— 这个库的容器来源要手工建"
+            continue
+        fi
+        qpass=$(os::sql_str "${pass}")
+
+        for net in "${nets[@]}"; do
+            subnet_to_user_host newhost "${net}" || continue
+
+            qu=$(os::sql_str "${user}")
+            qh=$(os::sql_str "${newhost}")
+            qdb=$(os::sql_ident "${db}")
+
+            if ! user_exists "${user}" "${newhost}"; then
+                os::record_change "为账号 ${user} 增加了来源 ${newhost}"
+                # 与 action_create 同一套：**先登记撤销再动手**。这条来源是本次刚
+                # 造出来的，撤销不碰用户既有资产；不登记的话，后面任一步失败都会把
+                # 一个放宽了访问面的账号留在库里，而失败报告里看不出它
+                os::defer os::sql_exec --allow-fail '回滚：删除刚加的容器网段来源' -- \
+                    "DROP USER IF EXISTS ${qu}@${qh};"
+                os::sql_exec '为账号增加容器网段来源' -- \
+                    "CREATE USER ${qu}@${qh} IDENTIFIED BY ${qpass};" || return 1
+                ((DB_ACCOUNTS_ADDED += 1))
+            fi
+
+            # **授权不跟着「账号是不是新建的」走。** 同一个账号服务多个库时，
+            # 第一个库建出账号之后，后面几个库只会看到「账号已存在」——
+            # 跟着跳过就永远不授权，而这种漏授权不报错，只表现为容器连上了
+            # 却读不到表。GRANT 本身幂等，重复执行不产生变更，也不记审计。
+            os::sql_exec '给容器网段来源授予单库权限' -- \
+                "GRANT ALL PRIVILEGES ON ${qdb}.* TO ${qu}@${qh}; FLUSH PRIVILEGES;" || return 1
+        done
+    done
+    return 0
 }
 
 action_allow_containers() {
@@ -569,6 +672,7 @@ action_allow_containers() {
     done
     os::table '网段' '状态' -- "${cells[@]}"
     os::info "放行之后，这些网段里的容器可以连宿主的 ${MARIADB_PORT} 端口；其余来源仍被防火墙拒绝"
+    os::info '本工具登记过的数据库账号会同时补上这些网段作为来源（密码不变，原来的本机来源保留）'
 
     # §15：放宽访问来源必须在同一步落实补偿控制，落实不了就拒绝执行。
     # 这里的补偿控制有两条 —— 放行范围只到实际网段（不是 Anywhere），
@@ -609,6 +713,11 @@ action_allow_containers() {
         os::systemd_restart "${MARIADB_UNIT}" || os::die 1 'MariaDB 重启失败，监听地址可能未生效'
     fi
 
+    # 账号来源。**放在监听地址之后**：那一步会重启数据库，重启前建的账号照样在，
+    # 但顺序反过来的话，中途失败会留下「账号开了、网络还没通」的半截状态 ——
+    # 而这一半才是放宽了访问面的那一半。
+    db_extend_accounts "${nets[@]}" || os::die 1 '补容器网段账号失败'
+
     # 记进 state，下次刷新时看得出上次放行到哪
     local IFS=' '
     os::state_set mariadb container_access="${nets[*]}" || true
@@ -617,11 +726,12 @@ action_allow_containers() {
     # 任何新变更）。原来写成算术展开，产出的是 `1 ` / `0 ` 这种带尾随空格的值，
     # 既不是约定的 yes/no，也让消费者没法判断
     local changed='no'
-    ((added > 0 || bind_changed == 1)) && changed='yes'
+    ((added > 0 || bind_changed == 1 || DB_ACCOUNTS_ADDED > 0)) && changed='yes'
 
-    os::ok "已放行 ${added} 个新网段（共 ${#nets[@]} 个）；以后新建了容器网络，重跑这一步即可补上"
+    os::ok "已放行 ${added} 个新网段（共 ${#nets[@]} 个）、为账号新增 ${DB_ACCOUNTS_ADDED} 个来源；以后新建了容器网络，重跑这一步即可补上"
     os::info "容器里连数据库用宿主网关地址，例如 docker 默认是 172.17.0.1、podman 默认是 10.88.0.1"
-    os::output 0 subnets="${nets[*]}" added="${added}" changed="${changed}"
+    os::output 0 subnets="${nets[*]}" added="${added}" \
+        accounts_added="${DB_ACCOUNTS_ADDED}" changed="${changed}"
     return 0
 }
 
