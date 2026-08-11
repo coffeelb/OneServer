@@ -165,12 +165,51 @@ valid_archive_root() {
 valid_source_path() {
     local p=${1}
     [[ ${p} == /* ]] || return 1
-    [[ ${p} != *'/../'* && ${p} != *'/..' ]] || return 1
+
+    # **字面黑名单看不见符号链接。** `/var/www/mysite` 过检，而 `/var/www` 若是
+    # 指向 `/etc` 的链接，`tar -C "${parent}"` 就写进了 /etc —— 判据必须建立在
+    # 解析后的真实路径上，不是用户/manifest 给的那串字符。
+    #
+    # 两步都要：
+    #   1. 逐级 lstat，**任意一级祖先是符号链接就拒绝**。只查最后一段不够，
+    #      也不能只查直接父目录。
+    #   2. 拿 `realpath -m` 归一化（-m 容许尾段还不存在——恢复到一台干净机器上
+    #      时落点本来就不存在）再比黑名单。
+    local cur='' seg
+    local IFS='/'
+    for seg in ${p}; do
+        [[ -n ${seg} ]] || continue
+        cur="${cur}/${seg}"
+        # 尚不存在的层级没有链接可言，到此为止
+        [[ -e ${cur} || -L ${cur} ]] || break
+        [[ ! -L ${cur} ]] || return 1
+    done
+    unset IFS
+
+    local real=''
+    real=$(realpath -m -- "${p}" 2>/dev/null) || return 1
+    [[ -n ${real} && ${real} == /* ]] || return 1
+    [[ ${real} != *'/../'* && ${real} != *'/..' ]] || return 1
+
     local bad
     for bad in /etc /usr /bin /sbin /lib /lib64 /boot /root /run /sys /proc /dev /var/lib "${OS_ROOT}"; do
-        [[ ${p} == "${bad}" || ${p} == "${bad}/"* ]] && return 1
+        [[ ${real} == "${bad}" || ${real} == "${bad}/"* ]] && return 1
     done
+    # 根目录本身也不是合法落点
+    [[ ${real} != '/' ]] || return 1
     return 0
+}
+
+# rs_within <根> <路径>   路径解析后是否落在根之内（根自身算在内）
+#
+# 给 stash_current 与 `--only` 用。**完整恢复允许两者相等**（挪走的就是那个根），
+# 部分恢复才要求严格位于其下 —— 一刀切成「必须严格在根之下」会把正常的完整
+# 恢复直接打挂。
+rs_within() {
+    local root=${1} p=${2} rroot='' rp=''
+    rroot=$(realpath -m -- "${root}" 2>/dev/null) || return 1
+    rp=$(realpath -m -- "${p}" 2>/dev/null) || return 1
+    [[ ${rp} == "${rroot}" || ${rp} == "${rroot}/"* ]]
 }
 
 # ==================================================================
@@ -434,13 +473,135 @@ snapshot_db() {
 #
 # 归档恢复与外部导入共用。**这是文件侧唯一的「让现有内容消失」的地方**，
 # 只有一份，出错时人只要去 pre-restore 里找就行，不必先判断是哪条路径干的。
+# stash_current <要挪走的路径> <副本名> [允许的根]
+#
+# 给了第三个参数就断言路径确实落在那个根之内。**这是最后一道闸**：`--only`
+# 的子路径由用户给、归档成员名由归档给，两者拼出来的 live 路径若能穿出站点
+# 目录，这里 `mv` 走的就是攻击者点名的那个系统路径。
 stash_current() {
-    local live=${1} label=${2}
+    local live=${1} label=${2} root=${3-}
+    if [[ -n ${root} ]] && ! rs_within "${root}" "${live}"; then
+        os::err "拒绝挪走 ${live}：它不在 ${root} 之内"
+        return 1
+    fi
     os::run '创建恢复前副本目录' -- mkdir -p "${RS_PRE_DIR}"
     os::run '收紧恢复前副本目录权限' -- chmod 0700 "${RS_PRE_DIR}"
     [[ -e ${live} ]] || return 0
     os::run '移走当前内容作为恢复前副本' -- mv "${live}" "${RS_PRE_DIR}/${label}" || return 1
     os::ok "恢复前副本：${RS_PRE_DIR}/${label}"
+    return 0
+}
+
+# rs_audit_tree <目录>   解包**之后**在文件系统上审查这棵树
+#
+# **不解析 `tar -tvf` 的文本。** 那是给人看的格式：文件名可以含空格、换行、
+# 甚至 ` -> `，而 ex_read_members 正是按「前五列之后是名字」再剥 ` -> ` 取的名 ——
+# 一个名字里带 ` -> ` 的成员会被截短，审计看到的是截短后那个安全的名字，
+# tar 解出来的却是完整的那个。判据必须建立在**解包后的真实 inode** 上：
+# 类型、链接数、权限位、链接目标，全都是内核说了算，不是文本说了算。
+#
+# 这条路上的归档与 external 那条同样不可信：`verify_archive` 校验的 `.sha256`
+# 与归档来自同一个远端（文件头第一节已经写明这一点），能改归档的人同样能改
+# 那个哈希。所以「本工具生成的归档」不是信任的理由。
+rs_audit_tree() {
+    local root=${1}
+
+    # 1) 只允许普通文件、目录、符号链接。设备节点、FIFO、socket 一律拒绝 ——
+    #    以 root 解包时它们会被真的创建出来。
+    os::query --timeout 600 -- \
+        find "${root}" ! -type f ! -type d ! -type l -print || return 1
+    if [[ -n ${OS_RUN_OUTPUT} ]]; then
+        os::err '归档里含设备节点/FIFO/socket 这类特殊文件，拒绝恢复'
+        os::info "${OS_RUN_OUTPUT}"
+        return 1
+    fi
+
+    # 2) 硬链接。一份归档里两个名字指向同一 inode，改其中一个的权限就改了另一个；
+    #    落到站点目录里更是把两处内容绑死。
+    os::query --timeout 600 -- find "${root}" -type f -links +1 -print || return 1
+    if [[ -n ${OS_RUN_OUTPUT} ]]; then
+        os::err '归档里含硬链接，拒绝恢复'
+        os::info "${OS_RUN_OUTPUT}"
+        return 1
+    fi
+
+    # 3) setuid / setgid。**只管普通文件**：目录上的 sticky 与 setgid 是合法用法
+    #    （共享目录靠它继承属组），一刀切会把正常备份挡在门外。
+    #    普通文件上的特权位一律剥掉而不是拒绝：站点里偶尔有第三方带进来的东西，
+    #    剥掉它不影响站点跑，而放进去就是一条 root 提权。
+    os::query --timeout 600 -- find "${root}" -type f -perm /6000 -print || return 1
+    if [[ -n ${OS_RUN_OUTPUT} ]]; then
+        os::warn '归档里有带 setuid/setgid 位的文件，已剥掉那些位：'
+        os::info "${OS_RUN_OUTPUT}"
+        os::run '剥掉特权位' -- find "${root}" -type f -perm /6000 -exec chmod a-s -- {} + || return 1
+    fi
+
+    # 4) 越界符号链接。站点内部的相对链接是合法的，指向树外的不是 ——
+    #    后者会让随后的 chown -R / 站点访问穿到树外去。
+    os::query --timeout 600 -- find "${root}" -type l -print || return 1
+    local link=''
+    while IFS= read -r link; do
+        [[ -n ${link} ]] || continue
+        rs_within "${root}" "$(realpath -m -- "${link}" 2>/dev/null)" && continue
+        os::err "归档里有指向树外的符号链接，拒绝恢复：${link}"
+        return 1
+    done <<<"${OS_RUN_OUTPUT}"
+
+    return 0
+}
+
+# rs_safe_extract <归档> <归档内顶层目录> <落点父目录> <输出变量>
+#
+# 解到**落点旁边的隔离目录**（0700），审查通过之后再由调用方整个改名过去。
+#
+# 隔离目录放落点旁边而不是 os::tmpdir：后者在 /run 上，那是内存——一个几 GB
+# 的站点归档会把机器的内存吃光。同一个文件系统还让最后那一步是 rename 而不是
+# 跨设备复制。
+#
+# `--no-same-owner --no-same-permissions`：归档里记的是**源机的**数字 uid 与
+# 权限位，本机的同号用户可能是另一个人。属主与权限由落点类型决定，不由归档
+# 决定 —— 原来这里直接沿用归档记的属主，一份被改过的归档因此能在站点目录里
+# 放下一个 root 属主、setuid 的可执行文件。
+rs_safe_extract() {
+    local archive=${1} root=${2} parent=${3} out=${4}
+    local stage=''
+    stage=$(mktemp -d "${parent}/.oneserver-restore.XXXXXXXX") || {
+        os::err "无法在 ${parent} 下创建隔离目录"
+        return 1
+    }
+    chmod 0700 "${stage}" 2>/dev/null || true
+    # 先登记再解 —— 解到一半失败时隔离目录里已经有半棵树了
+    os::defer rm -rf -- "${stage}"
+
+    os::run '解出归档到隔离目录' -- \
+        tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${stage}" "${root}" \
+        || return 1
+    rs_audit_tree "${stage}" || return 1
+
+    printf -v "${out}" '%s' "${stage}"
+    return 0
+}
+
+# rs_normalize_owner <目录> <site|self>   属主与权限按落点类型定，不按归档
+rs_normalize_owner() {
+    local dir=${1} kind=${2}
+    if [[ ${kind} == self ]]; then
+        os::run '把解出的配置归还 root' -- chown -R root:root -- "${dir}" || return 1
+        return 0
+    fi
+    # 站点：与 deploy_wordpress 落地时同一套
+    os::run '设置站点属主' -- chown -R www-data:www-data -- "${dir}" || return 1
+    os::run '设置目录权限' -- find "${dir}" -type d -exec chmod 0755 -- {} + || return 1
+    os::run '设置文件权限' -- \
+        find "${dir}" -type f -not -name wp-config.php -exec chmod 0644 -- {} + || return 1
+    if [[ -d "${dir}/wp-content" ]]; then
+        os::run --allow-fail '放宽 wp-content 目录权限' -- \
+            find "${dir}/wp-content" -type d -exec chmod 0775 -- {} + || true
+        os::run --allow-fail '放宽 wp-content 文件权限' -- \
+            find "${dir}/wp-content" -type f -exec chmod 0664 -- {} + || true
+    fi
+    [[ ! -f "${dir}/wp-config.php" ]] \
+        || os::run '收紧 wp-config.php 权限' -- chmod 0640 -- "${dir}/wp-config.php" || return 1
     return 0
 }
 
@@ -585,8 +746,14 @@ restore_files() {
     printf -v ts '%(%Y%m%d-%H%M%S)T' -1
 
     if [[ -z ${only} ]]; then
-        stash_current "${source}" "${root}-${ts}" || return 1
-        os::run '解出站点文件' -- tar -xzf "${archive}" -C "${parent}" "${root}" || return 1
+        # 先解到隔离目录并审查，通过之后才动现有的站点。反过来的话，一份坏的
+        # 归档会先把用户的站点挪走，再在解包中途失败
+        local stage=''
+        rs_safe_extract "${archive}" "${root}" "${parent}" stage || return 1
+        rs_normalize_owner "${stage}/${root}" site || return 1
+        # 完整恢复：挪走的就是站点根本身，允许 live == root
+        stash_current "${source}" "${root}-${ts}" "${source}" || return 1
+        os::run '就位站点文件' -- mv -T -- "${stage}/${root}" "${source}" || return 1
         os::ok "文件已恢复到 ${source}"
         return 0
     fi
@@ -603,10 +770,16 @@ restore_files() {
         os::err "归档里没有这个子路径：${sub}"
         return 1
     }
-    stash_current "${live}" "${root}-${sub//\//_}-${ts}" || return 1
+    # `--only` 是部分恢复：live 必须**严格落在站点目录之内**。子路径由用户给、
+    # 成员名由归档给，两者拼出来的路径穿出去时挪走的就是别处的东西
+    # 与完整恢复同一条纪律：先解到隔离目录、审查、定属主，再动现有的东西
+    local stage=''
+    rs_safe_extract "${archive}" "${root}/${sub}" "${parent}" stage || return 1
+    rs_normalize_owner "${stage}/${root}/${sub}" site || return 1
+
+    stash_current "${live}" "${root}-${sub//\//_}-${ts}" "${source}" || return 1
     os::run '创建子目录的父级' -- mkdir -p "${live%/*}"
-    os::run '解出指定子路径' -- \
-        tar -xzf "${archive}" -C "${parent}" "${root}/${sub}" || return 1
+    os::run '就位指定子路径' -- mv -T -- "${stage}/${root}/${sub}" "${live}" || return 1
     os::ok "已恢复 ${live}"
     return 0
 }
@@ -619,7 +792,18 @@ restore_self() {
     local out="${RS_PRE_DIR}/oneserver-config-${ts}"
     os::run '创建解出目录' -- mkdir -p "${out}"
     os::run '收紧解出目录权限' -- chmod 0700 "${out}"
-    os::run '解出 oneserver 配置' -- tar -xzf "${archive}" -C "${out}" "${root}" || return 1
+    # **同样按不可信输入解包**。这条路只解不覆盖（见文件头第五点），但解出来的
+    # 东西随后要由人 diff 与合并 —— 一个 setuid 的文件或指向 /etc 的符号链接
+    # 躺在那儿等着被合并回去，比直接覆盖更隐蔽。
+    os::run '解出 oneserver 配置' -- \
+        tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${out}" "${root}" \
+        || return 1
+    rs_audit_tree "${out}" || return 1
+    rs_normalize_owner "${out}" self || return 1
+    # 凭据库解出来必须还是 0600 —— 上面那步把普通文件统一成了 root:root，
+    # 权限则由归档记的 --no-same-permissions 归零成 umask，这里显式定死
+    [[ ! -f "${out}/${root}/secure.conf" ]] \
+        || os::run '收紧解出的凭据库权限' -- chmod 0600 -- "${out}/${root}/secure.conf" || return 1
 
     os::section '已解出，但没有覆盖任何东西'
     os::kv '解到' "${out}/${root}"
@@ -1457,6 +1641,12 @@ import_files() {
     os::run '收紧暂存目录权限' -- chmod 0700 "${staging}" || return 1
 
     ex_unpack "${staging}" || return 1
+    # **解包后再在文件系统上审一遍**，不只靠解包前那次文本审查。
+    # ex_read_members 是按 `tar -tvf` 的人读格式解析的：文件名含空格、换行或
+    # ` -> ` 时会被截短或拆行，于是 ex_audit_members 看到的是一个安全的名字、
+    # 而 tar 解出来的是完整的那个。这一遍看的是真实 inode（类型、链接数、
+    # 特权位、链接目标），文本怎么写都绕不过去。
+    rs_audit_tree "${staging}" || return 1
     ex_audit_symlinks "${staging}" || return 1
     ex_apply_ownership "${staging}" || return 1
     ex_keep_wp_config "${staging}" || return 1
@@ -1713,6 +1903,11 @@ main() {
     # --- 3. 取回 + 校验 + 读 manifest ---
     fetch_archive "${from}" "${type}" "${name}" "${file}" || os::die 1 '取回归档失败'
     verify_archive "${RS_ARCHIVE}" || os::die 1 '归档校验未通过，未做任何改动'
+    # **说清这次校验证明了什么、没证明什么。** `.sha256` 与归档来自同一个地方，
+    # 能改归档的人同样能改那个哈希 —— 它保证的是「传输过程中没坏」，不是
+    # 「内容可信」。挡住恶意归档的是解包时那道成员审查，不是这一步。
+    [[ ${from} == local ]] \
+        || os::warn '注意：校验用的 .sha256 与归档来自同一个远端，它只证明传输完整，不证明内容可信'
     read_manifest "${RS_ARCHIVE}" || os::die 1 '读不出归档的 manifest，未做任何改动'
 
     os::section '这份归档是什么'
