@@ -8,7 +8,7 @@
 # @order        20
 # @requires     podman
 # @privilege    root
-# @requires_lib >= 4.0
+# @requires_lib >= 4.7
 # @provides     container:<name>
 # @provides_unit ext:<name>.service
 # @args         --run-cmd=<整条 run 命令> [--name=<名字>] [--restart-policy=<always|on-failure|no>] [--auto-update=<y|n>] [--create-dirs=<y|n>]
@@ -73,6 +73,10 @@ source /opt/oneserver/lib/bootstrap.sh
 readonly QUADLET_DIR='/etc/containers/systemd'
 readonly NAME_RE='^[a-z0-9][a-z0-9_-]{0,62}$'
 readonly AUTOUPDATE_TIMER='podman-auto-update.timer'
+
+# 报「已在运行」之前观察服务多少秒。取 5：入口脚本失败的容器通常在一两秒内
+# 就死第一次，5 秒足够看到它掉出 active；再长就是让每次成功建容器都白等。
+readonly SETTLE_SECONDS=5
 
 # ------------------------------------------------------------------
 
@@ -861,11 +865,37 @@ main() {
     # 里的 `[Install] WantedBy=` 在生成时处理，这里只管把它起来
     os::systemd_start "${unit}"
 
-    # **起来了不等于跑着**：镜像拉不动、端口被占、入口命令直接退出，
-    # 三种都表现为「systemctl start 返回 0，容器却不在」
+    # **起来了不等于跑着，跑着也不等于站住了。**
+    #
+    # 镜像拉不动、端口被占、入口命令直接退出，三种都表现为「systemctl start
+    # 返回 0，容器却不在」——查一次就够。但还有一类更难缠：入口脚本先起来、
+    # 几秒后才失败（连不上数据库、配置项写错，最常见的两类）。那一刻服务确实
+    # 是 active，报完「已在运行」用户就走了；随后 Restart= 把它反复拉起，直到
+    # systemd 判 start-limit-hit，而 Quadlet 到那时已经把容器对象删掉，
+    # 用户手上只剩一个 failed 的服务。
+    #
+    # 所以下结论前给一个稳定期，等完再判。**判据是重启次数，不是采样状态**：
+    # Restart= 的默认 RestartSec 是 100 毫秒，容器退出到重新起来的非 active 窗口
+    # 只有一两百毫秒，秒级采样几乎必然错过（实测：一个「起来 3 秒后退出」的容器
+    # 连采五次全是 active）。NRestarts 是 systemd 累加的计数，错不过去。
+    # 代价是成功路径上多等几秒；这是建容器，不是热路径。
+    local -i s=0
+    while ((s < SETTLE_SECONDS)); do
+        os::query --timeout 3 -- sleep 1 || true
+        s+=1
+    done
+
     probe::service_active "${unit}"
-    if [[ ${OS_PROBE_VALUE} != active ]]; then
-        os::err "${unit} 没有进入 active"
+    local state=${OS_PROBE_VALUE}
+    probe::unit_restarts "${unit}"
+    local restarts=${OS_PROBE_VALUE:-0}
+
+    if [[ ${state} != active || ${restarts} != 0 ]]; then
+        if [[ ${state} != active ]]; then
+            os::err "${unit} 没有稳定运行（当前 ${state}）"
+        else
+            os::err "${unit} 起来之后已经重启过 ${restarts} 次 —— 容器在反复退出"
+        fi
         os::query --timeout 20 -- journalctl -u "${unit}" --no-pager -n 30
         os::err "${OS_RUN_OUTPUT}"
         os::die 1 "容器 ${name} 没能跑起来，已撤销"
