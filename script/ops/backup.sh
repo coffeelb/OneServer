@@ -586,9 +586,14 @@ push_remote() {
     os::query --timeout 300 -- rclone cat "${dest}/${base}.sha256" || return 1
     local remote_sum=${OS_RUN_OUTPUT%% *}
     # 取第一列用 shell 自己的 read，不为一个字段起一层 shell —— 路径拼进
-    # `sh -c` 的脚本文本是一条不必要的注入面（同 restore.sh 的列举函数）
+    # `sh -c` 的脚本文本是一条不必要的注入面（同 restore.sh 的列举函数）。
+    #
+    # **`IFS=' '` 前缀不能省。** 本文件顶上把 IFS 设成了 $'\n\t'，里面没有空格，
+    # 而 sha256sum 那行的分隔符正是两个空格 —— 不带前缀的话「哈希 + 文件名」
+    # 整行都落进第一个变量，于是每次上传都判成校验和不一致，而报错里打出来的
+    # 两个哈希看着一模一样（本地那个后面拖着文件名，肉眼几乎看不出来）。
     local local_sum=''
-    read -r local_sum _ <"${file}.sha256" 2>/dev/null || true
+    IFS=' ' read -r local_sum _ <"${file}.sha256" 2>/dev/null || true
     [[ -n ${local_sum} ]] || return 1
 
     if [[ -z ${remote_sum} || ${remote_sum} != "${local_sum}" ]]; then
@@ -622,7 +627,11 @@ prune_local() {
         filtered+="${line}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
     [[ -n ${filtered} ]] || return 0
-    os::query --timeout 10 --stdin "${filtered}" -- sort || return 0
+    # **喂给 `--stdin` 的文本不能自带末尾换行。** 那头是 `printf '%s\n'`，
+    # 于是 filtered 结尾的换行会多出一个空行，`sort` 把空行排在最前面 ——
+    # 删除循环的第一项就成了空名字，`rm -f "${dir}/"` 以退出码 1 失败，
+    # 整次备份被判失败，而「删了几份」还多算了一份。
+    os::query --timeout 10 --stdin "${filtered%$'\n'}" -- sort || return 0
     local list=${OS_RUN_OUTPUT}
     [[ -n ${list} ]] || return 0
 
@@ -1082,8 +1091,9 @@ action_verify() {
         # 直接比哈希，不 `cd` 也不起内层 shell（同 restore.sh 的 verify_archive）。
         # 「.sha256 里存的是相对文件名」原本是 cd 的理由，而只取第一列就不需要
         # 它了 —— 顺带消掉「把路径拼进 `sh -c` 脚本文本」这条注入面。
+        # `IFS=' '` 前缀的理由同 push_remote：文件级 IFS 里没有空格。
         want=''
-        read -r want _ <"${f}.sha256" 2>/dev/null || true
+        IFS=' ' read -r want _ <"${f}.sha256" 2>/dev/null || true
         got=''
         if os::query --timeout 300 -- sha256sum -- "${f}"; then
             got=${OS_RUN_OUTPUT%% *}
