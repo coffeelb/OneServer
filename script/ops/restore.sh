@@ -492,7 +492,13 @@ stash_current() {
     return 0
 }
 
-# rs_audit_tree <目录>   解包**之后**在文件系统上审查这棵树
+# rs_audit_tree <目录> [会不会整体改权限]   解包**之后**在文件系统上审查这棵树
+#
+# **它只剥特权位，其余一律告警不拒绝。** 维护者定的硬要求是「以前能恢复的
+# 归档现在必须还能恢复」，所以这里不做否决 —— 剥 setuid/setgid 是唯一的例外，
+# 因为它不会让任何一次合法恢复失败，而留着它就是一条现成的提权。
+# 真正挡住「写到站点目录外面」的是路径包含判定（valid_source_path / rs_within
+# / stash_current 的断言），那几条同样不会让合法归档失败。
 #
 # **不解析 `tar -tvf` 的文本。** 那是给人看的格式：文件名可以含空格、换行、
 # 甚至 ` -> `，而 ex_read_members 正是按「前五列之后是名字」再剥 ` -> ` 取的名 ——
@@ -508,14 +514,14 @@ stash_current() {
 rs_audit_tree() {
     local root=${1} will_chown=${2-no}
 
-    # 1) 只允许普通文件、目录、符号链接。设备节点、FIFO、socket 一律拒绝 ——
-    #    以 root 解包时它们会被真的创建出来。
+    # 1) 特殊文件（设备节点、FIFO、socket）：**告警，不拒绝**。
+    #    以 root 解包时它们会被真的创建出来，值得说一声；但它们落在站点目录
+    #    之内，而「以前能恢复的归档现在必须还能恢复」是维护者定的硬要求。
     os::query --timeout 600 -- \
         find "${root}" ! -type f ! -type d ! -type l -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
-        os::err '归档里含设备节点/FIFO/socket 这类特殊文件，拒绝恢复'
+        os::warn '归档里含设备节点/FIFO/socket 这类特殊文件，已按原样恢复：'
         os::info "${OS_RUN_OUTPUT}"
-        return 1
     fi
 
     # 2) 硬链接。**只对随后要跑递归 chmod/chown 的落点拒绝**（站点），
@@ -529,11 +535,10 @@ rs_audit_tree() {
     os::query --timeout 600 -- find "${root}" -type f -links +1 -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
         if [[ ${will_chown} == yes ]]; then
-            os::err '归档里含硬链接，拒绝恢复（这棵树落地时要整体改权限，硬链接会把改动带到另一个名字上）'
-            os::info "${OS_RUN_OUTPUT}"
-            return 1
+            os::warn '归档里含硬链接，而这棵树落地时要整体改权限——改一个名字的权限会带到另一个名字上：'
+        else
+            os::warn '归档里含硬链接，已按原样保留：'
         fi
-        os::warn '归档里含硬链接，已按原样保留（本类型落地不改权限，不会波及其他路径）：'
         os::info "${OS_RUN_OUTPUT}"
     fi
 
@@ -551,13 +556,19 @@ rs_audit_tree() {
     # 4) 越界符号链接。站点内部的相对链接是合法的，指向树外的不是 ——
     #    后者会让随后的 chown -R / 站点访问穿到树外去。
     os::query --timeout 600 -- find "${root}" -type l -print || return 1
-    local link=''
+    local link='' escaped=''
     while IFS= read -r link; do
         [[ -n ${link} ]] || continue
         rs_within "${root}" "$(realpath -m -- "${link}" 2>/dev/null)" && continue
-        os::err "归档里有指向树外的符号链接，拒绝恢复：${link}"
-        return 1
+        escaped+="${link}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
+    if [[ -n ${escaped} ]]; then
+        # 同样只告警。递归 chown/chmod 默认不跟随符号链接，所以这些链接不会
+        # 让权限变更穿到树外；真正跟随它们的是随后访问站点的那个进程，
+        # 那是站点内容的事，不该由恢复命令替用户否决。
+        os::warn '归档里有指向树外的符号链接，已按原样恢复：'
+        os::info "${escaped}"
+    fi
 
     return 0
 }

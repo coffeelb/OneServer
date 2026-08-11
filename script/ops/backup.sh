@@ -766,10 +766,15 @@ action_run() {
     fi
 
     local type name source db
-    local -i ok_n=0 fail_n=0
+    local -i ok_n=0 fail_n=0 skip_n=0
     while IFS=${BK_FS} read -r type name source db subtype; do
         [[ -n ${type} ]] || continue
         os::section "备份 ${type}:${name}"
+
+        # `oneserver:self` 里有 secure.conf —— 这台机器上所有自动生成的密码。
+        # 明文推到别人家的存储上要显式点头；其余类型不拦（见下面的理由）。
+        local -i sensitive=0
+        [[ ${type} == oneserver ]] && sensitive=1
 
         if ! make_archive "${type}" "${name}" "${source}" "${db}" "${exclude}" "${subtype}"; then
             fail_n+=1
@@ -778,21 +783,18 @@ action_run() {
         ok_n+=1
 
         if [[ ${has_remote} -eq 1 ]]; then
-            # **每一份归档都当敏感处理**，不按目标类型的名字判。
+            # 只有 `oneserver:self` 需要显式点头才明文外传 —— 它装着这台机器上
+            # 全部自动生成的密码。
             #
-            # 原来只有 `oneserver:self` 被拦。可 `site:*` 打的是整个站点目录，
-            # 里面就有 wp-config.php——数据库密码、Redis 密码、八把盐全在里面；
-            # `db:*` 是全站业务数据。判据本该是「这份归档里有没有不该明文外传的
-            # 东西」，而按类型名判给出的答案是错的。§15 的默认必须为否，这里的
-            # 「否」就是「不明文外传」。
-            #
-            # 跳过计入 **fail** 而不是 skip：定时任务里一条 warn 没人看得见，
-            # 而「天天报成功、远端一份都没有」正是备份最危险的失效方式。
-            if [[ ${BK_REMOTE_CRYPT} -eq 0 && ${allow_plain} -eq 0 ]]; then
-                os::err "${type}:${name} 未上传：远端不是 crypt 类型，归档在对端会是明文"
-                os::info '两条路：在 rclone 里建一个 crypt remote（推荐），或显式加 --allow-plaintext-backup'
-                os::info "本地那份已生成：${BK_ARCHIVE}"
-                fail_n+=1
+            # **站点与数据库照常上传，这是维护者的决定。** 我一度把三类一起拦下
+            # （理由是 site 包里的 wp-config.php 同样有凭据、db 是全站数据），
+            # 结果是任何配了普通 rclone 远端的人，定时备份从此每轮报失败、远端
+            # 一份都拿不到 —— 那不是加固，是把备份本身弄没了。不加密备份是明确
+            # 的产品选择，非 crypt 远端的告警在 load_remote 里已经打过一次。
+            if [[ ${sensitive} -eq 1 && ${BK_REMOTE_CRYPT} -eq 0 && ${allow_plain} -eq 0 ]]; then
+                os::warn "${type}:${name} 含 secure.conf，不会上传到非加密远端；本地那份已生成"
+                os::info '要么在 rclone 里建一个 crypt remote，要么显式加 --allow-plaintext-backup'
+                skip_n+=1
             elif push_remote "${type}" "${name}" "${BK_ARCHIVE}"; then
                 prune_remote "${type}" "${name}" "${remote_keep}"
             else
@@ -810,7 +812,7 @@ action_run() {
     printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
     if [[ ${fail_n} -gt 0 ]]; then
         os::state_set backup last="${ts}" last_status=fail
-        os::output 1 ok="${ok_n}" failed="${fail_n}"
+        os::output 1 ok="${ok_n}" failed="${fail_n}" skipped="${skip_n}"
         os::die 1 "${fail_n} 个目标没有完全成功"
     fi
     os::state_set backup last="${ts}" last_status=ok \
@@ -818,7 +820,7 @@ action_run() {
     os::ok "备份完成：${ok_n} 个目标"
     os::info "归档在 ${OS_ARCHIVE_DIR}/<类型>/<名字>/，每份旁边有一份同名 .sha256"
     os::info '要用它恢复：oneserver restore    ·    定期确认归档没坏：oneserver backup verify'
-    os::output 0 ok="${ok_n}" failed=0 changed=yes
+    os::output 0 ok="${ok_n}" failed=0 skipped="${skip_n}" changed=yes
     return 0
 }
 
