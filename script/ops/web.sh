@@ -7,7 +7,7 @@
 # @group        monitor
 # @order        5
 # @privilege    root
-# @requires_lib >= 4.0
+# @requires_lib >= 4.5
 # @provides     web
 # @provides_unit own:oneserver-web-live.service
 # @provides_unit own:oneserver-web-live.timer
@@ -112,11 +112,15 @@ readonly -a WEB_FILES=(
 # 直接让 Caddy 指过去，两个问题一起没有：升级换掉模板即刻生效，重启不需要
 # 谁来补。模板是 0644、templates/ 是 0755，跑 Caddy 的用户读得到。
 page_source() {
-    local override="${OS_ETC_DIR}/templates/dashboard.html"
-    # /etc 下的同名文件优先，与 os::install_template 的覆盖规则一致 —— 两边
-    # 不一致的话，「我在 /etc 放了定制页面却不生效」会变成查不出来的问题
-    if [[ -f ${override} ]]; then
-        printf '%s' "${override}"
+    # 走 os::template_source：/etc 下的同名文件优先，属主/权限不合格就**拒绝
+    # 采用它**（它会把拒绝的理由打在 stderr 上，不是静默）。此处随后退回分发
+    # 自带的那一份 —— 对这个页面来说「不采用可疑的覆盖」就是安全的那一侧，
+    # 而整条命令失败只会让面板连页面都没有。写配置那条路（os::install_template）
+    # 的安全侧不同，它是直接中止。
+    # 这个页面由 Caddy 直接对外提供，一个组可写的覆盖文件等于让别人改面板内容。
+    local resolved=''
+    if os::template_source 'dashboard.html' resolved; then
+        printf '%s' "${resolved}"
     else
         printf '%s' "${OS_TEMPLATE_DIR}/dashboard.html"
     fi

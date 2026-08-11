@@ -35,6 +35,81 @@
 # 内容没变还去重启一次 FPM，第二次执行就不是「零变更」了。
 OS_TEMPLATE_CHANGED=0
 
+# os::template_source <模板文件名> <输出变量>   解析模板实际来源，路径写进变量
+#
+# `/etc/oneserver/templates/<同名文件>` 优先于分发自带的 `templates/`：分发目录
+# 会被 `oneserver update` 整个换掉，用户的定制放 /etc 才活得过更新（同 D51）。
+#
+# **必须校验属主与权限，而且 fail closed。** `/etc/oneserver/*.conf` 的加载器
+# 早就这么做了（属主 root、组与其他不可写，否则拒绝加载），而这条模板覆盖路径
+# 一直没有——同一个目录，两套信任假设。它能改写的东西包括
+# `sshd_config.d/00-oneserver.conf`（SSH 认证策略）与 `wp-config.php`
+# （会被 PHP 执行的代码），一个组可写的覆盖文件等于把这些交给别人写。
+#
+# 不安全时**拒绝并返回非零**，不静默退回分发模板：静默回退会让用户在不知情的
+# 情况下拿到另一份配置，而「我明明放了覆盖却没生效」和「我忘了 /etc 下压着
+# 一份」同样难查。
+#
+# 只收单层文件名：带路径的参数等于让调用方指定任意文件当模板。
+os::template_source() {
+    local name=${1-} out=${2-}
+    if [[ -z ${name} || -z ${out} ]]; then
+        ui::line --err error 'os::template_source 用法：<模板文件名> <输出变量>'
+        return 2
+    fi
+    if [[ ${name} == */* || ${name} == .* ]]; then
+        ui::line --err error "os::template_source 只接受单层文件名：${name}"
+        return 2
+    fi
+
+    local override="${OS_ETC_DIR}/templates/${name}"
+    if [[ ! -e ${override} && ! -L ${override} ]]; then
+        printf -v "${out}" '%s' "${OS_TEMPLATE_DIR}/${name}"
+        return 0
+    fi
+
+    # 逐级查符号链接：中间任意一级被换成链接，读到的就是别处的内容。
+    # `-L` 用 lstat 语义，不跟随。
+    local cur=${OS_ETC_DIR} seg
+    local -a segs=('templates' "${name}")
+    [[ ! -L ${cur} ]] || {
+        ui::line --err error "${cur} 是符号链接，拒绝使用模板覆盖"
+        return 1
+    }
+    for seg in "${segs[@]}"; do
+        cur="${cur}/${seg}"
+        [[ ! -L ${cur} ]] || {
+            ui::line --err error "${cur} 是符号链接，拒绝使用模板覆盖"
+            return 1
+        }
+    done
+
+    local owner mode
+    owner=$(stat -c %u "${override}" 2>/dev/null) || {
+        ui::line --err error "读不到 ${override} 的属主，拒绝使用模板覆盖"
+        return 1
+    }
+    mode=$(stat -c %a "${override}" 2>/dev/null) || {
+        ui::line --err error "读不到 ${override} 的权限，拒绝使用模板覆盖"
+        return 1
+    }
+    if [[ ${owner} != 0 ]]; then
+        ui::line --err error "拒绝使用 ${override}：属主不是 root"
+        return 1
+    fi
+    if [[ $((8#${mode} & 8#022)) -ne 0 ]]; then
+        ui::line --err error "拒绝使用 ${override}：权限 ${mode} 允许非属主写入"
+        return 1
+    fi
+
+    # **提示走 stderr**：本函数经输出变量返回路径，属于 §10 的「纯值接口」。
+    # 往 stdout 打一行的话，`dir=$(page_source)` 这类调用会把提示语一起当成
+    # 路径捞走 —— 而那正是 web.sh 取面板页面目录的写法。
+    ui::line --err info "用 ${override}（覆盖了分发自带的模板）"
+    printf -v "${out}" '%s' "${override}"
+    return 0
+}
+
 # os::php_str <值>   转义反斜杠与单引号，安全放进 PHP 单引号字符串
 #
 # **放在这里而不是各脚本各写一份。** 模板渲染是纯字符串替换，不认目标语言、
@@ -94,19 +169,16 @@ os::install_template() {
     fi
     shift 2
 
-    # --- 用户覆盖：/etc/oneserver/templates/<同名文件> 优先 ---
+    # 用户覆盖的解析与校验收在 os::template_source（web.sh 的面板页面走同一条
+    # 路，两处不一致的话「我在 /etc 放了定制却不生效」会变成查不出来的问题）。
+    # 它对不安全的覆盖是 fail closed，所以这里失败就整条中止。
     #
-    # 分发目录 templates/ 会被 `oneserver update` **整个目录换掉**（切换器的
-    # TOP_ORDER 里就有它）——在那儿改的东西下次更新一声不响就没了。
-    # /etc 不在分发范围内，用户的定制放那儿才活得过更新（同 D51 对 conf 的安排）。
-    #
-    # **命中时明说**，不静默替换：一份「我明明改了模板却没生效」和一份
-    # 「我忘了 /etc 下还压着一份旧的」同样难查，区别只在有没有这一行。
-    local __os_tpl_override="${OS_ETC_DIR}/templates/${tpl##*/}"
-    if [[ -f ${__os_tpl_override} ]]; then
-        ui::line info "用 ${__os_tpl_override}（覆盖了分发自带的模板）"
-        tpl=${__os_tpl_override}
-    fi
+    # **只在真的命中 /etc 覆盖时才改 tpl。** template_source 没命中时返回的是
+    # 分发目录下的同名路径，而调用方给的模板未必在那儿（测试传的是临时目录，
+    # 将来也可能有别的来源）——无条件采用它的返回值等于把调用方的参数丢掉。
+    local __os_tpl_src=''
+    os::template_source "${tpl##*/}" __os_tpl_src || return 1
+    [[ ${__os_tpl_src} == "${OS_ETC_DIR}/"* ]] && tpl=${__os_tpl_src}
 
     if [[ ! -f ${tpl} ]]; then
         ui::line --err error "模板不存在：${tpl}"

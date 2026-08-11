@@ -16,6 +16,9 @@ setup() {
     OS_LOG_JSONL="${OS_LOG_DIR}/oneserver.jsonl"
     OS_AUDIT_LOG="${OS_LOG_DIR}/audit.log"
     OS_BACKUP_DIR="${BATS_TEST_TMPDIR}/backup"
+    # **必须隔离**：os::template_source 会去 $OS_ETC_DIR/templates 找覆盖，
+    # 不改这个变量的话用例会往容器真实的 /etc/oneserver 里写，而且互相串味
+    OS_ETC_DIR="${BATS_TEST_TMPDIR}/etc"
     OS_DRYRUN=0
     OS_DRYRUN_TAINTED=0
     OS_ERR__DEFER_ARGS=()
@@ -392,4 +395,50 @@ os_is_root() { [ "$(id -u)" -eq 0 ]; }
     run os::php_str ''
     [ "${status}" -eq 0 ]
     [ "${output}" = '' ]
+}
+
+# --- os::template_source -------------------------------------------
+#
+# /etc 下的覆盖能改写 sshd 片段与 wp-config.php（会被 PHP 执行的代码）。
+# conf 加载器早就查属主与权限了，这条路一直没查——同一个目录两套信任假设。
+
+@test "template_source: 没有覆盖时返回分发自带的那一份" {
+    local got=''
+    os::template_source 'www.conf' got
+    [ "${got}" = "${OS_TEMPLATE_DIR}/www.conf" ]
+}
+
+@test "template_source: 合规的覆盖被采用" {
+    mkdir -p "${OS_ETC_DIR}/templates"
+    printf 'x\n' >"${OS_ETC_DIR}/templates/www.conf"
+    chmod 0644 "${OS_ETC_DIR}/templates/www.conf"
+    local got=''
+    os::template_source 'www.conf' got
+    [ "${got}" = "${OS_ETC_DIR}/templates/www.conf" ]
+}
+
+@test "template_source: 组可写的覆盖被拒绝，且不静默退回" {
+    mkdir -p "${OS_ETC_DIR}/templates"
+    printf 'x\n' >"${OS_ETC_DIR}/templates/www.conf"
+    chmod 0664 "${OS_ETC_DIR}/templates/www.conf"
+    local got=''
+    run os::template_source 'www.conf' got
+    [ "${status}" -ne 0 ]
+    [[ ${output} == *'允许非属主写入'* ]]
+}
+
+@test "template_source: 覆盖文件是符号链接时被拒绝" {
+    mkdir -p "${OS_ETC_DIR}/templates"
+    printf 'x\n' >"${BATS_TEST_TMPDIR}/elsewhere"
+    ln -s "${BATS_TEST_TMPDIR}/elsewhere" "${OS_ETC_DIR}/templates/www.conf"
+    local got=''
+    run os::template_source 'www.conf' got
+    [ "${status}" -ne 0 ]
+    [[ ${output} == *'符号链接'* ]]
+}
+
+@test "template_source: 只收单层文件名" {
+    local got=''
+    run os::template_source '../../etc/shadow' got
+    [ "${status}" -eq 2 ]
 }

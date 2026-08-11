@@ -11,7 +11,7 @@
 # @provides     backup
 # @provides_unit own:oneserver-backup.service
 # @provides_unit own:oneserver-backup.timer
-# @args         [--action=<overview|run|log|verify|add|remove|remote|schedule|unschedule>] [--target=<标识|all>] [--name=<别名>] [--source=<路径>] [--exclude=<模式,模式>] [--targets=<清单>] [--remote=<名字>] [--remote-dir=<路径>] [--local-keep=<n>] [--remote-keep=<n>] [--lines=<n>] [--allow-plaintext-secrets] [--frequency=<daily|weekly>] [--at=<HH:MM>] [--weekday=<0-6>] [--confirm-remove=<别名>] [--confirm-unschedule=<backup>]
+# @args         [--action=<overview|run|log|verify|add|remove|remote|schedule|unschedule>] [--target=<标识|all>] [--name=<别名>] [--source=<路径>] [--exclude=<模式,模式>] [--targets=<清单>] [--remote=<名字>] [--remote-dir=<路径>] [--local-keep=<n>] [--remote-keep=<n>] [--lines=<n>] [--allow-plaintext-backup] [--allow-plaintext-secrets] [--frequency=<daily|weekly>] [--at=<HH:MM>] [--weekday=<0-6>] [--confirm-remove=<别名>] [--confirm-unschedule=<backup>]
 # @description  备份站点、数据库与目录，可推送 rclone 远端
 #
 
@@ -755,19 +755,21 @@ action_run() {
     else
         os::info '没有配置远端（oneserver backup remote），本次只做本地备份'
     fi
-    os::flag --arg allow-plaintext-secrets && allow_plain=1
+    # 新名字。旧名 `--allow-plaintext-secrets` 保留一个主版本作为弃用别名
+    # （§14 的兼容做法）——它描述的是「凭据」，而现在这条闸门管的是**全部**
+    # 归档内容：站点包里的 wp-config.php、数据库转储里的业务数据，
+    # 都不该因为名字里没有 secrets 就被当成可以明文外传的东西。
+    os::flag --arg allow-plaintext-backup && allow_plain=1
+    if os::flag --arg allow-plaintext-secrets; then
+        allow_plain=1
+        os::warn '--allow-plaintext-secrets 已更名为 --allow-plaintext-backup，旧名保留一个主版本'
+    fi
 
     local type name source db
     local -i ok_n=0 fail_n=0 skip_n=0
     while IFS=${BK_FS} read -r type name source db subtype; do
         [[ -n ${type} ]] || continue
         os::section "备份 ${type}:${name}"
-
-        # `oneserver:self` 里有 secure.conf —— 这台机器上所有自动生成的密码。
-        # 明文推到别人家的存储上是**降低安全性**，按规范默认必须为否，
-        # 要做就得显式点头；补偿控制是本地那份照做、并明说怎么改成加密的。
-        local -i sensitive=0
-        [[ ${type} == oneserver ]] && sensitive=1
 
         if ! make_archive "${type}" "${name}" "${source}" "${db}" "${exclude}" "${subtype}"; then
             fail_n+=1
@@ -776,10 +778,21 @@ action_run() {
         ok_n+=1
 
         if [[ ${has_remote} -eq 1 ]]; then
-            if [[ ${sensitive} -eq 1 && ${BK_REMOTE_CRYPT} -eq 0 && ${allow_plain} -eq 0 ]]; then
-                os::warn "${type}:${name} 含 secure.conf，不会上传到非加密远端；本地那份已生成"
-                os::info '要么在 rclone 里建一个 crypt remote，要么显式加 --allow-plaintext-secrets'
-                skip_n+=1
+            # **每一份归档都当敏感处理**，不按目标类型的名字判。
+            #
+            # 原来只有 `oneserver:self` 被拦。可 `site:*` 打的是整个站点目录，
+            # 里面就有 wp-config.php——数据库密码、Redis 密码、八把盐全在里面；
+            # `db:*` 是全站业务数据。判据本该是「这份归档里有没有不该明文外传的
+            # 东西」，而按类型名判给出的答案是错的。§15 的默认必须为否，这里的
+            # 「否」就是「不明文外传」。
+            #
+            # 跳过计入 **fail** 而不是 skip：定时任务里一条 warn 没人看得见，
+            # 而「天天报成功、远端一份都没有」正是备份最危险的失效方式。
+            if [[ ${BK_REMOTE_CRYPT} -eq 0 && ${allow_plain} -eq 0 ]]; then
+                os::err "${type}:${name} 未上传：远端不是 crypt 类型，归档在对端会是明文"
+                os::info '两条路：在 rclone 里建一个 crypt remote（推荐），或显式加 --allow-plaintext-backup'
+                os::info "本地那份已生成：${BK_ARCHIVE}"
+                fail_n+=1
             elif push_remote "${type}" "${name}" "${BK_ARCHIVE}"; then
                 prune_remote "${type}" "${name}" "${remote_keep}"
             else

@@ -178,6 +178,7 @@
 
 ## `lib/template.sh` · L3 能力
 
+- `os::template_source <模板文件名> <输出变量>` —— 解析模板实际来源，路径写进变量
 - `os::php_str <值>` —— 转义反斜杠与单引号，安全放进 PHP 单引号字符串
 - `os::install_template [--backup] [--mode <八进制>] <模板> <目标> [KEY=VALUE...]`
 - `os::install_file [--backup] [--quiet] [--mode <八进制>] <源文件> <目标>`
