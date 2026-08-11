@@ -231,6 +231,12 @@ load_remote() {
 #
 # 改法不是加转义，是让内层 shell 根本不存在：命令经 os::query 的 argv 直接执行，
 # 过滤与去重在 bash 里做，排序经 `os::query --stdin` 把数据从 stdin 送进 sort。
+#
+# **喂给 `--stdin` 的文本一律去掉末尾换行**（下面四处都是 `${out%$'\n'}`）：
+# 那头是 `printf '%s\n'`，自带换行的话 sort 会多读到一个空行。升序时它排在
+# 最前面，于是选择列表的第一项是个空白选项；降序时它落在末尾、恰好被
+# `$( )` 的尾换行剥除而看不出来 —— 后者只是碰巧不发作，不是没这个问题。
+# backup.sh 的 prune_local 是同一个坑发作的样子：删除循环拿到空文件名。
 local_targets() {
     os::query --timeout 30 -- \
         find "${OS_ARCHIVE_DIR}" -mindepth 3 -maxdepth 3 -name '*.tar.gz' -printf '%h\n' \
@@ -242,7 +248,7 @@ local_targets() {
         out+="${line/\//:}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
     [[ -n ${out} ]] || return 1
-    os::query --timeout 10 --stdin "${out}" -- sort -u || return 1
+    os::query --timeout 10 --stdin "${out%$'\n'}" -- sort -u || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
@@ -261,7 +267,7 @@ remote_targets() {
         out+="${line/\//:}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
     [[ -n ${out} ]] || return 1
-    os::query --timeout 10 --stdin "${out}" -- sort || return 1
+    os::query --timeout 10 --stdin "${out%$'\n'}" -- sort || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
@@ -279,7 +285,7 @@ local_archives() {
         out+="${line}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
     [[ -n ${out} ]] || return 1
-    os::query --timeout 10 --stdin "${out}" -- sort -r || return 1
+    os::query --timeout 10 --stdin "${out%$'\n'}" -- sort -r || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
@@ -315,7 +321,7 @@ remote_archives() {
         out+="${line}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
     [[ -n ${out} ]] || return 1
-    os::query --timeout 10 --stdin "${out}" -- sort -r || return 1
+    os::query --timeout 10 --stdin "${out%$'\n'}" -- sort -r || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
