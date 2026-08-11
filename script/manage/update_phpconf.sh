@@ -11,7 +11,7 @@
 # @requires_lib >= 1.14
 # @provides_unit ext:php<version>-fpm.service
 # @args         [--version=<ver>] [--template=<apply|edit>] [--edit-next=<y|n>] [--apply-edited=<y|n>]
-# @description  用模板覆盖 php.ini 与 www.conf，失败自动回滚
+# @description  用模板覆盖 PHP 配置与 FPM 进程池，失败自动回滚
 #
 
 set -Eeuo pipefail
@@ -46,6 +46,10 @@ php_versions_desc() {
 # `oneserver update` 整个换掉，在那儿改等于白改。这个位置由 os::install_template
 # 自动优先取用，脚本这边只负责把文件准备好、打开编辑器。
 readonly PHPCONF_OVERRIDE_DIR="${OS_ETC_DIR}/templates"
+
+# 模板名与落地文件名一致。`99-` 保证它排在 conf.d 里所有发行版文件之后 ——
+# 后读的赢，`10-opcache.ini` 之类先设的值才盖不过这里。
+readonly PHPCONF_DROPIN='99-oneserver.ini'
 
 # 这次实际会用哪一份（覆盖的还是分发自带的）
 effective_template() {
@@ -138,21 +142,28 @@ main() {
         os::die 2 "PHP ${ver} 未安装 FPM，已装的是：${installed}"
     fi
 
-    local ini="/etc/php/${ver}/fpm/php.ini"
+    local dropin="/etc/php/${ver}/fpm/conf.d/${PHPCONF_DROPIN}"
     local pool="/etc/php/${ver}/fpm/pool.d/www.conf"
     local unit="php${ver}-fpm.service"
     local log_dir="/var/log/php${ver}"
+    local fpm_bin="php-fpm${ver}"
+
+    # **必须在任何副作用之前。** os::require_cmd 走 os::die 3，而框架对 2/3/4
+    # 一律按「前置检查拦下、系统未变更」处理，不回放回滚栈。放在写模板之后，
+    # 遇上「/etc/php/<版本> 还在但包已被 remove（conffile 不随 remove 删除）」
+    # 这种机器，就会写完两份配置再报一句「缺少必需的命令」，而配置留在那儿。
+    os::require_cmd "${fpm_bin}"
 
     os::section 'PHP 配置更新'
     os::kv '目标版本' "${ver}" \
-        '主配置' "${ini}" \
+        'PHP 配置' "${dropin}" \
         '进程池' "${pool}" \
         '数据来源' "$(probe::describe)"
 
     # 先让人看清「拿什么覆盖」，再决定要不要改。
     # 原来这里回车就直接盖了 —— 用户连即将写进去的是什么都没机会看一眼。
     os::info "将用这两份模板覆盖上面的配置："
-    os::kv 'php.ini 模板' "$(effective_template php.ini)" \
+    os::kv 'PHP 配置模板' "$(effective_template "${PHPCONF_DROPIN}")" \
         '进程池模板' "$(effective_template www.conf)"
 
     # **`--keep-screen` 不能省。** 不加的话 os::select 会清屏，上面刚打出来的
@@ -162,16 +173,16 @@ main() {
     os::select --keep-screen --arg template '这两份模板直接用，还是先改？' tpl_choice \
         'apply=就用上面这两份，直接更新' 'edit=先编辑它们，改完再更新'
     if [[ ${tpl_choice} == edit ]]; then
-        os::info '共 2 个文件，一个接一个来：先 php.ini，再 www.conf；每个打开前都会先停下来说明'
-        edit_template php.ini '[1/2]' 'PHP 主配置'
+        os::info "共 2 个文件，一个接一个来：先 ${PHPCONF_DROPIN}，再 www.conf；每个打开前都会先停下来说明"
+        edit_template "${PHPCONF_DROPIN}" '[1/2]' 'PHP 配置'
         edit_template www.conf '[2/2]' 'FPM 进程池'
 
         # 编辑完不立刻动手 —— 改完再确认一次，是给「我只是想看看」和
         # 「我改错了想重来」留的出口。此刻一个字节都还没写进 /etc/php
         os::section '两份模板都编辑完了'
-        os::kv 'php.ini 模板' "${PHPCONF_OVERRIDE_DIR}/php.ini" \
+        os::kv 'PHP 配置模板' "${PHPCONF_OVERRIDE_DIR}/${PHPCONF_DROPIN}" \
             '进程池模板' "${PHPCONF_OVERRIDE_DIR}/www.conf" \
-            '将写入' "${ini}" \
+            '将写入' "${dropin}" \
             '并写入' "${pool}"
         os::confirm --arg apply-edited '现在用它们更新 PHP 配置？' y \
             || os::die 130 '已取消，PHP 配置未改动（你改的模板留在 /etc/oneserver/templates/）'
@@ -206,15 +217,23 @@ main() {
     # maybe_restart_phpfpm，它在真正被回放时才读 PHPCONF__CHANGED
     # 决定动不动手，而不是直接 defer os::systemd_restart。
     #
-    # 两份模板都吃 %%PHP_VERSION%%：www.conf 用它定 socket 路径与 FPM 日志路径，
-    # php.ini 用它定 PHP 自身的 error_log 目录（那个占位符是 K17 补的：原来
-    # error_log 写死不带版本，与第 3 步建出的带版本日志目录对不上）。
+    # %%PHP_VERSION%% 由 www.conf 用来定 socket 路径与错误日志路径；drop-in 里
+    # 没有占位符，那一路不传。
     PHPCONF__CHANGED=0
     os::defer maybe_restart_phpfpm "${unit}"
 
+    # **drop-in 不存在时要单独登记删除。** os::backup_file 对不存在的文件直接返回，
+    # 既不备份也不登记回滚项——首次执行时校验失败，回滚会还原 www.conf，却把刚
+    # 创建的这份留在原地，而它多半正是校验没过的原因。注册在 install_template
+    # 之前，回滚逆序回放才是「删掉它 → 再重启」。
+    [[ -f ${dropin} ]] \
+        || os::defer os::run --allow-fail '回滚：删除本次创建的 PHP drop-in' -- rm -f -- "${dropin}"
+
     # --backup 只在内容确实要变时才落副本（否则第二次执行会多出一份备份 = 有变更）。
     local -i changed=0
-    os::install_template --backup "${OS_TEMPLATE_DIR}/php.ini" "${ini}" "PHP_VERSION=${ver}"
+    # --mode 不能省：drop-in 是新建文件，template::_place 对不存在的目标不给 mode
+    # 就留 mktemp 的 0600，与 conf.d 里其余文件的 0644 不一致。
+    os::install_template --backup --mode 0644 "${OS_TEMPLATE_DIR}/${PHPCONF_DROPIN}" "${dropin}"
     if [[ ${OS_TEMPLATE_CHANGED} -eq 1 ]]; then
         changed=1
         PHPCONF__CHANGED=1
@@ -243,15 +262,12 @@ main() {
     fi
 
     # 6) 校验。只读，用 os::query（dry-run 下照常执行，但上面已经返回了）。
-    local fpm_bin="php-fpm${ver}"
-    os::require_cmd "${fpm_bin}"
-
     local -i vrc=0
     os::query --timeout 15 -- "${fpm_bin}" -t || vrc=$?
     if [[ ${vrc} -ne 0 ]]; then
         # 原始输出只进日志（调用栈与命令原文不上屏）
         os::debug "php-fpm -t 输出：${OS_RUN_OUTPUT}"
-        # 退出码 1 → 框架逆序回放回滚栈：还原两份配置，再重启服务回到更新前的状态
+        # 退出码 1 → 框架逆序回放回滚栈：撤销两份配置的改动，再重启服务回到更新前的状态
         os::die 1 "php-fpm 配置校验未通过（退出码 ${vrc}），正在回滚到更新前的配置"
     fi
     os::ok 'PHP-FPM 配置校验通过'
@@ -260,7 +276,7 @@ main() {
     os::systemd_restart "${unit}"
 
     os::ok "PHP ${ver} 配置已更新，${unit} 已重启"
-    os::output 0 version="${ver}" changed=yes php_ini="${ini}" pool_conf="${pool}"
+    os::output 0 version="${ver}" changed=yes php_conf="${dropin}" pool_conf="${pool}"
     return 0
 }
 
