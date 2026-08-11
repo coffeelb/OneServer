@@ -766,7 +766,7 @@ action_run() {
     fi
 
     local type name source db
-    local -i ok_n=0 fail_n=0 skip_n=0
+    local -i ok_n=0 fail_n=0
     while IFS=${BK_FS} read -r type name source db subtype; do
         [[ -n ${type} ]] || continue
         os::section "备份 ${type}:${name}"
@@ -810,7 +810,7 @@ action_run() {
     printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
     if [[ ${fail_n} -gt 0 ]]; then
         os::state_set backup last="${ts}" last_status=fail
-        os::output 1 ok="${ok_n}" failed="${fail_n}" skipped="${skip_n}"
+        os::output 1 ok="${ok_n}" failed="${fail_n}"
         os::die 1 "${fail_n} 个目标没有完全成功"
     fi
     os::state_set backup last="${ts}" last_status=ok \
@@ -818,7 +818,7 @@ action_run() {
     os::ok "备份完成：${ok_n} 个目标"
     os::info "归档在 ${OS_ARCHIVE_DIR}/<类型>/<名字>/，每份旁边有一份同名 .sha256"
     os::info '要用它恢复：oneserver restore    ·    定期确认归档没坏：oneserver backup verify'
-    os::output 0 ok="${ok_n}" failed=0 skipped="${skip_n}" changed=yes
+    os::output 0 ok="${ok_n}" failed=0 changed=yes
     return 0
 }
 

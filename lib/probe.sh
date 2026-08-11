@@ -1324,12 +1324,17 @@ probe::ufw_default_incoming() {
 probe::ufw_port_guarded() {
     local port=${1-}
     OS_PROBE_VALUE='no'
-    OS_PROBE_STATUS='ok'
-    [[ -n ${port} ]] || return 0
+    [[ -n ${port} ]] || {
+        OS_PROBE_STATUS='ok'
+        return 0
+    }
 
+    # 三个内层 probe 各自会覆写 OS_PROBE_STATUS，所以本函数的状态在**最后**
+    # 统一置位 —— 在开头置好会被内层调用覆盖掉，调用方读到的是 ufw_rules 的状态
     probe::ufw_active
     [[ ${OS_PROBE_VALUE} == yes ]] || {
         OS_PROBE_VALUE='no'
+        OS_PROBE_STATUS='ok'
         return 0
     }
 
@@ -1338,6 +1343,7 @@ probe::ufw_port_guarded() {
         deny | reject) ;;
         *)
             OS_PROBE_VALUE='no'
+            OS_PROBE_STATUS='ok'
             return 0
             ;;
     esac
@@ -1348,11 +1354,13 @@ probe::ufw_port_guarded() {
         # `[ 1] 3306/tcp    ALLOW IN    Anywhere` / `… (v6)  ALLOW IN  Anywhere (v6)`
         if [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/(tcp|udp))?([[:space:]]+\(v6\))?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+Anywhere ]]; then
             OS_PROBE_VALUE='no'
+            OS_PROBE_STATUS='ok'
             return 0
         fi
     done <<<"${rules}"
 
     OS_PROBE_VALUE='yes'
+    OS_PROBE_STATUS='ok'
     return 0
 }
 

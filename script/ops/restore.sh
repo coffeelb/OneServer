@@ -503,8 +503,10 @@ stash_current() {
 # 这条路上的归档与 external 那条同样不可信：`verify_archive` 校验的 `.sha256`
 # 与归档来自同一个远端（文件头第一节已经写明这一点），能改归档的人同样能改
 # 那个哈希。所以「本工具生成的归档」不是信任的理由。
+# 第二个参数是**「这棵树随后会不会被整体改权限」**，不是落点类型 —— 判据就是
+# 这个：会改的话硬链接才有害。self 与外部导入随后也各有一次递归 chown。
 rs_audit_tree() {
-    local root=${1}
+    local root=${1} will_chown=${2-no}
 
     # 1) 只允许普通文件、目录、符号链接。设备节点、FIFO、socket 一律拒绝 ——
     #    以 root 解包时它们会被真的创建出来。
@@ -516,13 +518,23 @@ rs_audit_tree() {
         return 1
     fi
 
-    # 2) 硬链接。一份归档里两个名字指向同一 inode，改其中一个的权限就改了另一个；
-    #    落到站点目录里更是把两处内容绑死。
+    # 2) 硬链接。**只对随后要跑递归 chmod/chown 的落点拒绝**（站点），
+    #    其余类型只告警。
+    #
+    #    判据是「这棵树接下来会不会被整体改权限」：会的话，一个硬链接意味着
+    #    改这个名字的权限就改了另一个名字的，而另一个名字可能是用户的资产；
+    #    不会的话，归档内部两个成员指向同一 inode 是**合法且常见**的
+    #    （Maildir、去重过的目录、构建产物），一律拒绝会把正常备份挡在门外。
+    #    tar 不会把硬链接指到解包根之外，所以「链到树外」这条不成立。
     os::query --timeout 600 -- find "${root}" -type f -links +1 -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
-        os::err '归档里含硬链接，拒绝恢复'
+        if [[ ${will_chown} == yes ]]; then
+            os::err '归档里含硬链接，拒绝恢复（这棵树落地时要整体改权限，硬链接会把改动带到另一个名字上）'
+            os::info "${OS_RUN_OUTPUT}"
+            return 1
+        fi
+        os::warn '归档里含硬链接，已按原样保留（本类型落地不改权限，不会波及其他路径）：'
         os::info "${OS_RUN_OUTPUT}"
-        return 1
     fi
 
     # 3) setuid / setgid。**只管普通文件**：目录上的 sticky 与 setgid 是合法用法
@@ -550,43 +562,89 @@ rs_audit_tree() {
     return 0
 }
 
-# rs_safe_extract <归档> <归档内顶层目录> <落点父目录> <输出变量>
+# rs_safe_extract <归档> <归档内顶层目录> <落点父目录> <site_type> <输出变量>
 #
 # 解到**落点旁边的隔离目录**（0700），审查通过之后再由调用方整个改名过去。
 #
 # 隔离目录放落点旁边而不是 os::tmpdir：后者在 /run 上，那是内存——一个几 GB
 # 的站点归档会把机器的内存吃光。同一个文件系统还让最后那一步是 rename 而不是
-# 跨设备复制。
+# 跨设备复制。**代价是恢复期间落点所在文件系统要能同时放下新旧两份**，
+# 空间不够时 tar 在这里失败，而此刻现有内容还一个字节都没动。
 #
-# `--no-same-owner --no-same-permissions`：归档里记的是**源机的**数字 uid 与
-# 权限位，本机的同号用户可能是另一个人。属主与权限由落点类型决定，不由归档
-# 决定 —— 原来这里直接沿用归档记的属主，一份被改过的归档因此能在站点目录里
-# 放下一个 root 属主、setuid 的可执行文件。
+# **属主与权限的处理按落点类型分档**：
+#
+#   wordpress  `--no-same-owner --no-same-permissions`，随后由 rs_normalize_owner
+#              按 deploy_wordpress 那套定死。站点的属主模型由本工具定义，
+#              归档里记的是源机的数字 uid，本机同号用户可能是另一个人。
+#   其他类型   **忠实还原归档记的属主与权限**。`path:` 目标是用户用
+#              `backup add` 注册的任意目录（证书、密钥、数据目录），
+#              「原样恢复」正是备份的意义 —— 拿站点的模型去套它，
+#              一次恢复就会把 0600 的私钥变成 0644 的 www-data 文件。
+#
+# 两条路都跑 rs_audit_tree：安全控制是审计（特殊文件、越界链接、特权位），
+# 不是抹掉属主。抹属主既挡不住已经被审计拦下的东西，又会毁掉合法数据。
 rs_safe_extract() {
-    local archive=${1} root=${2} parent=${3} out=${4}
+    local archive=${1} root=${2} parent=${3} site_type=${4} out=${5}
     local stage=''
     stage=$(mktemp -d "${parent}/.oneserver-restore.XXXXXXXX") || {
         os::err "无法在 ${parent} 下创建隔离目录"
         return 1
     }
     chmod 0700 "${stage}" 2>/dev/null || true
-    # 先登记再解 —— 解到一半失败时隔离目录里已经有半棵树了
+    # 先登记再解 —— 解到一半失败时隔离目录里已经有半棵树了。
+    # **成功路径由调用方显式清理**：os::defer 只在失败时回放。
     os::defer rm -rf -- "${stage}"
 
-    os::run '解出归档到隔离目录' -- \
-        tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${stage}" "${root}" \
-        || return 1
-    rs_audit_tree "${stage}" || return 1
+    # 有属主模型的类型才抹属主；也只有它们随后会被整体改权限
+    local -a tar_opts=()
+    local will_chown='no'
+    if [[ ${site_type} == wordpress ]]; then
+        tar_opts=(--no-same-owner --no-same-permissions)
+        will_chown='yes'
+    fi
+    if ! os::run '解出归档到隔离目录' -- \
+        tar -xzf "${archive}" ${tar_opts[@]+"${tar_opts[@]}"} -C "${stage}" "${root}"; then
+        # 空间不足是这一步最常见的失败，而 tar 的报错指向的是文件不是磁盘。
+        # 把可用空间说出来，省掉一轮「为什么解不开」的排查
+        probe::disk_free_kb "${parent}"
+        [[ -z ${OS_PROBE_VALUE} ]] \
+            || os::info "${parent} 所在文件系统可用 $((OS_PROBE_VALUE / 1024)) MB —— 恢复期间需要同时放下新旧两份"
+        return 1
+    fi
+    rs_audit_tree "${stage}" "${will_chown}" || return 1
 
     printf -v "${out}" '%s' "${stage}"
     return 0
 }
 
-# rs_normalize_owner <目录> <site|self>   属主与权限按落点类型定，不按归档
+# rs_drop_stage <隔离目录>   成功路径上收掉它
+#
+# os::defer 只在**失败**时回放（errors.sh 明写），所以成功之后没有任何人删它。
+# 不加这一步的现场是：每成功恢复一次，站点父目录里多一个空的
+# `.oneserver-restore.XXXXXXXX` —— 正是 os::tmpdir 注释里点名的那类
+# 「清理代码看上去一直在跑」。
+rs_drop_stage() {
+    local stage=${1}
+    [[ -n ${stage} && -d ${stage} ]] || return 0
+    os::run --allow-fail '清理隔离目录' -- rm -rf -- "${stage}" || true
+    return 0
+}
+
+# rs_normalize_owner <目录> <self|站点类型>   属主与权限按落点类型定
+#
+# **只有本工具定义过属主模型的类型才动它。** `path:` 目标是用户注册的任意
+# 目录，它的属主与权限就是备份的内容本身；把站点那套 www-data + 0755/0644
+# 套上去，恢复 /etc/letsencrypt 会把私钥从 0600 变成 0644 —— 那不是加固，
+# 是数据损坏。将来加 deploy_static / deploy_laravel 时在这里加分支即可，
+# 与 fixup_credentials 用的是同一条判据（site_type）。
 rs_normalize_owner() {
     local dir=${1} kind=${2}
     if [[ ${kind} == self ]]; then
         os::run '把解出的配置归还 root' -- chown -R root:root -- "${dir}" || return 1
+        return 0
+    fi
+    if [[ ${kind} != wordpress ]]; then
+        os::debug "落点类型 ${kind:-未声明} 没有属主模型，按归档原样保留属主与权限"
         return 0
     fi
     # 站点：与 deploy_wordpress 落地时同一套
@@ -749,11 +807,12 @@ restore_files() {
         # 先解到隔离目录并审查，通过之后才动现有的站点。反过来的话，一份坏的
         # 归档会先把用户的站点挪走，再在解包中途失败
         local stage=''
-        rs_safe_extract "${archive}" "${root}" "${parent}" stage || return 1
-        rs_normalize_owner "${stage}/${root}" site || return 1
+        rs_safe_extract "${archive}" "${root}" "${parent}" "${RS_MF_SITE_TYPE}" stage || return 1
+        rs_normalize_owner "${stage}/${root}" "${RS_MF_SITE_TYPE}" || return 1
         # 完整恢复：挪走的就是站点根本身，允许 live == root
         stash_current "${source}" "${root}-${ts}" "${source}" || return 1
         os::run '就位站点文件' -- mv -T -- "${stage}/${root}" "${source}" || return 1
+        rs_drop_stage "${stage}"
         os::ok "文件已恢复到 ${source}"
         return 0
     fi
@@ -774,12 +833,13 @@ restore_files() {
     # 成员名由归档给，两者拼出来的路径穿出去时挪走的就是别处的东西
     # 与完整恢复同一条纪律：先解到隔离目录、审查、定属主，再动现有的东西
     local stage=''
-    rs_safe_extract "${archive}" "${root}/${sub}" "${parent}" stage || return 1
-    rs_normalize_owner "${stage}/${root}/${sub}" site || return 1
+    rs_safe_extract "${archive}" "${root}/${sub}" "${parent}" "${RS_MF_SITE_TYPE}" stage || return 1
+    rs_normalize_owner "${stage}/${root}/${sub}" "${RS_MF_SITE_TYPE}" || return 1
 
     stash_current "${live}" "${root}-${sub//\//_}-${ts}" "${source}" || return 1
     os::run '创建子目录的父级' -- mkdir -p "${live%/*}"
     os::run '就位指定子路径' -- mv -T -- "${stage}/${root}/${sub}" "${live}" || return 1
+    rs_drop_stage "${stage}"
     os::ok "已恢复 ${live}"
     return 0
 }
@@ -798,7 +858,8 @@ restore_self() {
     os::run '解出 oneserver 配置' -- \
         tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${out}" "${root}" \
         || return 1
-    rs_audit_tree "${out}" || return 1
+    # 随后有一次 chown -R root:root，所以硬链接在这里是硬失败
+    rs_audit_tree "${out}" yes || return 1
     rs_normalize_owner "${out}" self || return 1
     # 凭据库解出来必须还是 0600 —— 上面那步把普通文件统一成了 root:root，
     # 权限则由归档记的 --no-same-permissions 归零成 umask，这里显式定死
@@ -1646,7 +1707,8 @@ import_files() {
     # ` -> ` 时会被截短或拆行，于是 ex_audit_members 看到的是一个安全的名字、
     # 而 tar 解出来的是完整的那个。这一遍看的是真实 inode（类型、链接数、
     # 特权位、链接目标），文本怎么写都绕不过去。
-    rs_audit_tree "${staging}" || return 1
+    # ex_apply_ownership 随后会整体改属主，硬链接同样是硬失败
+    rs_audit_tree "${staging}" yes || return 1
     ex_audit_symlinks "${staging}" || return 1
     ex_apply_ownership "${staging}" || return 1
     ex_keep_wp_config "${staging}" || return 1
