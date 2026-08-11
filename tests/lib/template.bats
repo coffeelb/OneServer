@@ -352,3 +352,44 @@ os_is_root() { [ "$(id -u)" -eq 0 ]; }
     [ ! -L "${dst}" ]
     [ "$(cat "${dst}")" = 'PAYLOAD' ]
 }
+
+# --- os::php_str ---------------------------------------------------
+#
+# 这是安全原语：wp-config.php 是 PHP 源码，值放进单引号字符串字面量。
+# 部署与恢复两条路径共用它，从前恢复那条一个字都没转义。
+
+@test "php_str: 单引号被转义，不能提前闭合 PHP 字符串" {
+    run os::php_str "a'b"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "a\'b" ]
+}
+
+@test "php_str: 反斜杠先于单引号处理，不产生二次转义" {
+    # 一个反斜杠进去，两个出来。期望值用拼接构造，避免在断言里数引号层数
+    local bs='\'
+    run os::php_str "a${bs}b"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "a${bs}${bs}b" ]
+}
+
+@test "php_str: 注入构造串的每个单引号都被转义" {
+    # 判据写成精确比对，不用模式匹配：`${var//pat/}` 里的反斜杠本身是转义符，
+    # 拿它去匹配「反斜杠加单引号」会静默匹配成别的东西 —— 断言假红过一次。
+    # 引号与反斜杠一律用变量拼，读的人不必在断言里数引号层数。
+    local bs='\' q="'"
+    run os::php_str "x${q}; system(\$_GET[${q}c${q}]); //"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "x${bs}${q}; system(\$_GET[${bs}${q}c${bs}${q}]); //" ]
+}
+
+@test "php_str: 不含特殊字符时是空操作（自动生成的 hex 密码走这条）" {
+    run os::php_str 'a1b2c3d4e5f6'
+    [ "${status}" -eq 0 ]
+    [ "${output}" = 'a1b2c3d4e5f6' ]
+}
+
+@test "php_str: 空值返回空串而不是报错" {
+    run os::php_str ''
+    [ "${status}" -eq 0 ]
+    [ "${output}" = '' ]
+}

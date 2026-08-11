@@ -80,6 +80,18 @@ OS_DEFAULT_LOCK_WAIT=30
 # fd 还没关）被当成「锁被长期占着」。
 OS_TRYLOCK_WAIT=1
 
+# --- 凭据 ---
+#
+# 凭据的最短长度。**前缀不是 `OS_DEFAULT_`，因此 conf 覆盖不到它**（同
+# OS_DRYRUN）—— 这不是一条口味参数，调低它等于重新打开下面这个洞。
+#
+# 它同时是三处的单一来源：`log::secret_add` 的登记下限、`os::run --secret-val`
+# 的拒绝下限、`os::ask_secret` / `os::secure_set` 的入口下限。三者必须同源：
+# 短于这个长度的值**登记不进脱敏表**（全局字符串替换会把日志正文打成马赛克，
+# 等于毁掉排查证据），而入口若不拦，一个 5 位的手输密码就会全程明文穿过
+# 日志、JSONL 与面板 —— 从前正是这么漏的：下限只写在出口，入口一个字都不查。
+OS_SECRET_MIN_LEN=6
+
 # --- 日志 ---
 
 OS_DEFAULT_LOG_LEVEL='info'

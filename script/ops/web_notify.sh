@@ -55,7 +55,8 @@ has_key() {
 main() {
     local token='' chat=''
     os::secure_load "${TOKEN_KEY}" token || return 0
-    os::secure_load "${CHAT_KEY}" chat || return 0
+    # 与写入侧对称：chat ID 不是秘密，不登记脱敏也不因为它短而告警
+    os::secure_load --not-secret "${CHAT_KEY}" chat || return 0
     [[ -r ${ALERT_FILE} ]] || return 0
 
     local old=${BASELINE} msg='' key _level text

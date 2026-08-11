@@ -469,9 +469,9 @@ main() {
     if [[ ${status} != running ]]; then
         os::err "容器 ${name} 建起来了，但现在的状态是 ${status:-未知}，下面是它最后几行日志："
         # 容器日志绝大多数走 stderr（nginx、postgres 都是），而 os::query
-        # 丢弃 stderr —— 不合流的话这里会打出一片空白，正好在最需要它的时候。
-        # `name` 已过 NAME_RE 校验（只有字母数字与 . _ -），插值不构成注入面
-        os::query --timeout 20 -- sh -c "docker logs --tail 20 ${name} 2>&1"
+        # 默认丢弃 stderr —— 不合流的话这里会打出一片空白，正好在最需要它的
+        # 时候。合流用框架现成的 `--want-stderr`，值经 argv 传入，不起内层 shell
+        os::query --timeout 20 --want-stderr -- docker logs --tail 20 "${name}"
         [[ -n ${OS_RUN_OUTPUT} ]] && os::info "${OS_RUN_OUTPUT}"
         # 退出码 1 会让框架回放回滚栈，撤掉这次刚创建的容器
         os::die 1 '容器没能跑起来，已自动撤销。照日志改完命令再来一次'

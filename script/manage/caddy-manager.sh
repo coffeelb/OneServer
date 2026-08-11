@@ -297,11 +297,15 @@ CADDY_DROP_FILES=()
 load_drop_dir() {
     CADDY_DROP_FILES=()
     [[ -d ${CADDY_DROP_DIR} ]] || return 0
-    # 走 sh -c 是为了 sort：目录里文件的顺序不能是随机的，否则「只有一个文件
-    # 就自动选中」与「多个文件让人挑」两条路给出的编号会来回变
-    os::query --timeout 10 -- sh -c \
-        "find '${CADDY_DROP_DIR}' -maxdepth 1 -type f \\( -name 'Caddyfile*' -o -name '*.caddy' -o -name '*.caddyfile' \\) -printf '%f\\n' 2>/dev/null | sort" \
+    # 顺序不能是随机的，否则「只有一个文件就自动选中」与「多个文件让人挑」
+    # 两条路给出的编号会来回变。排序经 `os::query --stdin` 把 find 的结果从
+    # stdin 送进 sort —— 不起内层 shell，目录名也就不进任何脚本文本
+    os::query --timeout 10 -- \
+        find "${CADDY_DROP_DIR}" -maxdepth 1 -type f \
+        \( -name 'Caddyfile*' -o -name '*.caddy' -o -name '*.caddyfile' \) -printf '%f\n' \
         || return 0
+    [[ -n ${OS_RUN_OUTPUT} ]] || return 0
+    os::query --timeout 10 --stdin "${OS_RUN_OUTPUT}" -- sort || return 0
     local one
     local IFS=$'\n'
     for one in ${OS_RUN_OUTPUT}; do
@@ -451,9 +455,18 @@ action_rollback() {
     local dir="${OS_BACKUP_DIR}/files"
     [[ -d ${dir} ]] || os::die 2 "没有备份目录 ${dir}"
 
+    # 「最新的那一份」= 按 mtime 倒序的第一条。用 find 带出时间戳再排序，
+    # 不起内层 shell —— 目录名不进任何脚本文本（同 restore.sh 的列举函数）。
+    # `%T@` 是纪元秒，数值排序，跨时区与跨年都不会像文件名那样排错
     os::query --timeout 10 -- \
-        sh -c "ls -1t '${dir}' 2>/dev/null | grep -F '_etc_caddy_Caddyfile' | head -n 1"
-    local newest=${OS_RUN_OUTPUT}
+        find "${dir}" -maxdepth 1 -type f -name '*_etc_caddy_Caddyfile*' -printf '%T@ %f\n' \
+        || true
+    local newest=''
+    if [[ -n ${OS_RUN_OUTPUT} ]] \
+        && os::query --timeout 10 --stdin "${OS_RUN_OUTPUT}" -- sort -rn; then
+        newest=${OS_RUN_OUTPUT%%$'\n'*}
+        newest=${newest#* }
+    fi
     [[ -n ${newest} ]] || os::die 2 "在 ${dir} 里没找到 Caddyfile 的备份"
 
     local src="${dir}/${newest}"

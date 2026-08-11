@@ -7,7 +7,7 @@
 # @group        web
 # @order        12
 # @privilege    root
-# @requires_lib >= 4.0
+# @requires_lib >= 4.3
 # @provides     wordpress:<name>
 # @args         [--name=<站点名>] [--path=<目录>] [--db-name=<库名>] [--db-user=<账号>] [--auto-password=<y|n>] [--writable-config=<y|n>] [--confirm-overwrite=<站点名>]
 # @description  部署多站点共存的 WordPress，自动建库配权限
@@ -76,21 +76,6 @@ db_ident_valid() {
     valid_name "${1//_/-}"
 }
 
-# php_str_escape <值>   转义反斜杠与单引号，安全放进 PHP 单引号字符串
-#
-# wp-config.php 是纯字符串替换渲染（lib/template.sh），不认目标语言，
-# 不会自动转义。DB_NAME/DB_USER/DB_HOST 都经 valid_name 之类的正则锁死，
-# 但密码有一条不受限的输入路径——os::ask_secret 手输时不做任何字符删改
-# （bootstrap.sh 明说了这一点）。不转义的话，含 `'` 的密码会破坏 PHP 语法
-# 让站点白屏；含 `'; system($_GET['c']); //'` 的密码会在 wp-config.php
-# 里落成可执行 PHP。自动生成的密码是 hex，本来就不含这两个字符，转义是空操作。
-php_str_escape() {
-    local v=${1-}
-    v=${v//\\/\\\\}
-    v=${v//\'/\\\'}
-    printf '%s' "${v}"
-}
-
 # 账号是否已存在（与 db_manager.sh 的 user_exists 同一条查询）
 user_exists() {
     local qu qh
@@ -157,7 +142,7 @@ build_extra() {
 
     out+="define( 'WP_REDIS_HOST', '127.0.0.1' );"$'\n'
     out+="define( 'WP_REDIS_PORT', 6379 );"$'\n'
-    out+="define( 'WP_REDIS_PASSWORD', '$(php_str_escape "${rpass}")' );"$'\n'
+    out+="define( 'WP_REDIS_PASSWORD', '$(os::php_str "${rpass}")' );"$'\n'
     # **前缀必须带站点名。** 两个站点共用一个 Valkey 而不分前缀，缓存键会互相
     # 覆盖 —— 表现是「另一个站点的内容串到这个站点上」，比没有缓存难查得多。
     # 这是 K7 那个错误在缓存层的第三次。
@@ -399,7 +384,7 @@ main() {
     os::install_template --mode 0640 "${OS_TEMPLATE_DIR}/${WP_TEMPLATE}" "${path}/wp-config.php" \
         "DB_NAME=${db_name}" \
         "DB_USER=${db_user}" \
-        "DB_PASSWORD=$(php_str_escape "${pass}")" \
+        "DB_PASSWORD=$(os::php_str "${pass}")" \
         "DB_HOST=localhost" \
         "DB_CHARSET=${OS_DEFAULT_DB_CHARSET}" \
         "DB_COLLATE=${OS_DEFAULT_DB_COLLATE}" \

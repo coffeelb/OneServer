@@ -128,9 +128,9 @@
 - `os::secure_key_valid <key>` —— 凭据 key 是否带命名空间，只给返回码
 - `os::secure_ns <组件标识>` —— 打印该组件的凭据命名空间前缀
 - `os::secure_get <key> [默认值]`
-- `os::secure_load <key> <变量名>` —— 读进变量，**并在当前 shell 登记脱敏**
+- `os::secure_load [--not-secret] <key> <变量名>` —— 读进变量，**并在当前 shell 登记脱敏**
 - `os::secure_require <key>...` —— 缺任何一个即以退出码 3 终止
-- `os::secure_set <key> <值>`
+- `os::secure_set [--not-secret] <key> <值>`
 - `os::secure_del <key>`
 - `os::secure_list` —— 打印全部 key（**不打印值**），供 doctor 与卸载使用
 
@@ -176,6 +176,7 @@
 
 ## `lib/template.sh` · L3 能力
 
+- `os::php_str <值>` —— 转义反斜杠与单引号，安全放进 PHP 单引号字符串
 - `os::install_template [--backup] [--mode <八进制>] <模板> <目标> [KEY=VALUE...]`
 - `os::install_file [--backup] [--quiet] [--mode <八进制>] <源文件> <目标>`
 - `os::write_public <文件名> <内容>` —— 把只读产物原子写入 public/，0644

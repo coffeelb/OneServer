@@ -304,7 +304,13 @@ os::replace_line() {
     fi
     # shellcheck disable=SC2034  # 理由：本模块的输出变量，由脚本层读（决定要不要重启服务）
     OS_REPLACE_CHANGED=1
-    log::write info "已改写 ${file}：${new}（匹配 ${hits} 行）" framework
+    # **不记 `${new}`。** 这个函数改的正是 `requirepass <口令>` /
+    # `define( 'DB_PASSWORD', '<口令>' )` 这类行，把整行写进日志等于把凭据写进
+    # $OS_LOG_JSONL —— 而 JSONL 会被采集器发布到 0755 的 $OS_PUBLIC_DIR 并由
+    # 只读面板对外提供。指望脱敏表兜住是不够的：它按值匹配，短于
+    # OS_SECRET_MIN_LEN 的值根本登记不进去，而存量凭据里就有这种值。
+    # 排查需要的是「哪个文件的哪条规则被改了几行」，不是新值本身。
+    log::write info "已改写 ${file}（匹配 ${hits} 行）" framework
     return 0
 }
 

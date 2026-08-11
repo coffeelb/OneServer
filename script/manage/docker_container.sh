@@ -393,10 +393,11 @@ action_logs() {
     require_container "${name}"
 
     # `docker logs` 把容器的 stderr 原样打在自己的 stderr 上，而 os::query
-    # 只取 stdout —— 不合流的话，nginx、postgres 这些把日志全写 stderr 的镜像
-    # 在这里会打出一片空白。`name` 已过 NAME_RE 校验（只有字母数字与 . _ -）、
-    # `lines` 已确认是纯数字，所以这两处插值不构成注入面
-    os::query --timeout 30 -- sh -c "docker logs --tail ${lines} ${name} 2>&1"
+    # 默认只取 stdout —— 不合流的话，nginx、postgres 这些把日志全写 stderr 的
+    # 镜像在这里会打出一片空白。合流用框架现成的 `--want-stderr`，不起内层
+    # shell：`sh -c "… ${name} 2>&1"` 靠的是「上游校验过这两个值」，而那是一条
+    # 会在重构中静默失效的保证；经 argv 传值则从结构上不存在这个问题。
+    os::query --timeout 30 --want-stderr -- docker logs --tail "${lines}" "${name}"
     os::section "${name} 最近 ${lines} 行"
     os::info "${OS_RUN_OUTPUT}"
     os::info "要实时跟：docker logs -f ${name}"

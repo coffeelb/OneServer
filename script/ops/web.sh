@@ -795,7 +795,10 @@ do_telegram() {
     os::ask --match '^-?[0-9]+$' --hint 'Telegram 数字 chat ID' --arg telegram-chat-id \
         '请输入 Telegram chat ID' chat
     os::secure_set 'web.telegram_token' "${token}" || os::die 1 '保存 Telegram Token 失败'
-    os::secure_set 'web.telegram_chat_id' "${chat}" || os::die 1 '保存 Telegram chat ID 失败'
+    # chat ID 是个数字标识，不是秘密。放凭据库只为跟 token 共用命名空间与 0600，
+    # 所以显式声明 --not-secret：既不受最短长度门槛约束，也不进脱敏表
+    # （纯数字进脱敏表会把日志里凑巧相同的数字一起打成 ***）
+    os::secure_set --not-secret 'web.telegram_chat_id' "${chat}" || os::die 1 '保存 Telegram chat ID 失败'
     os::ok 'Telegram 通知已配置；首次采集只建立基线，之后新增告警与恢复才会发送'
 
     # 判据是 fast 那个 timer：web_notify 挂在它的 service 上，slow 那条不发通知

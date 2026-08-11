@@ -7,7 +7,7 @@
 # @group        backup
 # @order        20
 # @privilege    root
-# @requires_lib >= 4.0
+# @requires_lib >= 4.3
 # @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--file=<归档文件名>] [--mode=<all|db|files>] [--only=<归档内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
 # @description  从归档或外部备份恢复，覆盖前自动留副本
 #
@@ -184,9 +184,17 @@ load_remote() {
 }
 
 # 本地有哪些「类型:名字」，一行一个
+# **值不拼进 `sh -c` 的脚本文本。** 这四个列举函数原来都是
+# `sh -c "… '${值}' … | grep | sort"`，而其中两个的值来自远端目录名 ——
+# 一个名为 `x'; <命令>; :'` 的远端目录能闭合那对单引号，于是「谁能往备份桶里
+# 写东西」就等于「谁能在恢复机上以 root 执行命令」。§10 禁 eval 是同一条思路，
+# 只是 `sh -c` 绕开了那条静态检查。
+#
+# 改法不是加转义，是让内层 shell 根本不存在：命令经 os::query 的 argv 直接执行，
+# 过滤与去重在 bash 里做，排序经 `os::query --stdin` 把数据从 stdin 送进 sort。
 local_targets() {
-    os::query --timeout 30 -- sh -c \
-        "find '${OS_ARCHIVE_DIR}' -mindepth 3 -maxdepth 3 -name '*.tar.gz' -printf '%h\n' 2>/dev/null | sort -u" \
+    os::query --timeout 30 -- \
+        find "${OS_ARCHIVE_DIR}" -mindepth 3 -maxdepth 3 -name '*.tar.gz' -printf '%h\n' \
         || return 1
     local line out=''
     while IFS= read -r line; do
@@ -194,15 +202,17 @@ local_targets() {
         line=${line#"${OS_ARCHIVE_DIR}/"}
         out+="${line/\//:}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
-    RS_ENTRIES=$(printf '%s' "${out}" | grep -v '^[[:space:]]*$' || true)
+    [[ -n ${out} ]] || return 1
+    os::query --timeout 10 --stdin "${out}" -- sort -u || return 1
+    RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
 
 remote_targets() {
     load_remote || return 1
     os::require_cmd rclone
-    os::query --timeout 300 -- sh -c \
-        "rclone lsf '${RS_REMOTE}:${RS_REMOTE_DIR}' --dirs-only -R --max-depth 2 2>/dev/null | sort" \
+    os::query --timeout 300 -- \
+        rclone lsf "${RS_REMOTE}:${RS_REMOTE_DIR}" --dirs-only -R --max-depth 2 \
         || return 1
     local line out=''
     while IFS= read -r line; do
@@ -211,16 +221,26 @@ remote_targets() {
         [[ ${line} == */* ]] || continue
         out+="${line/\//:}"$'\n'
     done <<<"${OS_RUN_OUTPUT}"
-    RS_ENTRIES=$(printf '%s' "${out}" | grep -v '^[[:space:]]*$' || true)
+    [[ -n ${out} ]] || return 1
+    os::query --timeout 10 --stdin "${out}" -- sort || return 1
+    RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
 
 # 某个目标下有哪些归档，新的在前
 local_archives() {
     local type=${1} name=${2}
-    os::query --timeout 30 -- sh -c \
-        "ls -1 '${OS_ARCHIVE_DIR}/${type}/${name}' 2>/dev/null | grep -E '^[0-9]{8}-[0-9]{6}\.tar\.gz$' | sort -r" \
+    os::query --timeout 30 -- \
+        find "${OS_ARCHIVE_DIR}/${type}/${name}" -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' \
         || return 1
+    local line out=''
+    while IFS= read -r line; do
+        # 文件名形态在 bash 里判，不外包给 grep —— 判据与 backup 侧的命名规则同源
+        [[ ${line} =~ ^[0-9]{8}-[0-9]{6}\.tar\.gz$ ]] || continue
+        out+="${line}"$'\n'
+    done <<<"${OS_RUN_OUTPUT}"
+    [[ -n ${out} ]] || return 1
+    os::query --timeout 10 --stdin "${out}" -- sort -r || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
@@ -247,9 +267,16 @@ archive_desc() {
 
 remote_archives() {
     local type=${1} name=${2}
-    os::query --timeout 300 -- sh -c \
-        "rclone lsf '${RS_REMOTE}:${RS_REMOTE_DIR}/${type}/${name}' --files-only 2>/dev/null | grep -E '^[0-9]{8}-[0-9]{6}\.tar\.gz$' | sort -r" \
+    os::query --timeout 300 -- \
+        rclone lsf "${RS_REMOTE}:${RS_REMOTE_DIR}/${type}/${name}" --files-only \
         || return 1
+    local line out=''
+    while IFS= read -r line; do
+        [[ ${line} =~ ^[0-9]{8}-[0-9]{6}\.tar\.gz$ ]] || continue
+        out+="${line}"$'\n'
+    done <<<"${OS_RUN_OUTPUT}"
+    [[ -n ${out} ]] || return 1
+    os::query --timeout 10 --stdin "${out}" -- sort -r || return 1
     RS_ENTRIES=${OS_RUN_OUTPUT}
     [[ -n ${RS_ENTRIES} ]]
 }
@@ -488,14 +515,20 @@ fixup_credentials() {
 
     os::section '校对站点配置里的凭据'
     os::record_change "改写 ${conf} 里的数据库与缓存凭据"
+    # **每个值都过 os::php_str。** wp-config.php 是 PHP 源码，这几行写的是
+    # 单引号字符串字面量；模板渲染与逐行替换都不认目标语言、不会自动转义。
+    # 部署路径一直是转义的，恢复路径从前一个字都没转 —— 同一个文件、同一条
+    # 威胁（含 `'` 的密码破坏语法让站点白屏，构造过的值落成可执行 PHP），
+    # 两条写入路径只有一条设防。db/db_user 经 manifest 校验、db_host 来自
+    # state，照样一起转：判据是「值要放进 PHP 字符串」，不是「这个值可信吗」。
     os::replace_line --backup "${conf}" "^define\( *'DB_NAME'" \
-        "define( 'DB_NAME', '${db}' );" || return 1
+        "define( 'DB_NAME', '$(os::php_str "${db}")' );" || return 1
     os::replace_line "${conf}" "^define\( *'DB_USER'" \
-        "define( 'DB_USER', '${db_user}' );" || return 1
+        "define( 'DB_USER', '$(os::php_str "${db_user}")' );" || return 1
     os::replace_line "${conf}" "^define\( *'DB_PASSWORD'" \
-        "define( 'DB_PASSWORD', '${pass}' );" || return 1
+        "define( 'DB_PASSWORD', '$(os::php_str "${pass}")' );" || return 1
     os::replace_line "${conf}" "^define\( *'DB_HOST'" \
-        "define( 'DB_HOST', '${db_host}' );" || return 1
+        "define( 'DB_HOST', '$(os::php_str "${db_host}")' );" || return 1
     os::ok "数据库凭据已对齐到本机当前值（库 ${db}，账号 ${db_user}@${db_host}）"
 
     # 缓存密码只在归档里本来就配了缓存时才校对 —— 没配过就不该凭空加上，
@@ -503,7 +536,7 @@ fixup_credentials() {
     local cpass=''
     if os::secure_load valkey.password cpass; then
         if os::replace_line "${conf}" "^define\( *'WP_REDIS_PASSWORD'" \
-            "define( 'WP_REDIS_PASSWORD', '${cpass}' );"; then
+            "define( 'WP_REDIS_PASSWORD', '$(os::php_str "${cpass}")' );"; then
             os::ok '缓存密码已对齐到本机当前值'
         fi
     fi

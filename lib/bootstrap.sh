@@ -621,6 +621,16 @@ os::ask_secret() {
             ui::line --err warn '不能为空，请重试'
             continue
         fi
+        # **长度下限与脱敏表同源**（OS_SECRET_MIN_LEN）。这不是口味上的密码
+        # 复杂度要求：短于这个长度的值 `log::secret_add` 会拒绝登记（全局替换
+        # 会把日志正文打成马赛克），于是它此后在日志、JSONL 与面板里全程明文。
+        # 从前下限只写在出口，入口一个字都不查——一个 5 位的手输密码因此可以
+        # 一路穿到一个本机全局可读的文件里。理由要说出来，否则用户只会以为
+        # 这里在无端刁难。
+        if [[ ${#__os_reply} -lt ${OS_SECRET_MIN_LEN} ]]; then
+            ui::line --err warn "至少 ${OS_SECRET_MIN_LEN} 位，请重试（短于此长度的凭据无法在日志里被可靠脱敏）"
+            continue
+        fi
         if [[ ${__os_want_confirm} -eq 1 ]]; then
             ui::prompt '再输入一次确认' "${OS_THEME_ASK_WIDTH}" '不回显'
             IFS= read -rs __os_again || true

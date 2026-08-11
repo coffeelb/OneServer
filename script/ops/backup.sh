@@ -585,8 +585,11 @@ push_remote() {
 
     os::query --timeout 300 -- rclone cat "${dest}/${base}.sha256" || return 1
     local remote_sum=${OS_RUN_OUTPUT%% *}
-    os::query --timeout 30 -- sh -c "awk '{print \$1}' '${file}.sha256'" || return 1
-    local local_sum=${OS_RUN_OUTPUT}
+    # 取第一列用 shell 自己的 read，不为一个字段起一层 shell —— 路径拼进
+    # `sh -c` 的脚本文本是一条不必要的注入面（同 restore.sh 的列举函数）
+    local local_sum=''
+    read -r local_sum _ <"${file}.sha256" 2>/dev/null || true
+    [[ -n ${local_sum} ]] || return 1
 
     if [[ -z ${remote_sum} || ${remote_sum} != "${local_sum}" ]]; then
         os::err "远端校验和与本地不一致（远端 ${remote_sum:-空}，本地 ${local_sum}）"
@@ -607,9 +610,19 @@ push_remote() {
 prune_local() {
     local type=${1} name=${2} keep=${3}
     local dir="${OS_ARCHIVE_DIR}/${type}/${name}"
-    os::query --timeout 30 -- sh -c \
-        "ls -1 '${dir}' 2>/dev/null | grep -E '^[0-9]{8}-[0-9]{6}\.tar\.gz$' | sort" \
+    # 目录名不拼进 `sh -c` 的脚本文本（同 restore.sh 的列举函数）：命令经 argv
+    # 执行，形态判定在 bash 里做，排序经 os::query --stdin 从 stdin 送进 sort。
+    # 「列不出东西就一律不删」这条语义不变 —— 见本节开头 K6 的教训。
+    os::query --timeout 30 -- \
+        find "${dir}" -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' \
         || return 0
+    local line filtered=''
+    while IFS= read -r line; do
+        [[ ${line} =~ ^[0-9]{8}-[0-9]{6}\.tar\.gz$ ]] || continue
+        filtered+="${line}"$'\n'
+    done <<<"${OS_RUN_OUTPUT}"
+    [[ -n ${filtered} ]] || return 0
+    os::query --timeout 10 --stdin "${filtered}" -- sort || return 0
     local list=${OS_RUN_OUTPUT}
     [[ -n ${list} ]] || return 0
 
@@ -1042,7 +1055,7 @@ action_verify() {
 
     os::section '校验本地归档'
     local -i checked=0 bad=0 nosum=0
-    local f dir base
+    local f want got
     while IFS= read -r f; do
         [[ -n ${f} ]] || continue
         if [[ ! -r ${f}.sha256 ]]; then
@@ -1051,10 +1064,16 @@ action_verify() {
             continue
         fi
         checked+=1
-        dir=${f%/*}
-        base=${f##*/}
-        # 校验和文件里存的是相对文件名（写它时先 cd 进了目录），所以这里也要 cd
-        if os::query --timeout 300 -- sh -c "cd '${dir}' && sha256sum -c '${base}.sha256'"; then
+        # 直接比哈希，不 `cd` 也不起内层 shell（同 restore.sh 的 verify_archive）。
+        # 「.sha256 里存的是相对文件名」原本是 cd 的理由，而只取第一列就不需要
+        # 它了 —— 顺带消掉「把路径拼进 `sh -c` 脚本文本」这条注入面。
+        want=''
+        read -r want _ <"${f}.sha256" 2>/dev/null || true
+        got=''
+        if os::query --timeout 300 -- sha256sum -- "${f}"; then
+            got=${OS_RUN_OUTPUT%% *}
+        fi
+        if [[ -n ${want} && ${want} == "${got}" ]]; then
             os::debug "校验通过：${f}"
         else
             os::err "校验不通过：${f#"${OS_ARCHIVE_DIR}/"}"

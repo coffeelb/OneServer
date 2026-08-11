@@ -69,10 +69,11 @@ os::exec__parse() {
     while [[ $# -gt 0 ]]; do
         case ${1} in
             --secret-val)
-                # 值长度 < 6 拒绝执行。短值全局替换会把整行命令
+                # 值长度 < OS_SECRET_MIN_LEN 拒绝执行。短值全局替换会把整行命令
                 # 打成马赛克，看上去脱敏了，实际是把证据也毁了。
-                if [[ ${#2} -lt 6 ]]; then
-                    ui::line error "--secret-val 的值长度小于 6，拒绝执行"
+                # 下限读 L0 常量，与 log::secret_add / os::ask_secret 同源。
+                if [[ ${#2} -lt ${OS_SECRET_MIN_LEN} ]]; then
+                    ui::line error "--secret-val 的值长度小于 ${OS_SECRET_MIN_LEN}，拒绝执行"
                     log::exit_code error "--secret-val 值过短" 2
                     return 2
                 fi
