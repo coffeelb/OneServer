@@ -600,38 +600,59 @@ rs_audit_tree() {
 #
 # 两条路都跑 rs_audit_tree：安全控制是审计（特殊文件、越界链接、特权位），
 # 不是抹掉属主。抹属主既挡不住已经被审计拦下的东西，又会毁掉合法数据。
+#
+# **本函数的局部变量一律带 `__rs_` 前缀**（同 install_caddy 的 `__cd_`、
+# db_manager 的 `__db_`）。回写走的是 `printf -v "${出参名}"`，而 `local` 在
+# bash 里是动态作用域：局部变量与出参同名时，写进去的是自己这个副本，
+# 函数一返回就没了 —— 调用方拿到空串，而且**没有任何报错**。
+# 这里踩过的形态是调用方写 `local stage=''; rs_safe_extract … stage`：
+# 隔离目录建了、归档解了，回到调用方 `${stage}` 仍是空，于是下一步
+# `chown -R -- "${stage}/${root}"` 作用在 `/test` 上，报「No such file」。
 rs_safe_extract() {
-    local archive=${1} root=${2} parent=${3} site_type=${4} out=${5}
-    local stage=''
-    stage=$(mktemp -d "${parent}/.oneserver-restore.XXXXXXXX") || {
-        os::err "无法在 ${parent} 下创建隔离目录"
+    local __rs_archive=${1} __rs_root=${2} __rs_parent=${3} __rs_type=${4} __rs_out=${5}
+    local __rs_stage=''
+    __rs_stage=$(mktemp -d "${__rs_parent}/.oneserver-restore.XXXXXXXX") || {
+        os::err "无法在 ${__rs_parent} 下创建隔离目录"
         return 1
     }
-    chmod 0700 "${stage}" 2>/dev/null || true
+    chmod 0700 "${__rs_stage}" 2>/dev/null || true
     # 先登记再解 —— 解到一半失败时隔离目录里已经有半棵树了。
     # **成功路径由调用方显式清理**：os::defer 只在失败时回放。
-    os::defer rm -rf -- "${stage}"
+    os::defer rm -rf -- "${__rs_stage}"
 
     # 有属主模型的类型才抹属主；也只有它们随后会被整体改权限
-    local -a tar_opts=()
-    local will_chown='no'
-    if [[ ${site_type} == wordpress ]]; then
-        tar_opts=(--no-same-owner --no-same-permissions)
-        will_chown='yes'
+    local -a __rs_tar_opts=()
+    local __rs_will_chown='no'
+    if [[ ${__rs_type} == wordpress ]]; then
+        __rs_tar_opts=(--no-same-owner --no-same-permissions)
+        __rs_will_chown='yes'
     fi
     if ! os::run '解出归档到隔离目录' -- \
-        tar -xzf "${archive}" ${tar_opts[@]+"${tar_opts[@]}"} -C "${stage}" "${root}"; then
+        tar -xzf "${__rs_archive}" ${__rs_tar_opts[@]+"${__rs_tar_opts[@]}"} -C "${__rs_stage}" "${__rs_root}"; then
         # 空间不足是这一步最常见的失败，而 tar 的报错指向的是文件不是磁盘。
         # 把可用空间说出来，省掉一轮「为什么解不开」的排查
-        probe::disk_free_kb "${parent}"
+        probe::disk_free_kb "${__rs_parent}"
         [[ -z ${OS_PROBE_VALUE} ]] \
-            || os::info "${parent} 所在文件系统可用 $((OS_PROBE_VALUE / 1024)) MB —— 恢复期间需要同时放下新旧两份"
+            || os::info "${__rs_parent} 所在文件系统可用 $((OS_PROBE_VALUE / 1024)) MB —— 恢复期间需要同时放下新旧两份"
         return 1
     fi
-    rs_audit_tree "${stage}" "${will_chown}" || return 1
+    rs_audit_tree "${__rs_stage}" "${__rs_will_chown}" || return 1
 
-    printf -v "${out}" '%s' "${stage}"
+    printf -v "${__rs_out}" '%s' "${__rs_stage}"
     return 0
+}
+
+# rs_stage_valid <隔离目录>   取回来的路径必须真的是个目录，否则立刻停
+#
+# 隔离目录是靠出参回写拿到的，而回写失败是**静默**的（变量同名、将来有人
+# 在中途 `return` 之前忘了写）。拿到空串之后，后面每一步都会把 `${stage}/…`
+# 当成绝对路径用：`chown -R -- /test`、`mv -T -- /test /var/www/test` ——
+# 目标机上恰好有那个目录时，这条路径会改掉甚至挪走一棵与恢复毫无关系的树。
+# 一次判空把这条路径整个堵死，代价是一行。
+rs_stage_valid() {
+    [[ -n ${1} && -d ${1} ]] && return 0
+    os::err '隔离目录没有取回来，已中止恢复（现有内容一个字节都没动）'
+    return 1
 }
 
 # rs_drop_stage <隔离目录>   成功路径上收掉它
@@ -825,6 +846,7 @@ restore_files() {
         # 归档会先把用户的站点挪走，再在解包中途失败
         local stage=''
         rs_safe_extract "${archive}" "${root}" "${parent}" "${RS_MF_SITE_TYPE}" stage || return 1
+        rs_stage_valid "${stage}" || return 1
         rs_normalize_owner "${stage}/${root}" "${RS_MF_SITE_TYPE}" || return 1
         # 完整恢复：挪走的就是站点根本身，允许 live == root
         stash_current "${source}" "${root}-${ts}" "${source}" || return 1
@@ -851,6 +873,7 @@ restore_files() {
     # 与完整恢复同一条纪律：先解到隔离目录、审查、定属主，再动现有的东西
     local stage=''
     rs_safe_extract "${archive}" "${root}/${sub}" "${parent}" "${RS_MF_SITE_TYPE}" stage || return 1
+    rs_stage_valid "${stage}" || return 1
     rs_normalize_owner "${stage}/${root}/${sub}" "${RS_MF_SITE_TYPE}" || return 1
 
     stash_current "${live}" "${root}-${sub//\//_}-${ts}" "${source}" || return 1
