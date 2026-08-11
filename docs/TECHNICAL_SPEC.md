@@ -279,6 +279,8 @@ Podman 是组件级例外：本项目以 Quadlet 托管容器，要求 Podman �
 - **执行与探测接口** —— `os::run` `os::run_out` `os::query`、全部 `probe::*`。它们把结果与状态放进单槽全局变量（§下段）。**谁调用谁就地读**：写在命令替换里，只有当那次调用的结果与状态**在同一个子 shell 内被读完**才成立（脚本自己的只读辅助函数常是这种形状），凡是父进程还要拿状态判断的，就必须在父进程里调。
 - **纯值接口** —— 字符串转换（`os::sql_ident` `os::sql_str`）、只读 getter 与列表枚举（`os::state_get` `os::state_list` `os::state_units`、`probe::describe`）。它们不在进程里留下任何东西，经 stdout 返回是 shell 的正常用法。
 
+**经显式输出变量交回结果的函数，其局部变量一律带 `__<模块缩写>_` 前缀** **[CI]**（`__os_`、`__cd_`、`__db_`、`__rs_`）。`local` 在 bash 里是动态作用域：局部变量与调用方传进来的那个名字撞上时，`printf -v "${出参}"` 写进去的是函数自己那个副本，函数一返回就没了——**调用方拿到空串，而且没有任何报错**。恢复流程踩过的形态是 `rs_safe_extract` 内部 `local stage`、调用方也写 `local stage` 并把 `stage` 当出参传进去：隔离目录建了、归档解了、审计过了，回到调用方 `${stage}` 仍是空串，于是下一步 `chown -R -- "${stage}/${root}"` 作用到了 `/test` 上。前缀不必全局唯一，只需与调用方可能用的名字不相交——**调用方传的是自己声明的小写变量名，带前缀的撞不上**。同一条约束下，`local IFS=' '` 这类大写的特殊变量不在其列。
+
 新增接口时先回答「这次调用在进程里留下了什么」。答不上来，说明它做的事太多。
 
 框架的结果变量都是**单槽、易失的返回通道**：`os::run` / `os::run_out` / `os::query` 会一起覆写 `OS_RUN_STATUS`、`OS_RUN_OUTPUT`、`OS_RUN_SKIPPED`；`probe::*` 会覆写 `OS_PROBE_STATUS`、`OS_PROBE_VALUE`、`OS_PROBE_SOURCE`；模板放置会覆写 `OS_TEMPLATE_CHANGED`；逐行替换会覆写 `OS_REPLACE_CHANGED`。调用方必须在紧邻调用后立刻读出或复制需要的值，禁止在两者之间插入另一次同类调用。新增接口优先使用显式输出变量，避免继续增加全局单槽。

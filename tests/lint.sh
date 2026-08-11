@@ -2,7 +2,7 @@
 #
 # OneServer 静态检查（F0.4）
 #
-# 二十项：
+# 二十一项：
 #   1. shellcheck 零告警；zsh 补全另用 `zsh -n` 查语法（同一件事，换个工具）
 #   2. shfmt 格式一致（规则见 .editorconfig，shfmt 原生读取它）
 #   3. disable 审计 —— 文件内每条必须带理由且总数守棘轮，
@@ -25,6 +25,7 @@
 #  18. 脚本文件头四件套齐全（script/** 全部，加根卸载器）
 #  19. 脚本元数据静态可判定的部分自洽
 #  20. 公开接口的测试覆盖不倒退（棘轮，只降不升）
+#  21. 出参函数的局部变量带 `__` 前缀，回写不被同名局部变量吃掉（棘轮，只降不升）
 #
 # 候选范围 = git 跟踪的全部 bash 脚本（`*.sh` `*.bash` `bin/*`），没有豁免名单。
 # 但**各项自有适用面**，写在各自的注释里：`desc`、脚本层前缀这类条款本就只约束
@@ -59,6 +60,11 @@ readonly MAX_CHANGELOG_COMMENTS=0
 # 「改 lib/ 必须补 bats 测试」这条规则在此之前没有执行者，欠账一度到 26。
 # 现在是 0：新增接口不带用例当场红。
 readonly MAX_UNCOVERED_API=0
+
+# 出参函数里没带 `__` 前缀的局部变量条数。棘轮，含义同上 —— 记的是「还欠多少」。
+# 这条规则本身是恢复流程那个 bug 换来的：`local` 与调用方传进来的变量名同名时，
+# 回写静默失效，调用方拿到空串（详见第 21 项）。
+readonly MAX_UNPREFIXED_OUTVAR_LOCALS=31
 
 # CI 钉死的 shellcheck 版本，**这里是唯一来源**（.github/workflows/lint.yml
 # 从本文件读它）。不同版本对同一份代码的判断不同（0.9 报 SC2015，0.11 不报），
@@ -824,10 +830,29 @@ printf 'eval 全项目 %d 处\n' "${eval_hits}"
 #     值经 argv 传入，从结构上不可能被当成语法
 # 后者是本仓库既有的正确写法（probe.sh 全部如此），不该被误伤。
 #
-# **这条检查不完备，故意的。** 它只看「`sh -c "` 与同一行下一个 `"` 之间」，
-# 因此跨行的脚本文本、以及先拼进变量再传给 `sh -c` 的写法都查不出来 ——
+# **先把续行接起来再查。** `sh -c \` 换行写的时候，脚本文本落在下一行上，
+# 单行 grep 什么也看不到 —— 备份脚本那句 `sh -c \` + `"cd '${dir}' && sha256sum …"`
+# 就是这么在检查眼皮底下待着的：形态与被禁的那种一模一样，只是多了个换行。
+# 接行之后行号取**起始行**，报出来的位置仍指向 `sh -c` 那一行。
+#
+# **这条检查仍不完备，故意的。** 先拼进变量再传给 `sh -c` 的写法查不出来 ——
 # 规范 §10 已经写明「动态构造或间接执行无法由文本检查完备证明，仍须代码审查」。
 # 能被静态发现的那一类不该因为存在查不出的那一类就放着不查。
+
+# logical_lines <文件>   行尾反斜杠续行接成一条逻辑行，输出「起始行号:内容」
+logical_lines() {
+    awk '{
+        line = $0
+        start = FNR
+        while (line ~ /\\$/) {
+            if ((getline nxt) <= 0) { break }
+            sub(/\\$/, "", line)
+            sub(/^[[:space:]]+/, " ", nxt)
+            line = line nxt
+        }
+        printf "%d:%s\n", start, line
+    }' "${1}"
+}
 
 shc_hits=0
 for f in "${files[@]}"; do
@@ -839,7 +864,8 @@ for f in "${files[@]}"; do
         [[ -n "${hit}" ]] || continue
         shc_hits=$((shc_hits + 1))
         report_fail "${f}:${hit%%:*} 把 \${…} 拼进了 sh -c 的脚本文本 —— 值要经位置参数传入（sh -c '… \"\$1\" …' sh \"\${值}\"）"
-    done < <(grep -nE '\b(sh|bash)[[:space:]]+-c[[:space:]]+"[^"]*\$\{' "${f}" \
+    done < <(logical_lines "${f}" \
+        | grep -E '\b(sh|bash)[[:space:]]+-c[[:space:]]+"[^"]*\$\{' \
         | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 done
 printf 'sh -c 拼接 %d 处\n' "${shc_hits}"
@@ -1120,6 +1146,60 @@ else
     [[ "${uncovered}" -le "${MAX_UNCOVERED_API}" ]] \
         || report_fail "未覆盖接口超过阈值 ${MAX_UNCOVERED_API} —— 新增接口要带 bats 用例"
 fi
+
+# --- 21. 出参函数的局部变量前缀 ---
+#
+# 规范 §10：结果经**显式输出变量**交回的函数，它的局部变量一律带 `__<模块>_`
+# 前缀。`local` 在 bash 里是动态作用域 —— 局部变量与调用方传进来的那个名字
+# 撞上时，`printf -v "${出参}"` 写进去的是函数自己那个副本，函数一返回就没了。
+# 调用方拿到空串，而且**没有任何报错**。
+#
+# 恢复流程踩过的形态：`rs_safe_extract` 内部 `local stage`，调用方也叫
+# `stage`。隔离目录建了、归档解了、审计过了，回到调用方 `${stage}` 仍是空串，
+# 于是下一步 `chown -R -- "${stage}/${root}"` 作用在了 `/test` 上。落在一台
+# 恰好有那个目录的机器上，改的就是一棵与恢复毫无关系的树。
+#
+# 判据取可判定的那一半：函数体里出现 `printf -v "${…}"`，它的每个 `local`
+# 就必须以 `__` 开头。大写开头的（`local IFS=' '`）不计 —— 调用方传的是自己
+# 声明的小写变量名，与它撞不上。
+#
+# 棘轮，含义同第 3 / 10 / 20 项：记的是「还欠多少」，不是「允许多少」。
+# 存量分布在十几个函数里，改名要连同整个函数体一起动，值不值得一个个看；
+# 新代码想加当场红。
+section "出参函数的局部变量"
+outvar_hits=0
+for f in "${files[@]}"; do
+    case "${f}" in
+        bin/* | lib/* | script/*) ;;
+        *) continue ;;
+    esac
+    while IFS= read -r hit; do
+        [[ -n "${hit}" ]] || continue
+        outvar_hits=$((outvar_hits + 1))
+        if [[ "${outvar_hits}" -gt "${MAX_UNPREFIXED_OUTVAR_LOCALS}" ]]; then
+            report_fail "${f}:${hit} 出参函数的局部变量要带 __ 前缀 —— 与调用方传进来的名字同名时，回写会写进自己那个副本，调用方拿到空串且没有任何报错"
+        fi
+    done < <(awk '
+        /^[A-Za-z_][A-Za-z_0-9:]*\(\)[[:space:]]*\{/ {
+            fn = $0; sub(/\(\).*/, "", fn)
+            n = 0; body = ""; on = 1; next
+        }
+        on { body = body "\n" $0; L[++n] = $0; N[n] = FNR }
+        on && /^\}$/ {
+            if (body ~ /printf -v "\$\{/) {
+                for (i = 1; i <= n; i++) {
+                    if (L[i] ~ /^[[:space:]]*local[[:space:]]+(-[aiAr]+[[:space:]]+)?[a-z]/) {
+                        printf "%d %s() %s\n", N[i], fn, L[i]
+                    }
+                }
+            }
+            on = 0
+        }
+    ' "${f}" || true)
+done
+printf '未加前缀的局部变量 %d 处（阈值 %d）\n' "${outvar_hits}" "${MAX_UNPREFIXED_OUTVAR_LOCALS}"
+[[ "${outvar_hits}" -le "${MAX_UNPREFIXED_OUTVAR_LOCALS}" ]] \
+    || report_fail "出参函数的未加前缀局部变量超过阈值 ${MAX_UNPREFIXED_OUTVAR_LOCALS}"
 
 # --- 结论 ---
 
