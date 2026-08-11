@@ -1287,6 +1287,59 @@ probe::ufw_rules() {
     probe::_probe 'ufw.rules' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw status numbered
 }
 
+# probe::container_subnets   两个引擎所有容器网络的网段，一行一个，已去重
+#
+# **给「让容器连上宿主的服务」用**：容器访问宿主的网关 IP 走的是 INPUT 链，
+# 受 ufw 管（实测：未放行时 docker 与 podman 都连不通，加一条对应网段的
+# allow 之后都通）。所以要放行的是**这些网段**，不是拍一个私有段。
+#
+# 旧脚本写死 `10.0.0.0/8`，那是整个私有 A 段：实测 podman 默认只用
+# `10.88.0.0/16`（是它的六万五千分之一），而 docker 默认的 `172.17.0.0/16`
+# **根本不在那个范围里** —— 那条规则既开得过宽，又对 docker 完全无效。
+#
+# 两个引擎的 inspect 字段名不同（docker 是 `.IPAM.Config[].Subnet`，
+# podman 是 `.Subnets[].Subnet`），所以分别取。脚本文本是静态单引号，
+# 值经内层 shell 自己的变量传递，不拼接。
+#
+# 超时给得比默认宽：网络多的机器上要逐个 inspect。
+probe::container_subnets() {
+    # 两个引擎走同一段循环，只有 inspect 的字段名不同（docker 是
+    # `.IPAM.Config[].Subnet`，podman 是 `.Subnets[].Subnet`）。
+    #
+    # 引擎名走变量而不是各写一段：**probe.sh 不许出现行首直接调外部命令**
+    # （tests/lib/probe.bats 有一条元测试守着，它认的就是「行首是 podman/df/ss…」），
+    # 而两段复制粘贴的代码本来也该合成一段。
+    # 内层变量写成 `\$x`（双引号 + 转义），与本文件其余各处一致 ——
+    # 单引号写法会触发 SC2016，为它加 disable 就把棘轮顶上去了。
+    probe::_probe 'container.subnets' "${OS_DEFAULT_SCAN_TIMEOUT}" -- sh -c "
+        for eng in docker podman; do
+            command -v \"\$eng\" >/dev/null 2>&1 || continue
+            case \"\$eng\" in
+                docker) fmt='{{range .IPAM.Config}}{{.Subnet}}{{println}}{{end}}' ;;
+                *) fmt='{{range .Subnets}}{{.Subnet}}{{println}}{{end}}' ;;
+            esac
+            \"\$eng\" network ls -q 2>/dev/null | while read -r net; do
+                \"\$eng\" network inspect \"\$net\" --format \"\$fmt\" 2>/dev/null
+            done
+        done
+    "
+
+    # **按空白切分，不按行。** 非 root 走缓存时，snapshot_flush 已经把换行压成
+    # 空格（本文件与 probe.bats 都写过这个坑）——按行切的话，缓存路径下多个网段
+    # 会被糊成一个词，正则一条都匹配不上，而实时路径下看起来完全正常。
+    # host / none 这类网络没有网段，会给出空词，正则自然滤掉。
+    local tok out='' seen=''
+    local IFS=$' \t\n'
+    for tok in ${OS_PROBE_VALUE}; do
+        [[ ${tok} =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]] || continue
+        [[ ${seen} == *"|${tok}|"* ]] && continue
+        seen+="|${tok}|"
+        out+="${tok}"$'\n'
+    done
+    OS_PROBE_VALUE=${out%$'\n'}
+    return 0
+}
+
 # probe::ufw_default_incoming   ufw 的默认入站策略，值为 deny / reject / allow / unknown
 #
 # **`ufw status` 不带 verbose 是看不到它的**，而它恰恰是「防火墙到底挡不挡得住

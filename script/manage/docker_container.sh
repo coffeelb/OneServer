@@ -73,8 +73,18 @@ readonly WATCHTOWER_NAME='oneserver-watchtower'
 # 固定的是**多架构 index digest**（OCI image index），不是某一架构的 manifest
 # digest：前者在 amd64 与 arm64 上都能解析到对应的那一份，后者换个架构就拉不动。
 #
-# 这提供的是**完整性**，不是发布者真实性 —— 它保证「装上去的还是审过的那一版」，
-# 不保证那一版可信。digest 的升级是人工步骤，见 docs/OPERATIONS.md。
+# **它提供的是可复现性，不是真实性。** 说清楚买到了什么、没买到什么：
+#
+#   买到  所有机器装到同一份字节；这份字节此后不会在无人知晓时被换掉，
+#         攻破发布者账号的人也改不了已经固定的引用（tag 劫持防不住的正是这个）
+#   没买到 这份字节本身可不可信。它是某一刻的 `:latest`，没有签名可验，
+#         也没有人逐行审过它 —— 换 digest 时的信任模型与用浮动 tag 完全一样，
+#         区别只在频率，以及有没有一个可以插入人工审查的时机
+#
+# 这个容器挂着 Docker Socket，能力等价于宿主 root，而镜像来自个人命名空间的
+# fork（源码见镜像标签 org.opencontainers.image.source）。固定 digest 缩小不了
+# 这个爆炸半径，只是让"装的是哪一份"变成确定的。
+# digest 的升级是人工步骤，见 docs/OPERATIONS.md。
 readonly WATCHTOWER_REPO='docker.io/nickfedor/watchtower'
 readonly WATCHTOWER_DIGEST='sha256:bee77696862e09521c49e5ab4904a4179accece6d561a2ef334c7589b84a2438'
 readonly WATCHTOWER_IMAGE="${WATCHTOWER_REPO}@${WATCHTOWER_DIGEST}"
@@ -492,6 +502,10 @@ action_autoupdate() {
         return 0
     fi
     os::ok "容器 ${name} 已${verb}自动更新名单"
+    # 加入名单的人下一步会被引导去启用更新器，代价要在他点头之前说，
+    # 不能等到那一步才第一次听见（同 docker_create 建容器时那一问）
+    [[ ${want} == in ]] \
+        && os::info '提醒：执行更新的更新器容器要挂载 /var/run/docker.sock —— 那等价于宿主 root 权限'
 
     # 名单是更新器的启动参数，服务开着就得重建它，新名单才算数；
     # 服务没开就只改名单，等开启时自然带上
@@ -569,6 +583,11 @@ action_au_now() {
 
     # 用完即弃的一次性实例。实测它不会碰常驻的那个，所以服务开着也能随时手动
     # 跑一轮；服务没开时这条同样可用 —— 只想手动更新、不想要定时的人正需要它
+    # **socket 那件事在这里也要说。** 这条路不需要先开服务，它自己 `docker run`
+    # 一个一次性更新器 —— 一样挂 Docker Socket、一样等价宿主 root。从前只警告
+    # 了「业务容器会短暂中断」，于是「我没开自动更新服务」的人会以为自己没暴露过，
+    # 而实际上点一次这里就已经让那个镜像以 root 跑过一轮了。
+    os::warn "更新器容器会挂载 /var/run/docker.sock —— 它在宿主上的能力等价于 root；本次是用完即弃的一次性实例，不需要开启服务"
     os::warn "要检查的容器：${list}。有新镜像的会被拉取并重建，期间这些容器会短暂中断"
     os::record_change "对名单里的容器执行了一次自动更新检查"
     os::run_out '执行一次自动更新检查' -- docker run --rm \

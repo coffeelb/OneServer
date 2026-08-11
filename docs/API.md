@@ -121,6 +121,7 @@
 - `probe::auto_upgrades` —— APT::Periodic::Unattended-Upgrade 的生效值
 - `probe::reboot_required` —— 是否需要重启，值为 yes / no
 - `probe::ufw_rules` —— ufw 带编号的规则列表原文
+- `probe::container_subnets` —— 两个引擎所有容器网络的网段，一行一个，已去重
 - `probe::ufw_default_incoming` —— ufw 的默认入站策略，值为 deny / reject / allow / unknown
 - `probe::ufw_port_guarded <端口>` —— 该端口是否真的被防火墙挡着，值为 yes / no
 - `probe::ufw_active` —— ufw 是否已启用，值为 yes / no

@@ -85,7 +85,9 @@ podman image inspect docker.io/nickfedor/watchtower:latest --format '{{index .Re
 
 把 `@sha256:` 后面那一段填进 `WATCHTOWER_DIGEST`。**固定的必须是 index digest，不是某一架构的 manifest digest**——后者换个架构就拉不动。
 
-digest 只提供完整性，不提供发布者真实性：它保证装上去的还是你审过的那一版，不保证那一版可信。换 digest 前请自行确认新版本的来源。
+digest 提供的是**可复现性**，不是真实性：它保证所有机器装到同一份字节、且此后不会被无声换掉，但**不保证那份字节可信**——换 digest 时的信任模型和用浮动 tag 一样，区别只在频率，以及这里有一个可以插入人工审查的时机。真正的审查得你来做（看 release notes、看 commit、对比仓库公布的摘要）。
+
+这个容器挂着 Docker Socket，能力等价于宿主 root，镜像来自个人命名空间的 fork。固定 digest 缩小不了这个爆炸半径。
 
 ## 7. 升级处理
 

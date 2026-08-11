@@ -1103,3 +1103,29 @@ os_fake_snapshot3() {
     probe::ufw_port_guarded 3306
     [ "${OS_PROBE_VALUE}" = 'yes' ]
 }
+
+# --- 容器网段 ------------------------------------------------------
+#
+# 「允许容器访问数据库」按这个结果放行。旧脚本写死 10.0.0.0/8：那是整个私有
+# A 段，而 podman 实际只用 10.88.0.0/16、docker 默认的 172.17.0.0/16 根本
+# 不在里面 —— 既开得过宽又对 docker 无效。所以这里必须是探测出来的真值。
+
+@test "container_subnets: 只留 CIDR 行并去重" {
+    os_fake_snapshot 'container.subnets' '172.17.0.0/16 172.17.0.0/16 10.88.0.0/16'
+    probe::container_subnets
+    [[ ${OS_PROBE_VALUE} == *'172.17.0.0/16'* ]]
+    [[ ${OS_PROBE_VALUE} == *'10.88.0.0/16'* ]]
+    [ "$(printf '%s\n' "${OS_PROBE_VALUE}" | grep -c '172.17.0.0/16')" -eq 1 ]
+}
+
+@test "container_subnets: 非 CIDR 的噪音被丢掉（host/none 网络给空行）" {
+    os_fake_snapshot 'container.subnets' 'bridge  172.17.0.0/16'
+    probe::container_subnets
+    [ "${OS_PROBE_VALUE}" = '172.17.0.0/16' ]
+}
+
+@test "container_subnets: 一个网络都没有时返回空" {
+    os_fake_snapshot 'container.subnets' ''
+    probe::container_subnets
+    [ -z "${OS_PROBE_VALUE}" ]
+}

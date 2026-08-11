@@ -8,9 +8,9 @@
 # @order        10
 # @requires     mariadb
 # @privilege    root
-# @requires_lib >= 1.26
+# @requires_lib >= 4.6
 # @provides     db:<name>
-# @args         [--action=<list|create|delete|backup|restore>] [--name=<库名>] [--user=<用户名>] [--allow-any-host=<y|n>] [--auto-password=<y|n>] [--file=<备份文件>] [--confirm-drop=<库名>]
+# @args         [--action=<list|create|delete|backup|restore|allow-containers>] [--name=<库名>] [--user=<用户名>] [--allow-any-host=<y|n>] [--auto-password=<y|n>] [--file=<备份文件>] [--confirm-drop=<库名>] [--allow-containers=<y|n>]
 # @description  创建、删除、备份、恢复数据库与关联账号
 #
 
@@ -61,6 +61,15 @@ source /opt/oneserver/lib/bootstrap.sh
 # 想删库只有一条路：`oneserver mariadb delete`，那里走 `os::destroy_confirm`。
 
 readonly DB_DUMP_DIR="${OS_BACKUP_DIR}/db"
+
+# 「允许容器访问」要动的两样东西。**与 install_mariadb.sh 是同两个常量**——
+# 那边装的时候定监听地址，这边是装完之后按需放开给容器，改的是同一个文件、
+# 同一个端口。
+readonly MARIADB_CONF='/etc/mysql/mariadb.conf.d/50-server.cnf'
+readonly MARIADB_UNIT='mariadb.service'
+readonly MARIADB_PORT='3306'
+# ufw 的措辞随 locale 变，而下面要按文本判定放行了没有（同 web.sh / ufw_manager）
+readonly UFW_ENV='LC_ALL=C'
 
 # 函数之间的返回通道。**不用 `printf` + `$( )`** —— os::info / os::ok / os::run
 # 的提示都默认打到 stdout，会被一起吃进变量（D135 就是这么栽的）。
@@ -507,6 +516,105 @@ action_restore() {
 
 # ------------------------------------------------------------------
 
+# ==================================================================
+# 允许容器访问数据库
+# ==================================================================
+#
+# 解决的是一件很具体的事：容器里的应用要连宿主的 MariaDB，而宿主默认只监听
+# 127.0.0.1、防火墙也默认拒绝，于是每建一个容器都要单独跑一趟放行。
+#
+# **放行的是探测出来的真实容器网段**，不是拍一个私有段。旧脚本写死
+# `10.0.0.0/8`：实测 podman 默认只用 `10.88.0.0/16`，而 docker 默认的
+# `172.17.0.0/16` 根本不在那个范围里 —— 开得过宽，而且对 docker 无效。
+#
+# **幂等且可刷新**：以后新建了容器网络（`172.18.0.0/16` …），重跑一次这个动作
+# 就把缺的补上，已有的不动。这正是「容器一多就记不清哪个网段放行过」的解法。
+#
+# **不走「只绑网桥网关」那条路**（更安全但不实用）：每个容器网络有自己的网关，
+# 新建一个网络就要多绑一个地址并重启数据库，容器一多就是持续的维护负担。
+# 这里统一绑 0.0.0.0，边界交给防火墙 —— 代价是数据库在公网网卡上也监听着，
+# 所以下面对 UFW 的要求是硬的：没有真正挡得住的防火墙就不动手。
+
+# 这个网段放行过没有。按「端口 + 来源」认，不做子串匹配
+db_subnet_allowed() {
+    local subnet=${1} line
+    probe::ufw_rules
+    while IFS= read -r line; do
+        [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${MARIADB_PORT}(/tcp)?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+${subnet//./\\.}([[:space:]]|$) ]] \
+            && return 0
+    done <<<"${OS_PROBE_VALUE}"
+    return 1
+}
+
+action_allow_containers() {
+    probe::container_subnets
+    local subnets=${OS_PROBE_VALUE}
+    if [[ -z ${subnets} ]]; then
+        os::info '没有探测到任何容器网络 —— docker 与 podman 都没装，或者都没有带网段的网络'
+        os::info '装了容器引擎、建过容器之后再回来跑这一步'
+        os::output 0 subnets='' changed=no
+        return 0
+    fi
+
+    local -a nets=()
+    mapfile -t nets <<<"${subnets}"
+
+    os::section '将要放行的容器网段'
+    local n
+    local -a cells=()
+    for n in "${nets[@]}"; do
+        cells+=("${n}" "$(db_subnet_allowed "${n}" && printf '已放行' || printf '本次新增')")
+    done
+    os::table '网段' '状态' -- "${cells[@]}"
+    os::info "放行之后，这些网段里的容器可以连宿主的 ${MARIADB_PORT} 端口；其余来源仍被防火墙拒绝"
+
+    # §15：放宽访问来源必须在同一步落实补偿控制，落实不了就拒绝执行。
+    # 这里的补偿控制有两条 —— 放行范围只到实际网段（不是 Anywhere），
+    # 以及要求防火墙本身真的挡得住。后者用与 install_mariadb 同一条判据。
+    probe::ufw_active
+    [[ ${OS_PROBE_VALUE} == yes ]] \
+        || os::die 3 '防火墙没启用，放行无从谈起（而数据库会因此对全网监听）。先执行 oneserver firewall enable'
+    probe::ufw_default_incoming
+    case ${OS_PROBE_VALUE} in
+        deny | reject) ;;
+        *) os::die 3 "防火墙默认入站是 ${OS_PROBE_VALUE}，此时「只放行容器网段」没有意义 —— 没被规则覆盖的来源同样进得来。先把默认入站改成 deny" ;;
+    esac
+
+    os::warn "数据库的监听地址会改成 0.0.0.0（容器要够得着），此后挡在外面的只有防火墙"
+    os::confirm --arg allow-containers '确认放行以上网段？' n \
+        || os::die 130 '已取消，未做任何改动'
+
+    local -i added=0
+    for n in "${nets[@]}"; do
+        db_subnet_allowed "${n}" && continue
+        os::record_change "在 UFW 里放行 ${MARIADB_PORT}/tcp，来源 ${n}"
+        os::run --env "${UFW_ENV}" '放行一个容器网段' -- \
+            ufw allow from "${n}" to any port "${MARIADB_PORT}" proto tcp || return 1
+        added+=1
+    done
+    if ((added > 0)); then
+        os::run --env "${UFW_ENV}" '重载 UFW 使规则生效' -- ufw reload || return 1
+    fi
+
+    # 监听地址：容器连的是网桥网关，只听 127.0.0.1 的话规则放行了也连不上
+    os::replace_line --backup "${MARIADB_CONF}" \
+        '^[[:space:]]*#?[[:space:]]*bind-address[[:space:]]*=' 'bind-address            = 0.0.0.0' \
+        || os::die 1 "${MARIADB_CONF} 里找不到 bind-address 行"
+    if [[ ${OS_REPLACE_CHANGED} -eq 1 ]]; then
+        os::record_change '把 MariaDB 的监听地址改成 0.0.0.0'
+        os::systemd_restart "${MARIADB_UNIT}" || os::die 1 'MariaDB 重启失败，监听地址可能未生效'
+    fi
+
+    # 记进 state，下次刷新时看得出上次放行到哪
+    local IFS=' '
+    os::state_set mariadb container_access="${nets[*]}" || true
+
+    os::ok "已放行 ${added} 个新网段（共 ${#nets[@]} 个）；以后新建了容器网络，重跑这一步即可补上"
+    os::info "容器里连数据库用宿主网关地址，例如 docker 默认是 172.17.0.1、podman 默认是 10.88.0.1"
+    os::output 0 subnets="${nets[*]}" added="${added}" changed="$((added > 0)) "
+    return 0
+}
+
 main() {
     # 装没装、跑没跑一律经 probe（D93）。
     #
@@ -530,7 +638,7 @@ main() {
 
     os::action_menu --overview action_list --arg action '操作' dispatch \
         'create=新建数据库与账号' 'delete=删除数据库' \
-        'backup=备份数据库' 'restore=从备份恢复'
+        'backup=备份数据库' 'restore=从备份恢复' 'allow-containers=允许容器访问数据库'
 }
 
 dispatch() {
@@ -540,7 +648,8 @@ dispatch() {
         delete) action_delete ;;
         backup) action_backup ;;
         restore) action_restore ;;
-        *) os::die 2 "未知操作「${1}」，可用：list create delete backup restore" ;;
+        allow-containers) action_allow_containers ;;
+        *) os::die 2 "未知操作「${1}」，可用：list create delete backup restore allow-containers" ;;
     esac
 }
 
