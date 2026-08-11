@@ -18,6 +18,11 @@ ExecStart=/opt/oneserver/bin/oneserver backup run --non-interactive
 # 备份是 IO 密集的，别跟正在服务的站点抢磁盘
 IOSchedulingClass=idle
 Nice=10
+# 备份要读全盘、写 /var/backups、还要调 mysqldump 与 rclone，能收的沙箱选项
+# 很少 —— 但这一条是免费的：它只禁止**提权**，不限制任何读写路径。
+# 一个以 root 跑几小时、还会执行 rclone 这类外部二进制的 unit，
+# 不该让其中任何一环再拿到比它自己更高的权限。
+NoNewPrivileges=yes
 # 一次备份可能要传几个 G 到远端，别让 systemd 在中途掐掉它
 TimeoutStartSec=infinity
 

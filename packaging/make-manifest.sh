@@ -54,9 +54,21 @@ commit=$(git rev-parse HEAD 2>/dev/null) || die '取不到 HEAD 的 commit'
 # 工作区脏的时候照样生成，但要说出来：清单里的 commit 指的是 HEAD，
 # 而文件的哈希取自工作区 —— 两者不一致的清单发出去，用户按 commit 下载的
 # tar 包会对不上哈希，而现场表现是「校验失败」，查起来毫无头绪。
+# 工作区脏就**拒绝**，不是警告。
+#
+# 清单里的 commit 记的是 HEAD，而文件哈希取自工作区——两者不一致的清单发出去，
+# 用户按 commit 从 GitHub 下回来的 tar 包必然对不上哈希，现场表现是「校验失败」
+# 且毫无头绪。这正是清单要提供的完整性保证本身失效。
+#
+# 从前这里只打一行警告然后照常生成。发布是不可逆的（Release 一旦建好，
+# 用户端 install/update 立刻开始用它），而一行警告在 CI 日志里滚过去没人看见。
+# 供应链的门槛不该由「记得看警告」来守。
 if ! git diff-index --quiet HEAD -- 2>/dev/null; then
-    printf 'make-manifest: 警告：工作区有未提交的改动，清单里的哈希与 commit %s 不一致\n' \
-        "${commit:0:12}" >&2
+    printf 'make-manifest: 工作区有未提交的改动，拒绝生成清单\n' >&2
+    printf '  清单里的 commit 是 %s，而哈希取自工作区，两者对不上。\n' "${commit:0:12}" >&2
+    printf '  用户按 commit 下载的源码包会校验失败，且看不出原因。\n' >&2
+    printf '  先提交（或 git stash），再生成清单。\n' >&2
+    exit 1
 fi
 
 # 覆盖范围：分发物 = 用户机器上真正会用到的东西。

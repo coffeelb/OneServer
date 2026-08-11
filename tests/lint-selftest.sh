@@ -105,13 +105,19 @@ expect_red 'sh -c 里拼接变量展开' '拼进了 sh -c 的脚本文本'
 
 # 位置参数那条正确写法**不能被误伤**：`$1` 是内层 shell 的参数，值经 argv
 # 传入。probe.sh 全是这个形状，检查若连它一起报红就只能被整条关掉。
+#
+# **判据看的是「我这条规则有没有报出来」，不是 lint 的整体退出码。** 注入的
+# 那行单引号里带 `$1`，shellcheck 必然报 SC2016（真实代码在这种地方配一条
+# 带理由的 disable，而副本里加 disable 又会顶破棘轮）—— 拿整体退出码当判据
+# 会把那次无关的红算到本规则头上，这条控制用例第一版就是这么假红的。
 fresh_copy
 printf "\nos::query --timeout 10 -- sh -c 'du -sk -- \"\$1\"' sh \"\${OS_LOG_DIR}\"\n" \
     >>"${work}/script/ops/backup.sh"
-if (cd "${work}" && bash tests/lint.sh >/dev/null 2>&1); then
-    pass 'sh -c 走位置参数不被误伤'
-else
+shc_out=$(cd "${work}" && bash tests/lint.sh 2>&1 || true)
+if [[ ${shc_out} == *'拼进了 sh -c 的脚本文本'* ]]; then
     fail 'sh -c 走位置参数被误报成违规 —— 这条检查会逼人把它整个关掉'
+else
+    pass 'sh -c 走位置参数不被误伤'
 fi
 
 # --- 2. 运行时路径不得硬编码（含根卸载器与 OS_ROOT 之外的系统落点）---

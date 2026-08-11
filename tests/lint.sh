@@ -65,6 +65,12 @@ readonly MAX_UNCOVERED_API=0
 # 版本一漂，「本地绿」就不再等价于「CI 绿」。
 readonly EXPECT_SHELLCHECK_VERSION='0.11.0'
 
+# CI 下载的那个发布包的 SHA256。**门禁自己的获取方式也得满足 §11。**
+# 从前 CI 是 `curl … | tar -xJ` 直接管道进解包再 install 到 /usr/local/bin ——
+# 无校验地下载并执行的，恰好是**执行本仓库全部安全门禁的那个二进制**。
+# 版本与哈希放在一起，换版本时两个一起改，漏一个 CI 当场红。
+readonly EXPECT_SHELLCHECK_SHA256='8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198'
+
 # 运行时路径的字面量。单一来源是 lib/paths.sh（规范 §4.2），
 # 出现在别处就意味着「改一个目录要改两个地方」，而第二处不会有人记得改。
 #
@@ -137,6 +143,19 @@ sc_ver=$(shellcheck --version | sed -n 's/^version: //p' | tr -d '\r')
 [[ ${sc_ver} == "${EXPECT_SHELLCHECK_VERSION}" ]] \
     || printf '注意：本机 shellcheck %s，CI 用的是 %s —— 本地通过不代表 CI 通过\n' \
         "${sc_ver:-未知}" "${EXPECT_SHELLCHECK_VERSION}"
+
+# CI 装 shellcheck 的那一步必须校验下载。**它装的正是执行这全部检查的二进制**，
+# 从前是 `curl … | tar -xJ` 直接管道进解包，无校验 —— 规范 §11 对第三方软件的
+# 要求同样管得到门禁自己。工作流退回无校验管道是没人会发现的那种退化，
+# 所以在这里守住：哈希常量的消费者在工作流里，比对的就是同一个值。
+ci_workflow="${REPO_ROOT}/.github/workflows/lint.yml"
+if [[ -f "${ci_workflow}" ]]; then
+    grep -q -- "${EXPECT_SHELLCHECK_SHA256}" "${ci_workflow}" \
+        || grep -q 'EXPECT_SHELLCHECK_SHA256' "${ci_workflow}" \
+        || report_fail 'CI 工作流没有引用 EXPECT_SHELLCHECK_SHA256 —— 门禁自己的二进制不能无校验下载'
+    grep -q 'sha256sum -c' "${ci_workflow}" \
+        || report_fail 'CI 工作流缺少 sha256sum -c 校验步骤'
+fi
 if shellcheck "${files[@]}"; then
     printf '零告警\n'
 else

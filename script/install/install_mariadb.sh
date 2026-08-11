@@ -7,7 +7,7 @@
 # @group        app
 # @order        130
 # @privilege    root
-# @requires_lib >= 1.8
+# @requires_lib >= 4.4
 # @provides     mariadb
 # @provides_unit ext:mariadb.service
 # @args         [--bind=<地址>] [--bind-public=<y|n>] [--set-root-password] [--auto-password=<y|n>] [--drop-anonymous=<y|n>]
@@ -97,25 +97,18 @@ apply_bind() {
         fi
 
         # §15：放宽监听地址必须在同一步骤内落实补偿控制，做不到就拒绝执行——
-        # 禁止「先开放，稍后提示用户自行加固」。核实用 probe::ufw_active /
-        # probe::ufw_rules（lib/probe.sh 现成接口，不新增）。不代劳开防火墙的
-        # 理由见函数头注释：这里只验证它已经在位，不动它。
-        probe::ufw_active
+        # 禁止「先开放，稍后提示用户自行加固」。不代劳开防火墙的理由见函数头
+        # 注释：这里只验证它已经在位，不动它。
+        #
+        # 判据收在 probe::ufw_port_guarded，与 install_valkey 共用一份。原来这里
+        # 自己写了一半，**漏了默认入站策略**：`ufw status` 不带 verbose 看不到
+        # 它，而默认 allow 时「active 且没有 Anywhere 规则」给出的是虚假的安全感
+        # ——一条端口规则都没有也照样全开。
+        probe::ufw_port_guarded 3306
         [[ ${OS_PROBE_VALUE} == yes ]] || os::die 2 \
-            'MariaDB 监听非回环地址前必须先有生效的防火墙（UFW 未启用或未安装）：先执行 oneserver firewall enable，未修改监听地址'
+            'MariaDB 监听非回环地址前必须先有真正挡得住的防火墙：要求 UFW 已启用、默认入站为 deny/reject、且 3306 没有无条件放行给 Anywhere。先执行 oneserver firewall enable 并只放行可信来源，未修改监听地址'
 
-        probe::ufw_rules
-        local rules=${OS_PROBE_VALUE} line
-        while IFS= read -r line; do
-            # 只认「To 列是 3306（可选 /tcp、v6 变体）+ From 是 Anywhere」——
-            # 那等于把数据库直接挂在公网；限定过来源的规则 From 列是具体
-            # CIDR，不会匹配 Anywhere，放行通过
-            if [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+3306(/tcp)?([[:space:]]\(v6\))?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+Anywhere ]]; then
-                os::die 2 'UFW 里存在把 3306 无条件放行给 Anywhere 的规则，等于把数据库直接挂在公网：删掉它后改用 oneserver firewall allow 并限定来源，未修改监听地址'
-            fi
-        done <<<"${rules}"
-
-        os::warn '已核实：UFW 处于 active 且 3306 未被无条件放行；root 仍只允许 localhost 连接。远程访问请另建账号（oneserver mariadb），别拿 root 连'
+        os::warn '已核实：UFW 生效、默认入站拒绝、3306 未被无条件放行；root 仍只允许 localhost 连接。远程访问请另建账号（oneserver mariadb），别拿 root 连'
     fi
 
     os::replace_line --backup "${MARIADB_CONF}" \

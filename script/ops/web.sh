@@ -429,7 +429,13 @@ offer_caddy_import() {
         return 0
     fi
 
-    local candidate="${CADDYFILE}.oneserver-web-import.$$"
+    # 临时名走 mktemp，不拼 `$$`（同 template::_place 与 os::replace_line）：
+    # PID 只有三万多个取值、可以喷洒预置，而 /etc/caddy 是 root:caddy ——
+    # 一个能以 caddy 身份写那个目录的进程可以事先把这个名字建成指向别处的
+    # 符号链接，`cp` 就跟过去以 root 覆写它。mktemp 走 O_EXCL，路径已存在就失败
+    local candidate=''
+    candidate=$(mktemp "${CADDYFILE}.oneserver-web-import.XXXXXXXX") \
+        || os::die 1 "无法在 ${CADDYFILE%/*} 下创建临时文件"
     os::run '准备 Caddyfile 校验副本' -- cp -- "${CADDYFILE}" "${candidate}"
     os::defer rm -f -- "${candidate}"
     os::replace_line --append-if-missing "${candidate}" \

@@ -54,7 +54,21 @@ readonly -a UPDATE_TOP=('lib' 'templates' 'packaging' 'script' 'bin')
 
 readonly STAGING="${OS_ROOT}/.staging"
 readonly UPDATER_SRC="${OS_ROOT}/packaging/updater.sh"
-readonly UPDATER_RUN="${OS_RUN_DIR}/updater.sh"
+
+# 切换器的落脚点。**必须是能执行的文件系统，因此不能是 /run。**
+#
+# 规范 §13 原本写「复制到 /run 再 exec 它」，而 §4.2 同一份文件里就写着
+# 「/run 挂 noexec，要现场执行的临时文件放 /var/tmp/oneserver」——两节自相
+# 矛盾，而实现照 §13 写了。实测 Debian 13 与 Ubuntu 24.04 的 /run 都是
+# `rw,nosuid,nodev,noexec`，于是 `oneserver update run` **在两个受支持的
+# 发行版上都跑不完**：切换器复制过去、执行位给了，exec 仍然
+# `Permission denied`。更新通道是所有安全修复的投递路径，它断了等于修复发不
+# 出去。规范已按 §4.2 那一节校正。
+#
+# 用 os::tmpdir --exec 而不是自己拼路径：它替我们做了三件必须做的事——
+# 校验 /var/tmp/oneserver 属主是 root（那目录全局可写且带 sticky，本地用户
+# 能抢先建）、当场验一次真的能执行、目录建成 0700。
+OS_UPDATER_RUN=''
 readonly IN_PROGRESS="${OS_ROOT}/.update-in-progress"
 
 # check 与 run 问的是同一个字段，说明只写一份：各写一句的结果是同一个东西
@@ -235,6 +249,15 @@ verify_staging() {
     done
     [[ ${#mode755[@]} -gt 0 ]] && os::run '校正可执行文件的权限' -- chmod 0755 -- "${mode755[@]}"
     [[ ${#mode644[@]} -gt 0 ]] && os::run '校正普通文件的权限' -- chmod 0644 -- "${mode644[@]}"
+
+    # **属主也要校正，不只是权限。** 走 codeload 那条路时 tar 带
+    # `--no-same-owner`，解出来就是 root；但 `--from=<目录>` 是 `cp -a`，属主
+    # 原样继承自源目录。一次成功的切换会把整棵**以 root 执行**的程序树装成非
+    # root 属主（实测同步自 Windows 的源码目录解出来是 UNKNOWN:UNKNOWN），
+    # 而注册表随后照常扫描并以 root 派发其中每一个脚本。
+    # 整棵 staging 一次 chown，不逐个：清单外的文件在下一步才被清掉，
+    # 而它们此刻同样不该属于别人。
+    os::run '校正暂存区属主' -- chown -R root:root -- "${STAGING}"
     os::ok '全部文件校验通过'
     return 0
 }
@@ -278,6 +301,24 @@ remove_staging_orphans() {
                 find "${STAGING}/${top}" -type d -empty -delete
         done
     fi
+    return 0
+}
+
+# 把切换器放到一个能执行的临时目录，路径写进 OS_UPDATER_RUN。
+#
+# **清理在前不在后**：本进程随后就 exec 走了，退出钩子不会跑，os::tmpdir 登记
+# 的清理项没人回放。所以每次先把上一轮留下的目录收掉，落地数量因此恒为一个，
+# 而不是每更新一次多一个。不在切换器里自删：bash 是按需分块读脚本的，
+# 删掉正在跑的那个文件正是 K13 的形态。
+stage_updater() {
+    os::run --allow-fail '清理上一轮的切换器目录' -- \
+        find "${OS_TMP_EXEC_ROOT}" -maxdepth 1 -name 'os.*' -type d -exec rm -rf -- {} + || true
+
+    local dir=''
+    os::tmpdir dir --exec || return 1
+    OS_UPDATER_RUN="${dir}/updater.sh"
+    os::run '把切换器复制到可执行目录' -- cp -- "${UPDATER_SRC}" "${OS_UPDATER_RUN}" || return 1
+    os::run '给切换器执行位' -- chmod 0700 "${OS_UPDATER_RUN}" || return 1
     return 0
 }
 
@@ -401,17 +442,14 @@ action_run() {
     # --- 阶段 2：把切换器搬到 $OS_ROOT 之外，然后 exec 它 ---
     #
     # 搬出去是硬要求：它要替换的正是自己所在的那棵树。
-    # /run 是 tmpfs，重启即消失，不会留下一个游离的旧切换器。
-    os::run '准备切换器的运行目录' -- mkdir -p "${OS_RUN_DIR}"
-    os::run '把切换器复制到运行目录' -- cp -- "${UPDATER_SRC}" "${UPDATER_RUN}"
-    os::run '给切换器执行位' -- chmod 0700 "${UPDATER_RUN}"
+    stage_updater || os::die 1 '无法准备切换器'
 
     os::record_change "把 ${OS_ROOT} 从 ${cur:-未知} 切换到 ${MF_VERSION}"
     os::info '交给切换器（本进程到此为止，锁经 exec 继承过去）'
 
     # `exec` 而不是 fork：本进程的内存里是**旧版本的 lib**，替换之后它执行的
     # 是旧函数、操作的是新布局。让它彻底消失是唯一安全的做法（D14）
-    exec "${UPDATER_RUN}" switch \
+    exec "${OS_UPDATER_RUN}" switch \
         --root="${OS_ROOT}" \
         --staging="${STAGING}" \
         --version="${MF_VERSION}"
@@ -434,9 +472,7 @@ action_rollback() {
     # 程度完全不同：一个是重装当前版本，一个是把整棵程序目录换回上一版
     os::confirm --arg confirm-rollback '确认回滚？' n || os::die 130 '已取消'
 
-    os::run '准备切换器的运行目录' -- mkdir -p "${OS_RUN_DIR}"
-    os::run '把切换器复制到运行目录' -- cp -- "${UPDATER_SRC}" "${UPDATER_RUN}"
-    os::run '给切换器执行位' -- chmod 0700 "${UPDATER_RUN}"
+    stage_updater || os::die 1 '无法准备切换器'
 
     if [[ ${OS_DRYRUN} -eq 1 ]]; then
         os::info '[dry-run] 真实执行时会 exec 切换器把上一版换回来'
@@ -445,7 +481,7 @@ action_rollback() {
     fi
 
     os::record_change "把 ${OS_ROOT} 回滚到上一版"
-    exec "${UPDATER_RUN}" rollback --root="${OS_ROOT}"
+    exec "${OS_UPDATER_RUN}" rollback --root="${OS_ROOT}"
 }
 
 # ------------------------------------------------------------------

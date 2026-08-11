@@ -9,7 +9,7 @@
 # @privilege    root
 # @requires_lib >= 4.3
 # @provides     wordpress:<name>
-# @args         [--name=<站点名>] [--path=<目录>] [--db-name=<库名>] [--db-user=<账号>] [--auto-password=<y|n>] [--writable-config=<y|n>] [--confirm-overwrite=<站点名>]
+# @args         [--name=<站点名>] [--path=<目录>] [--db-name=<库名>] [--db-user=<账号>] [--auto-password=<y|n>] [--confirm-overwrite=<站点名>]
 # @description  部署多站点共存的 WordPress，自动建库配权限
 #
 
@@ -412,16 +412,19 @@ main() {
     # wp-config.php 里有数据库密码，**不跟其他文件一样 644**
     os::run '收紧 wp-config.php 属主' -- chown www-data:www-data "${path}/wp-config.php"
 
-    # 让插件能改 wp-config.php 是**降低安全性**的选项：那个文件里有数据库
-    # 密码，可写意味着任何能以 www-data 执行代码的漏洞都能改它。
-    # **旧脚本这里默认是 Y**，违反规范。
-    if os::confirm --arg writable-config \
-        '允许插件写入 wp-config.php？（里面有数据库密码，默认不允许）' n; then
-        os::run '放开 wp-config.php 写权限' -- chmod 0660 "${path}/wp-config.php"
-        os::warn '补偿控制：wp-config.php 仍只有 www-data 可读写，其他用户无权限；装完插件建议手动改回 0640'
-    else
-        os::run '收紧 wp-config.php 权限' -- chmod 0640 "${path}/wp-config.php"
-    fi
+    # wp-config.php 一律 0640，**不再提供「允许插件写入」这个选项**。
+    #
+    # 那个选项过不了 §15：放宽必须在同一步落实补偿控制，而它给的「补偿控制」
+    # 只是复述放宽之后的现状（仍然 www-data 可读写），外加一句「装完插件建议
+    # 手动改回」—— 后半句正是 §15 逐字禁止的「先开放，稍后提示用户自行加固」。
+    # 措辞本身也不准确：caddy 已被加进 www-data 组，"其他用户无权限"不成立。
+    #
+    # 删掉而不是补一个真的补偿控制，是因为它换来的东西很少：`FS_METHOD=direct`
+    # 已经免掉了插件要 FTP 凭据那条主要路径，而 wp-content 本来就是 0775/0664，
+    # 主题与插件的安装、上传、更新都不需要写 wp-config.php。真正需要它的
+    # 场景（少数插件写常量）可以由人自己临时改权限并改回来——那是一次有意识的
+    # 决定，不该做成一个装站时顺手就点过去的问句。
+    os::run '收紧 wp-config.php 权限' -- chmod 0640 "${path}/wp-config.php"
 
     # Caddy 以自己的用户跑，要读站点文件就得进 www-data 组。
     # 用家目录判存在：用户不在时 getent 取不到，返回空，与判 id -u 等价

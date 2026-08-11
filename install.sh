@@ -372,30 +372,70 @@ confirm_overwrite() {
 # **绝不能用 `install -m` 或 `cp` 直写目标**：被替换的往往正是**正在跑的**
 # 那个文件 —— bash 会从旧偏移量继续读一个内容已变的文件，以 root 执行错乱
 # 的字节（K13 就是这个形态）。
+# 目标路径与它在 $ROOT 之下的每一级父目录都不许是符号链接。
+#
+# 这棵树里的每个脚本此后都会以 root 被执行，而 `mkdir -p` 与 `cp` 都会跟随
+# 符号链接：某一级被换成链接，写入就落到了别人选的位置。**逐级 lstat**，
+# 不是只看最后那一段 —— 中间任意一级都够用。
+assert_no_symlink() {
+    local rel=${1} cur=${ROOT} seg
+    [[ ! -L ${ROOT} ]] || die "${ROOT} 是符号链接，拒绝安装"
+    local IFS='/'
+    for seg in ${rel}; do
+        [[ -n ${seg} ]] || continue
+        cur="${cur}/${seg}"
+        [[ ! -L ${cur} ]] || die "${cur} 是符号链接，拒绝安装（程序目录里的每个文件都会以 root 执行）"
+    done
+    return 0
+}
+
 place_files() {
     local src="${STAGING}/src"
     local -i i n=${#MF_PATH[@]} changed=0 same=0
-    local rel dst tmp
+    local rel dst tmp links
 
     for ((i = 0; i < n; i++)); do
         rel=${MF_PATH[i]}
         dst="${ROOT}/${rel}"
+        assert_no_symlink "${rel}"
         mkdir -p -- "${dst%/*}" || die "建不了目录 ${dst%/*}"
 
-        if [[ -f ${dst} ]] && cmp -s -- "${src}/${rel}" "${dst}"; then
-            # 内容一致就只校正权限，不换 inode（规范：已是目标状态不产生变更）
+        # 内容一致就只校正元数据，不换 inode（规范：已是目标状态不产生变更）。
+        #
+        # **属主也要校正，不只是权限。** 这条分支从前只 chmod，于是一棵属主被
+        # 改过的树重装之后属主仍然不对 —— 而「装、修、重装是同一条代码路径」
+        # 正是这个安装器的定位，修不回来就等于修复模式失效。
+        #
+        # **硬链接数不为 1 时改走换 inode 那条路**：`chmod`/`chown` 作用于
+        # inode，而另一条路径指向同一个 inode 时，那边的权限会跟着一起变。
+        links=$(stat -c '%h' -- "${dst}" 2>/dev/null || printf '1')
+        if [[ -f ${dst} && ${links} == 1 ]] && cmp -s -- "${src}/${rel}" "${dst}"; then
             chmod "${MF_MODE[i]}" -- "${dst}" 2>/dev/null || true
+            chown root:root -- "${dst}" 2>/dev/null || true
             same+=1
             continue
         fi
 
-        tmp="${dst}.install.$$"
+        # 临时名走 mktemp，不拼 `$$`（同 lib/template.sh 的 template::_place）：
+        # PID 可以喷洒预置，而 mktemp 走 O_EXCL|O_CREAT，路径已存在就失败
+        tmp=$(mktemp "${dst}.install.XXXXXXXX") || die "建不了临时文件 ${rel}"
         cp -- "${src}/${rel}" "${tmp}" || die "复制不了 ${rel}"
         chmod "${MF_MODE[i]}" -- "${tmp}" || die "改不了权限 ${rel}"
-        chown root:root -- "${tmp}" 2>/dev/null || true
+        chown root:root -- "${tmp}" || die "改不了属主 ${rel}"
         mv -f -- "${tmp}" "${dst}" || die "换不上 ${rel}"
         changed+=1
     done
+
+    # 目录的属主与权限也要校正，不只是顶层那几个。
+    #
+    # `setup_dirs` 只管 $ROOT 与几个系统目录；`mkdir -p` 在这里新建的嵌套目录
+    # （script/install/、packaging/systemd/ …）此前无人过问属主。一个非 root
+    # 属主、或组/其他可写的目录，等于让别人能替换里面那些以 root 执行的脚本 ——
+    # 而重装本该把这种状态修回来。
+    find "${ROOT}/bin" "${ROOT}/lib" "${ROOT}/script" "${ROOT}/templates" \
+        "${ROOT}/packaging" -type d -exec chown root:root -- {} + 2>/dev/null || true
+    find "${ROOT}/bin" "${ROOT}/lib" "${ROOT}/script" "${ROOT}/templates" \
+        "${ROOT}/packaging" -type d -exec chmod go-w -- {} + 2>/dev/null || true
 
     ok "文件就位：${changed} 个更新 · ${same} 个已是目标状态"
     return 0

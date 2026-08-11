@@ -1040,3 +1040,66 @@ EOF
     probe::services_active
     [ -z "${OS_PROBE_VALUE}" ]
 }
+
+# --- 防火墙判据 ----------------------------------------------------
+#
+# probe::ufw_port_guarded 是一条安全判据：install_mariadb 与 install_valkey
+# 都拿它决定「能不能放宽监听地址」。它答错的两个方向都很糟——答 no 挡住合法
+# 操作，答 yes 让一个没有传输加密的服务上公网。
+
+# 三键快照。命令桩在这里没用：probe::_probe 经 `timeout` 执行，那是外部命令，
+# 看不见 bash 函数 —— 用函数桩写的第一版「过了」，过的原因却是容器里根本没有
+# ufw，探测失败后恰好落到期望值上。
+os_fake_snapshot3() {
+    mkdir -p "${OS_PUBLIC_DIR}"
+    local now
+    printf -v now '%(%s)T' -1
+    printf '#ts\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' "${now}" \
+        "${1}" "${2}" "${3}" "${4}" "${5}" "${6}" >"${OS_PROBE_SNAPSHOT}"
+    probe::_is_root() { return 1; }
+}
+
+@test "ufw_default_incoming: 认出 deny" {
+    os_fake_snapshot 'ufw.default_incoming' \
+        'Status: active Logging: on (low) Default: deny (incoming), allow (outgoing), disabled (routed)'
+    probe::ufw_default_incoming
+    [ "${OS_PROBE_VALUE}" = 'deny' ]
+}
+
+@test "ufw_default_incoming: 认出 allow —— 默认放行时端口规则不构成保护" {
+    os_fake_snapshot 'ufw.default_incoming' \
+        'Status: active Logging: on (low) Default: allow (incoming), allow (outgoing), disabled (routed)'
+    probe::ufw_default_incoming
+    [ "${OS_PROBE_VALUE}" = 'allow' ]
+}
+
+@test "ufw_port_guarded: 默认入站 allow 时判为不受保护（原来漏掉的正是这一条）" {
+    os_fake_snapshot2 'ufw.status' 'Status: active' \
+        'ufw.default_incoming' 'Status: active Default: allow (incoming), allow (outgoing)'
+    probe::ufw_port_guarded 3306
+    [ "${OS_PROBE_VALUE}" = 'no' ]
+}
+
+@test "ufw_port_guarded: 端口被无条件放行给 Anywhere 时判为不受保护" {
+    os_fake_snapshot3 'ufw.status' 'Status: active' \
+        'ufw.default_incoming' 'Status: active Default: deny (incoming), allow (outgoing)' \
+        'ufw.rules' '[ 1] 3306/tcp ALLOW IN Anywhere'
+    probe::ufw_port_guarded 3306
+    [ "${OS_PROBE_VALUE}" = 'no' ]
+}
+
+@test "ufw_port_guarded: 三个条件都满足才判为受保护" {
+    os_fake_snapshot3 'ufw.status' 'Status: active' \
+        'ufw.default_incoming' 'Status: active Default: deny (incoming), allow (outgoing)' \
+        'ufw.rules' '[ 1] 22/tcp ALLOW IN Anywhere'
+    probe::ufw_port_guarded 3306
+    [ "${OS_PROBE_VALUE}" = 'yes' ]
+}
+
+@test "ufw_port_guarded: 限定了来源的放行不算无条件放行" {
+    os_fake_snapshot3 'ufw.status' 'Status: active' \
+        'ufw.default_incoming' 'Status: active Default: deny (incoming), allow (outgoing)' \
+        'ufw.rules' '[ 1] 3306/tcp ALLOW IN 10.0.0.0/8'
+    probe::ufw_port_guarded 3306
+    [ "${OS_PROBE_VALUE}" = 'yes' ]
+}

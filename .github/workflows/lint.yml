@@ -27,7 +27,15 @@ jobs:
         run: |
           v=$(sed -nE "s/^readonly EXPECT_SHELLCHECK_VERSION='([0-9.]+)'.*/\1/p" tests/lint.sh)
           [ -n "${v}" ] || { echo "从 tests/lint.sh 读不到 EXPECT_SHELLCHECK_VERSION"; exit 1; }
-          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${v}/shellcheck-v${v}.linux.x86_64.tar.xz" | tar -xJ
+          sum=$(sed -nE "s/^readonly EXPECT_SHELLCHECK_SHA256='([0-9a-f]{64})'.*/\1/p" tests/lint.sh)
+          [ -n "${sum}" ] || { echo "从 tests/lint.sh 读不到 EXPECT_SHELLCHECK_SHA256"; exit 1; }
+          # 先落地再校验再解包，**不用管道直灌 tar**：无校验地下载并执行的
+          # 会是执行本仓库全部安全门禁的那个二进制（规范 §11 同样管得到它）
+          curl -fsSL --proto '=https' --proto-redir '=https' \
+            -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${v}/shellcheck-v${v}.linux.x86_64.tar.xz"
+          echo "${sum}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
           sudo install -m 0755 "shellcheck-v${v}/shellcheck" /usr/local/bin/shellcheck
           sudo apt-get update -qq
           # zsh 只用来 `zsh -n` 查 zsh 补全的语法：本机可以没有，CI 上不能没有，

@@ -7,7 +7,7 @@
 # @group        app
 # @order        120
 # @privilege    root
-# @requires_lib >= 1.15
+# @requires_lib >= 4.4
 # @provides     valkey
 # @provides_unit ext:valkey-server.service
 # @args         [--purpose=<cache|store>] [--maxmemory=<MB|auto|0>] [--bind=<地址列表>] [--bind-public=<y|n>] [--regen-password] [--auto-password=<y|n>]
@@ -138,6 +138,20 @@ resolve_password() {
 # 用户给了非回环地址就是**降低安全性的选项**：默认必须为 n，
 # 且要说清补偿控制。Valkey 没有传输加密、没有用户体系，暴露到公网基本等同
 # 于把这台机器交出去 —— 这不是危言耸听，是 Redis 未授权访问那一整类事件。
+# 实际生效的端口。**不写死 6379**：本脚本不管端口，用户改过 valkey.conf 的
+# 话，防火墙判据必须跟着那个值走，否则查的是一个根本没人听的端口。
+valkey_port() {
+    local line port=''
+    if [[ -r ${VALKEY_CONF} ]]; then
+        while IFS= read -r line || [[ -n ${line} ]]; do
+            [[ ${line} =~ ^port[[:space:]]+([0-9]+) ]] || continue
+            port=${BASH_REMATCH[1]}
+            break
+        done <"${VALKEY_CONF}"
+    fi
+    printf '%s' "${port:-6379}"
+}
+
 apply_bind() {
     local addr=${1}
     [[ -n ${addr} ]] || return 0
@@ -159,7 +173,19 @@ apply_bind() {
             'Valkey 没有传输加密，监听非回环地址等于把它暴露给能到达这台机器的任何人。确定？' n; then
             os::die 2 '已取消：未修改监听地址'
         fi
-        os::warn '补偿控制：已设访问密码、protected-mode 保持 yes；请务必用 oneserver firewall 只放行可信来源'
+
+        # §15：放宽必须**在同一步骤内**落实补偿控制，落实不了就拒绝执行。
+        # 从前这里只打一句「请务必用 oneserver firewall 只放行可信来源」——
+        # 那正是 §15 逐字禁止的「先开放，稍后提示用户自行加固」，而同一份规范
+        # 在 install_mariadb 里是有硬门槛的。判据统一收在 probe::ufw_port_guarded：
+        # active + 默认入站 deny/reject + 该端口没有无条件放行给 Anywhere。
+        local vport
+        vport=$(valkey_port)
+        probe::ufw_port_guarded "${vport}"
+        [[ ${OS_PROBE_VALUE} == yes ]] || os::die 2 \
+            "Valkey 监听非回环地址前必须先有真正挡得住的防火墙：要求 UFW 已启用、默认入站为 deny/reject、且 ${vport} 没有无条件放行给 Anywhere。先执行 oneserver firewall enable 并只放行可信来源，未修改监听地址"
+
+        os::warn "已核实：UFW 生效且 ${vport} 未被无条件放行；另有访问密码与 protected-mode 兜底。远程访问请只放行可信网段"
     fi
 
     os::replace_line --backup "${VALKEY_CONF}" '^bind ' "bind ${addr}" \

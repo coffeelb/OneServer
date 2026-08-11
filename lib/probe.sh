@@ -1287,6 +1287,75 @@ probe::ufw_rules() {
     probe::_probe 'ufw.rules' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw status numbered
 }
 
+# probe::ufw_default_incoming   ufw 的默认入站策略，值为 deny / reject / allow / unknown
+#
+# **`ufw status` 不带 verbose 是看不到它的**，而它恰恰是「防火墙到底挡不挡得住
+# 东西」的前提：默认 allow 时，一条端口规则都没有也照样全开。
+probe::ufw_default_incoming() {
+    probe::_probe 'ufw.default_incoming' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw status verbose
+    local out=${OS_PROBE_VALUE}
+    OS_PROBE_VALUE='unknown'
+    local line
+    while IFS= read -r line; do
+        [[ ${line} == *'Default:'* ]] || continue
+        # 形如 `Default: deny (incoming), allow (outgoing), disabled (routed)`
+        case ${line} in
+            *'deny (incoming)'*) OS_PROBE_VALUE='deny' ;;
+            *'reject (incoming)'*) OS_PROBE_VALUE='reject' ;;
+            *'allow (incoming)'*) OS_PROBE_VALUE='allow' ;;
+        esac
+        break
+    done <<<"${out}"
+    return 0
+}
+
+# probe::ufw_port_guarded <端口>   该端口是否真的被防火墙挡着，值为 yes / no
+#
+# **这是一条安全判据，只写一份。** 从前 install_mariadb 自己写了一半
+# （active + 没有 `Anywhere` 放行），install_valkey 干脆一句警告了事 ——
+# 同一条规范（§15：放宽必须同步落实补偿控制）在两个脚本里两种执行力度。
+#
+# 三个条件缺一不可，而原来那半份漏了中间这条：
+#   1. UFW 处于 active
+#   2. **默认入站是 deny 或 reject** —— 默认 allow 时前后两条都没有意义
+#   3. 没有把这个端口无条件放行给 Anywhere 的规则（v4 与 v6 都算）
+#
+# 限定过来源的规则（`From` 是具体 CIDR）不算「无条件放行」，照常放行。
+probe::ufw_port_guarded() {
+    local port=${1-}
+    OS_PROBE_VALUE='no'
+    OS_PROBE_STATUS='ok'
+    [[ -n ${port} ]] || return 0
+
+    probe::ufw_active
+    [[ ${OS_PROBE_VALUE} == yes ]] || {
+        OS_PROBE_VALUE='no'
+        return 0
+    }
+
+    probe::ufw_default_incoming
+    case ${OS_PROBE_VALUE} in
+        deny | reject) ;;
+        *)
+            OS_PROBE_VALUE='no'
+            return 0
+            ;;
+    esac
+
+    probe::ufw_rules
+    local rules=${OS_PROBE_VALUE} line
+    while IFS= read -r line; do
+        # `[ 1] 3306/tcp    ALLOW IN    Anywhere` / `… (v6)  ALLOW IN  Anywhere (v6)`
+        if [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/(tcp|udp))?([[:space:]]+\(v6\))?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+Anywhere ]]; then
+            OS_PROBE_VALUE='no'
+            return 0
+        fi
+    done <<<"${rules}"
+
+    OS_PROBE_VALUE='yes'
+    return 0
+}
+
 # probe::ufw_active   ufw 是否已启用，值为 yes / no
 probe::ufw_active() {
     probe::_probe 'ufw.status' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw status
