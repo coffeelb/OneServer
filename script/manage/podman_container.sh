@@ -106,6 +106,26 @@ short_cell() {
     return 0
 }
 
+# 从一份 .container 文件里读出镜像、端口与自动更新标记。
+# 纯 bash 读文件，不起外部进程：这是列表里每个「只剩配置」的容器都要走一次的路。
+QM_IMAGE=''
+QM_PORTS=''
+QM_AUTOUPDATE=''
+quadlet_meta() {
+    local __pc_file=${1} __pc_line
+    QM_IMAGE=''
+    QM_PORTS=''
+    QM_AUTOUPDATE=''
+    while IFS= read -r __pc_line || [[ -n ${__pc_line} ]]; do
+        case ${__pc_line} in
+            Image=*) QM_IMAGE=${__pc_line#Image=} ;;
+            PublishPort=*) QM_PORTS="${QM_PORTS:+${QM_PORTS},}${__pc_line#PublishPort=}" ;;
+            AutoUpdate=registry) QM_AUTOUPDATE='registry' ;;
+        esac
+    done <"${__pc_file}"
+    return 0
+}
+
 load_container_rows() {
     os::query --timeout 20 -- \
         podman ps -a --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{index .Labels "io.podman.compose.project"}}\t{{index .Labels "com.docker.compose.project"}}\t{{index .Labels "io.containers.autoupdate"}}'
@@ -144,6 +164,52 @@ load_container_rows() {
         PC_MANAGED+=("${managed}")
         PC_PROJECTS+=("${project}")
         PC_AUTOUPDATE+=("${autoupdate}")
+    done
+
+    # --- Quadlet 里定义着、而 podman 已经没有的容器 ---
+    #
+    # 服务失败到 start-limit-hit 之后，Quadlet 会把容器对象删掉，于是
+    # `podman ps -a` 里一行都不剩 —— **本工具建的容器从本工具的列表里消失**，
+    # 而那正是用户最需要找到它去看日志、去删了重建的时刻。`.container` 文件
+    # 还在，名字从文件名来，状态问 systemd 要。
+    #
+    # **先把 IFS 拨回来。** 上面按行切 podman 输出时把它改成了 `$'\n'`，而下面
+    # 这一段一个字符串都不用切，却要调 unit_of / probe / quadlet_meta ——
+    # 让框架接口在一个被改过的 IFS 下运行是 D91 那个坑的来源。
+    IFS=$'\n\t'
+
+    local qf qname qunit qstate
+    local -i k found
+    for qf in "${QUADLET_DIR}"/*.container; do
+        [[ -f ${qf} ]] || continue
+        qname=${qf##*/}
+        qname=${qname%.container}
+
+        found=0
+        for ((k = 0; k < ${#PC_NAMES[@]}; k++)); do
+            if [[ ${PC_NAMES[k]} == "${qname}" ]]; then
+                found=1
+                break
+            fi
+        done
+        ((found == 0)) || continue
+
+        unit_of qunit "${qname}"
+        probe::service_active "${qunit}"
+        qstate=${OS_PROBE_VALUE}
+        quadlet_meta "${qf}"
+
+        # ID 留空不是遗漏，是这一行要传达的事实：容器对象已经不存在了。
+        # 后续动作（启停、日志、删除）全部按名字走 unit 与 .container 文件，
+        # 不碰 ID，所以这样的行照样可选、可操作。
+        PC_IDS+=('')
+        PC_NAMES+=("${qname}")
+        PC_IMAGES+=("${QM_IMAGE}")
+        PC_STATUS+=("${qstate} · 无容器")
+        PC_PORTS+=("${QM_PORTS}")
+        PC_MANAGED+=(1)
+        PC_PROJECTS+=('')
+        PC_AUTOUPDATE+=("${QM_AUTOUPDATE}")
     done
     return 0
 }
@@ -193,8 +259,9 @@ action_ls() {
 
     local -a cells=()
     local managed_label autoupdate_label
-    local -i i any_autoupdate=0
+    local -i i any_autoupdate=0 any_ghost=0
     for ((i = 0; i < ${#PC_NAMES[@]}; i++)); do
+        [[ -z ${PC_IDS[i]} && ${PC_MANAGED[i]} == 1 ]] && any_ghost=1
         managed_label='—'
         if [[ ${PC_MANAGED[i]} == 1 ]]; then
             managed_label='✔ Quadlet'
@@ -214,6 +281,10 @@ action_ls() {
             "compose_project=${PC_PROJECTS[i]}" "auto_update=${PC_AUTOUPDATE[i]}"
     done
     os::table '编号' 'ID' '名称' '镜像' '状态' '自启' '自动更新标记' -- "${cells[@]}"
+
+    if ((any_ghost == 1)); then
+        os::warn '「无容器」的那几行：配置还在，容器对象已被清掉 —— 多半是服务反复失败到 systemd 不再重试。用「查看日志」看原因，修好配置要删了重建'
+    fi
 
     # 标签与定时器是两件事，只显示标签会让人以为已经开好了
     probe::service_active "${AUTOUPDATE_TIMER}"
