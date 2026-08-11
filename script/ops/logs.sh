@@ -57,8 +57,11 @@ dump() {
     fi
 
     if [[ -n ${filter} ]]; then
+        # 过滤串由用户在界面上输入，**尤其**不能拼进内层 shell 的脚本文本
+        # （规范 §10）：三个值全部经位置参数传入
         os::query --timeout 20 -- sh -c \
-            "grep -E '${filter}' '${file}' | tail -n '${LOG_LINES}'" || true
+            "grep -E \"\$1\" \"\$2\" | tail -n \"\$3\"" \
+            sh "${filter}" "${file}" "${LOG_LINES}" || true
     else
         os::query --timeout 20 -- tail -n "${LOG_LINES}" "${file}" || true
     fi
@@ -94,11 +97,12 @@ action_status() {
             rows+=("${label}" "还没有 ${f}")
             continue
         fi
-        os::query --timeout 10 -- sh -c \
-            "du -h '${f}' 2>/dev/null | cut -f1" || true
-        size=${OS_RUN_OUTPUT:-?}
-        os::query --timeout 10 -- sh -c \
-            "date -r '${f}' '+%Y-%m-%d %H:%M:%S' 2>/dev/null" || true
+        # 这两条不需要内层 shell：du 的第一列在 bash 里切，stderr 由 os::query
+        # 默认丢弃 —— 少一层 shell，路径也就不用拼进任何脚本文本（规范 §10）
+        os::query --timeout 10 -- du -h -- "${f}" || true
+        size=${OS_RUN_OUTPUT%%[[:space:]]*}
+        size=${size:-?}
+        os::query --timeout 10 -- date -r "${f}" '+%Y-%m-%d %H:%M:%S' || true
         mtime=${OS_RUN_OUTPUT:-未知}
         rows+=("${label}" "${size} · 最后写于 ${mtime}")
     done

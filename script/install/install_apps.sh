@@ -56,8 +56,10 @@ APP_TYPES=()
 # 「有没有我要的那个」的，字母序最好找；@order 是产品排序，那归菜单管。
 load_types() {
     APP_TYPES=()
+    # 模式与目录经位置参数进内层 shell，不拼进脚本文本（规范 §10）
     os::query --timeout 10 -- sh -c \
-        "grep -rhE '^#[[:space:]]*@provides[[:space:]]' '${INSTALL_DIR}' | sort -u" || return 0
+        "grep -rhE \"\$1\" \"\$2\" | sort -u" \
+        sh '^#[[:space:]]*@provides[[:space:]]' "${INSTALL_DIR}" || return 0
 
     local line type seen=''
     local IFS=$'\n'

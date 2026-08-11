@@ -137,8 +137,10 @@ user_exists() {
 # 备份目录里本工具产生的归档 → DB_CHOICES，新的在前
 load_backup_choices() {
     DB_CHOICES=()
+    # 目录经位置参数进内层 shell，不拼进脚本文本（规范 §10）
     os::query --timeout 10 -- sh -c \
-        "ls -1t '${DB_DUMP_DIR}' 2>/dev/null | grep -E '[.]sql[.]gz\$'" || true
+        "ls -1t \"\$1\" 2>/dev/null | grep -E '[.]sql[.]gz\$'" \
+        sh "${DB_DUMP_DIR}" || true
     local one
     local IFS=$'\n'
     for one in ${OS_RUN_OUTPUT}; do
