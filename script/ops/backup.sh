@@ -537,7 +537,7 @@ make_archive() {
 
     os::run '启用归档' -- mv -f "${out}.partial" "${out}"
     os::run '收紧归档权限' -- chmod 0600 "${out}"
-    os::run '生成归档校验和' -- sh -c \
+    os::run '生成归档的 SHA256 校验文件' -- sh -c \
         "cd '${dir}' && sha256sum '${ts}.tar.gz' > '${ts}.tar.gz.sha256'"
 
     BK_ARCHIVE=${out}
@@ -577,7 +577,7 @@ push_remote() {
     local dest="${BK_REMOTE}:${BK_REMOTE_DIR}/${type}/${name}"
 
     os::run '上传备份归档' -- rclone copy "${file}" "${dest}" --stats-one-line || return 1
-    os::run '上传校验和' -- rclone copy "${file}.sha256" "${dest}" || return 1
+    os::run '上传 SHA256 校验文件' -- rclone copy "${file}.sha256" "${dest}" || return 1
 
     if [[ ${OS_RUN_SKIPPED} -eq 1 ]]; then
         return 0
@@ -597,7 +597,7 @@ push_remote() {
     [[ -n ${local_sum} ]] || return 1
 
     if [[ -z ${remote_sum} || ${remote_sum} != "${local_sum}" ]]; then
-        os::err "远端校验和与本地不一致（远端 ${remote_sum:-空}，本地 ${local_sum}）"
+        os::err "远端的 SHA256 与本地不一致（远端 ${remote_sum:-空}，本地 ${local_sum}）"
         return 1
     fi
     os::ok '远端归档校验通过'
@@ -682,7 +682,7 @@ prune_remote() {
     os::record_change "删除了 ${n} 份 ${type}:${name} 的旧远端备份"
     for ((i = 0; i < n; i++)); do
         os::run '删除旧远端备份' -- rclone deletefile "${dest}/${all[i]}"
-        os::run --allow-fail '删除旧远端校验和' -- rclone deletefile "${dest}/${all[i]}.sha256"
+        os::run --allow-fail '删除旧远端的 SHA256 校验文件' -- rclone deletefile "${dest}/${all[i]}.sha256"
     done
     os::ok "${type}:${name} 已清理 ${n} 份旧远端备份"
     return 0
@@ -1083,7 +1083,7 @@ action_verify() {
     while IFS= read -r f; do
         [[ -n ${f} ]] || continue
         if [[ ! -r ${f}.sha256 ]]; then
-            os::warn "缺校验和：${f#"${OS_ARCHIVE_DIR}/"}"
+            os::warn "缺 SHA256 校验文件：${f#"${OS_ARCHIVE_DIR}/"}"
             nosum+=1
             continue
         fi
@@ -1107,7 +1107,7 @@ action_verify() {
         os::progress "$((checked + nosum))" "${total}" '校验中'
     done <<<"${archives}"
 
-    os::kv '已校验' "${checked} 份" '不通过' "${bad} 份" '缺校验和' "${nosum} 份"
+    os::kv '已校验' "${checked} 份" '不通过' "${bad} 份" '缺校验文件' "${nosum} 份"
     if [[ ${bad} -gt 0 ]]; then
         os::output 1 checked="${checked}" bad="${bad}" nosum="${nosum}"
         os::die 1 "${bad} 份归档校验不通过，它们已经不可靠了"
@@ -1232,7 +1232,7 @@ ensure_rclone() {
         curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
         -o "${dir}/${name}" "${BK_RCLONE_DL}/v${latest}/${name}" || failed=1
     if [[ ${failed} -eq 0 ]]; then
-        os::retry 3 '下载 rclone 校验和清单' -- \
+        os::retry 3 '下载 rclone 的 SHA256 清单' -- \
             curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
             -o "${dir}/SHA256SUMS" "${BK_RCLONE_DL}/v${latest}/SHA256SUMS" || failed=1
     fi
