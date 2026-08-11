@@ -57,6 +57,17 @@ umask 022
 # 运行时数据（state/ secure.conf）不在其中，切换不碰它们。
 TOP_ORDER=('lib' 'templates' 'packaging' 'script' 'bin')
 
+# 清单还覆盖三个**根级文件**，它们不在任何目录里，此前一个都没被换过。
+#
+# 后果不是少了点什么：`install.sh` 会把它们放到 $ROOT 下，而更新只换那五个
+# 目录 —— 于是任何一次 `oneserver update` 之后，README 指的那条卸载入口
+# （`bash /opt/oneserver/uninstall.sh`）跑的都是**旧版脚本配新版 lib**。
+# 更糟的是 update.sh 的 verify_staging 会把这三个文件也算进「全部文件校验
+# 通过」，而它们一个字节都没上线 —— 报告与事实不符。
+#
+# VERSION 也在里面：它原来单独一段特判，与这三个文件做的是同一件事。
+TOP_FILES=('VERSION' 'install.sh' 'uninstall.sh')
+
 # 自检的墙钟上限（秒）。doctor --selftest 在真机上是几秒的事，
 # 给到三分钟是留给「systemctl 卡在某个挂死的 unit 上」这类外部拖累。
 SELFCHECK_TIMEOUT=180
@@ -132,7 +143,10 @@ do_switch() {
     for top in "${TOP_ORDER[@]}"; do
         [[ -e "${STAGING}/${top}" ]] || die "暂存区缺 ${top}，什么都没有替换"
     done
-    [[ -e "${STAGING}/VERSION" ]] || die '暂存区缺 VERSION，什么都没有替换'
+    local topf
+    for topf in "${TOP_FILES[@]}"; do
+        [[ -e "${STAGING}/${topf}" ]] || die "暂存区缺 ${topf}，什么都没有替换"
+    done
 
     # data/ 是跨版本保留的运行时状态，不在 TOP_ORDER 里。必须在第一次 rename
     # 之前保证它能被 unit 的 ReadWritePaths 使用；否则代码已经切换后才发现
@@ -153,11 +167,13 @@ do_switch() {
         swap_in "${top}"
     done
 
-    # VERSION 是文件不是目录，同样走「换 inode」而不是覆盖写
-    if [[ -f "${STAGING}/VERSION" ]]; then
-        [[ -f "${ROOT}/VERSION" ]] && cp -- "${ROOT}/VERSION" "${ROOT}/.old/VERSION"
-        mv -f -- "${STAGING}/VERSION" "${ROOT}/VERSION" || die '换不上 VERSION'
-    fi
+    # 根级文件是文件不是目录，同样走「换 inode」而不是覆盖写。
+    # 旧的先存进 .old/，回滚要靠它
+    for topf in "${TOP_FILES[@]}"; do
+        [[ -f "${STAGING}/${topf}" ]] || continue
+        [[ -f "${ROOT}/${topf}" ]] && cp -- "${ROOT}/${topf}" "${ROOT}/.old/${topf}"
+        mv -f -- "${STAGING}/${topf}" "${ROOT}/${topf}" || die "换不上 ${topf}"
+    done
 
     rm -f -- "${ROOT}/.update-in-progress"
     log '目录已切换，开始自检'
@@ -198,9 +214,12 @@ do_rollback() {
         top=${TOP_ORDER[i]}
         swap_back "${top}"
     done
-    if [[ -f "${ROOT}/.old/VERSION" ]]; then
-        mv -f -- "${ROOT}/.old/VERSION" "${ROOT}/VERSION" || true
-    fi
+    local topf
+    for topf in "${TOP_FILES[@]}"; do
+        if [[ -f "${ROOT}/.old/${topf}" ]]; then
+            mv -f -- "${ROOT}/.old/${topf}" "${ROOT}/${topf}" || true
+        fi
+    done
     rm -rf -- "${ROOT}/.old"
     rm -rf -- "${ROOT}/.staging"
     rm -f -- "${ROOT}/.update-in-progress"

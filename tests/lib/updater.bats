@@ -33,6 +33,10 @@ os_mk_root() {
         printf 'old\n' >"${ROOT}/${top}/mark"
     done < <(os_tops)
     printf '1.0.0\n' >"${ROOT}/VERSION"
+    # 根级脚本也在清单里、也由切换器替换（TOP_FILES）。从前它们一次都没被换过，
+    # 于是更新完 README 指的那条卸载入口跑的是旧脚本配新 lib
+    printf 'old\n' >"${ROOT}/install.sh"
+    printf 'old\n' >"${ROOT}/uninstall.sh"
     mkdir -p "${ROOT}/state"
     printf 'caddy\tinstalled\n' >"${ROOT}/state/components.tsv"
     printf 'db.password=s3cret\n' >"${ROOT}/secure.conf"
@@ -49,6 +53,8 @@ os_mk_staging() {
         printf 'new\n' >"${STAGING}/${top}/mark"
     done < <(os_tops)
     printf '2.0.0\n' >"${STAGING}/VERSION"
+    printf 'new\n' >"${STAGING}/install.sh"
+    printf 'new\n' >"${STAGING}/uninstall.sh"
     if [[ -d "${STAGING}/bin" ]]; then
         printf '#!/bin/bash\nexit %s\n' "${rc}" >"${STAGING}/bin/oneserver"
         chmod 0755 "${STAGING}/bin/oneserver"
@@ -241,4 +247,51 @@ os_marks_are() {
     run bash "${UPDATER}" frobnicate --root="${ROOT}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *用法* ]]
+}
+
+# --- 根级文件：清单覆盖它们，切换就必须换它们 --------------------
+#
+# 从前只换五个顶层目录 + VERSION，install.sh / uninstall.sh 一次都没被换过。
+# 现场表现是任何一次 update 之后，README 指的那条卸载入口
+# （bash /opt/oneserver/uninstall.sh）跑的都是旧脚本配新 lib。
+
+@test "switch: 根级脚本跟着一起换成新版" {
+    os_mk_root
+    os_mk_staging 0
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${ROOT}/install.sh")" = 'new' ]
+    [ "$(cat "${ROOT}/uninstall.sh")" = 'new' ]
+}
+
+@test "switch: 暂存区缺 uninstall.sh 就什么都不换" {
+    os_mk_root
+    os_mk_staging 0
+    rm -f "${STAGING}/uninstall.sh"
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -ne 0 ]
+    os_marks_are old
+    [ "$(cat "${ROOT}/install.sh")" = 'old' ]
+}
+
+@test "switch: 自检不过时根级脚本一并退回上一版" {
+    os_mk_root
+    os_mk_staging 1
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -ne 0 ]
+    [ "$(cat "${ROOT}/install.sh")" = 'old' ]
+    [ "$(cat "${ROOT}/uninstall.sh")" = 'old' ]
+    [ "$(cat "${ROOT}/VERSION")" = '1.0.0' ]
+}
+
+@test "rollback: 根级脚本从 .old 放回去" {
+    os_mk_root
+    os_mk_staging 0
+    bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}" >/dev/null 2>&1 || true
+    printf 'new\n' >"${ROOT}/uninstall.sh"
+    mkdir -p "${ROOT}/.old"
+    printf 'old\n' >"${ROOT}/.old/uninstall.sh"
+    run bash "${UPDATER}" rollback --root="${ROOT}"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${ROOT}/uninstall.sh")" = 'old' ]
 }

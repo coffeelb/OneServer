@@ -61,7 +61,23 @@ source /opt/oneserver/lib/bootstrap.sh
 readonly NAME_RE='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
 readonly UNIT='docker.service'
 readonly WATCHTOWER_NAME='oneserver-watchtower'
-readonly WATCHTOWER_IMAGE='docker.io/nickfedor/watchtower'
+
+# 自动更新器镜像。**必须固定 digest，不能用可变 tag。**
+#
+# 这个容器挂着 `/var/run/docker.sock`，也就是说它在宿主上的能力等价于 root。
+# 规范 §11 要求本工具装第三方软件一律走包管理器或校验 SHA256；容器镜像用
+# 可变 tag 拉取两者都不满足 —— 每次 `docker pull` 拿到的字节都可能是新的，
+# 而没有任何一处能发现它变了。固定 digest 之后，registry 在拉取时就会拒绝
+# 内容对不上的响应，`docker pull` 本身就是那道校验。
+#
+# 固定的是**多架构 index digest**（OCI image index），不是某一架构的 manifest
+# digest：前者在 amd64 与 arm64 上都能解析到对应的那一份，后者换个架构就拉不动。
+#
+# 这提供的是**完整性**，不是发布者真实性 —— 它保证「装上去的还是审过的那一版」，
+# 不保证那一版可信。digest 的升级是人工步骤，见 docs/OPERATIONS.md。
+readonly WATCHTOWER_REPO='docker.io/nickfedor/watchtower'
+readonly WATCHTOWER_DIGEST='sha256:bee77696862e09521c49e5ab4904a4179accece6d561a2ef334c7589b84a2438'
+readonly WATCHTOWER_IMAGE="${WATCHTOWER_REPO}@${WATCHTOWER_DIGEST}"
 readonly WATCHTOWER_INTERVAL='86400'
 readonly DOCKER_ID='docker'
 # 标签模式留下的痕迹。**本工具不再打也不再认这个标签**，只在开启服务时扫一眼
@@ -182,9 +198,26 @@ watchtower_apply() {
     local -a names=()
     IFS=' ' read -r -a names <<<"${list}"
 
+    # 这件事必须说出来：更新器要挂 Docker Socket，而能对那个 socket 说话就等于
+    # 能在宿主上以 root 做任何事。用户有权在这一刻知道自己要放进来的是什么
+    os::warn "自动更新器会挂载 /var/run/docker.sock —— 它在宿主上的能力等价于 root。镜像已固定在 ${WATCHTOWER_DIGEST:0:19}…，升级它是人工步骤"
+
+    # 按 digest 拉取：内容对不上时 registry 与 docker 会直接拒绝，这一步本身
+    # 就是校验，不需要事后再算一遍哈希
     os::run '拉取自动更新器镜像' -- docker pull "${WATCHTOWER_IMAGE}" \
-        || os::die 1 '自动更新器镜像拉取失败'
-    os::record_change "部署了 ${WATCHTOWER_NAME}"
+        || os::die 1 "自动更新器镜像拉取失败（固定 digest ${WATCHTOWER_DIGEST:0:19}…，内容对不上也会失败）"
+
+    # 复核一遍本地那一份确实带着我们要的 digest。**不能用 `.Id`** —— 那是镜像
+    # config 对象的摘要，与 `repo@sha256:` 里的 registry manifest/index 摘要
+    # 是两个东西，正常镜像上也对不上，拿它比会把每一次部署都判成失败。
+    # `.RepoDigests` 记的才是拉取时用的那个引用。
+    os::query --timeout 20 -- docker image inspect "${WATCHTOWER_IMAGE}" \
+        --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+        || os::die 1 '读不出自动更新器镜像的 digest'
+    [[ ${OS_RUN_OUTPUT} == *"${WATCHTOWER_DIGEST}"* ]] \
+        || os::die 1 "本地镜像的 digest 与固定值不符，拒绝部署一个持有 Docker Socket 的容器"
+
+    os::record_change "部署了 ${WATCHTOWER_NAME}（镜像固定在 ${WATCHTOWER_DIGEST:0:19}…）"
     # `--cleanup` 换完镜像顺手删掉旧的那一层，不然每更新一次就多留一份
     os::run '部署自动更新器' -- docker run -d --name "${WATCHTOWER_NAME}" \
         --restart always \

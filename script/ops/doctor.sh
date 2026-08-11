@@ -516,6 +516,11 @@ st_check_files() {
         "${OS_API_VERSION_FILE}"
         "${OS_VERSION_FILE}"
         "${OS_GROUPS_CONF}"
+        # 两个根级脚本也在清单里、也由切换器替换（updater 的 TOP_FILES）。
+        # 查它们不是凑数：从前更新根本不换这两个文件，而自检也没看过它们，
+        # 于是「装了新版、卸载器还是旧的」这条路上没有任何一处会亮红
+        "${OS_ROOT}/install.sh"
+        "${OS_ROOT}/uninstall.sh"
     )
     local f
     local -i bad=0

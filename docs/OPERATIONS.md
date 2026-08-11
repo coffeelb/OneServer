@@ -66,7 +66,28 @@ oneserver restore --target=<类型:名字> --file=<归档文件名> --from=local
 
 恢复完成后检查站点配置、数据库连接、文件属主和相关 systemd unit，再由应用层做读写验收。归档校验通过只说明传输内容一致，不等于应用可用。
 
-## 6. 升级处理
+## 6. 固定镜像的 digest 升级
+
+`script/manage/docker_container.sh` 里的自动更新器镜像固定在一个多架构 index digest 上。它持有 Docker Socket，能力等价于宿主 root，所以不走可变 tag——每次 `docker pull` 拿到什么字节都无人可查。
+
+升级是**人工步骤**，不会自动发生。要换新版本时：
+
+```bash
+podman manifest inspect docker.io/nickfedor/watchtower:latest | head -5
+```
+
+确认返回的 `mediaType` 是 `application/vnd.oci.image.index.v1+json`（多架构 index，amd64 与 arm64 都在里面），再取它的 digest：
+
+```bash
+podman pull docker.io/nickfedor/watchtower:latest
+podman image inspect docker.io/nickfedor/watchtower:latest --format '{{index .RepoDigests 0}}'
+```
+
+把 `@sha256:` 后面那一段填进 `WATCHTOWER_DIGEST`。**固定的必须是 index digest，不是某一架构的 manifest digest**——后者换个架构就拉不动。
+
+digest 只提供完整性，不提供发布者真实性：它保证装上去的还是你审过的那一版，不保证那一版可信。换 digest 前请自行确认新版本的来源。
+
+## 7. 升级处理
 
 以下情况停止自动操作并升级给维护者：主 state 与 `.bak` 均坏且没有安装记录副本；锁持有者处于不可确认的包管理或文件替换临界区；更新的当前版与 `.old` 都无法通过自检；备份哈希不一致；恢复目标仍在持续写入；诊断包疑似含凭据。
 

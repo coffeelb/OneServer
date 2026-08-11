@@ -151,8 +151,28 @@ fetch_node() {
         -o "${dir}/SHASUMS256.txt" "${base}/SHASUMS256.txt" \
         || os::die 1 '下载 SHASUMS256.txt 失败'
 
-    os::query --timeout 60 -- \
-        sh -c "cd '${dir}' && sha256sum -c --ignore-missing SHASUMS256.txt" \
+    # 从清单里取出**这个文件那一行**的哈希再比，不 `cd`、不起内层 shell
+    # （同 backup.sh 的 action_verify）。原来的 `cd '${dir}' && sha256sum -c`
+    # 要一层 shell，于是目录得拼进脚本文本 —— 这里的 dir 来自 os::tmpdir、
+    # 恰好不含元字符，但「值恰好安全」是会在重构中静默失效的保证。
+    #
+    # 顺带去掉 `--ignore-missing`：它原本是为了跳过清单里其余几十个平台的
+    # 产物，而只取自己那一行就不需要它。这也堵上了它的副作用 —— 清单里
+    # **根本没有**我们这个文件时，`-c --ignore-missing` 不算失败。
+    local want='' line lhash lname
+    while IFS= read -r line || [[ -n ${line} ]]; do
+        lhash=${line%% *}
+        lname=${line##* }
+        [[ ${lname} == "${name}" ]] || continue
+        want=${lhash}
+        break
+    done <"${dir}/SHASUMS256.txt"
+    [[ ${want} =~ ^[0-9a-f]{64}$ ]] \
+        || os::die 1 "SHASUMS256.txt 里没有 ${name} 的哈希，拒绝安装"
+
+    os::query --timeout 60 -- sha256sum -- "${dir}/${name}" \
+        || os::die 1 "计算 ${name} 的 SHA256 失败"
+    [[ ${OS_RUN_OUTPUT%% *} == "${want}" ]] \
         || os::die 1 "${name} 未通过 SHA256 校验，拒绝安装（不会自动改用无校验的来源）"
     os::ok 'SHA256 校验通过'
 

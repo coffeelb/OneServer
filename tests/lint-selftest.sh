@@ -95,6 +95,25 @@ fresh_copy
 sed -i 's/@requires_lib >= 4.0/@requires_lib >= 99.0/' "${work}/script/ops/web_collect.sh"
 expect_red '内部步骤脚本要求未来 API' '要求 lib API >= 99.0'
 
+# `sh -c "…${值}…"` 是 eval 的另一种写法：外层展开后拼进内层 shell 的脚本
+# 文本。真实后果是恢复流程曾把远端目录名拼进去 —— 能往备份桶里写东西的人
+# 因此能在恢复机上以 root 执行命令。反例用的正是那条被修掉的形状。
+fresh_copy
+printf "\nos::query --timeout 10 -- sh -c \"ls -1 '\${OS_ARCHIVE_DIR}' | sort\"\n" \
+    >>"${work}/script/ops/backup.sh"
+expect_red 'sh -c 里拼接变量展开' '拼进了 sh -c 的脚本文本'
+
+# 位置参数那条正确写法**不能被误伤**：`$1` 是内层 shell 的参数，值经 argv
+# 传入。probe.sh 全是这个形状，检查若连它一起报红就只能被整条关掉。
+fresh_copy
+printf "\nos::query --timeout 10 -- sh -c 'du -sk -- \"\$1\"' sh \"\${OS_LOG_DIR}\"\n" \
+    >>"${work}/script/ops/backup.sh"
+if (cd "${work}" && bash tests/lint.sh >/dev/null 2>&1); then
+    pass 'sh -c 走位置参数不被误伤'
+else
+    fail 'sh -c 走位置参数被误报成违规 —— 这条检查会逼人把它整个关掉'
+fi
+
 # --- 2. 运行时路径不得硬编码（含根卸载器与 OS_ROOT 之外的系统落点）---
 fresh_copy
 printf "\nLINT_SELFTEST='/usr/local/bin'\n" >>"${work}/uninstall.sh"

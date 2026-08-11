@@ -20,7 +20,7 @@
 #  13. 二级菜单与 dispatch 分支一一对应（双向）
 #  14. @privilege root-nolock 的脚本零系统副作用
 #  15. 运行时路径不得硬编码，只出自 lib/paths.sh
-#  16. `eval` 全项目零使用
+#  16. `eval` 全项目零使用，且 `sh -c` 的脚本文本里不出现 `${` 展开
 #  17. lib 分层与装配：L0 只有赋值、模块之间不 source、不依赖 jq/python/perl
 #  18. 脚本文件头四件套齐全（script/** 全部，加根卸载器）
 #  19. 脚本元数据静态可判定的部分自洽
@@ -775,7 +775,7 @@ printf '检查了 %d 个文件\n' "${path_checked}"
 # 要写出它所检查的那个词（本节的 grep 模式就是），把它算成违规只能靠给
 # 自己开特例，而特例一旦存在就会被下一个人用来豁免别的东西。
 
-section "eval"
+section "eval 与 sh -c"
 eval_hits=0
 for f in "${files[@]}"; do
     case "${f}" in
@@ -788,7 +788,42 @@ for f in "${files[@]}"; do
         report_fail "${f}:${hit%%:*} 用了 eval —— 规范要求全项目零使用，确需时先改规范说明理由"
     done < <(grep -nE '(^|[^_[:alnum:]])eval[[:space:]]' "${f}" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 done
-printf '全项目 %d 处\n' "${eval_hits}"
+printf 'eval 全项目 %d 处\n' "${eval_hits}"
+
+# 同一条关切的第二半：`sh -c "…${值}…"` 是 eval 的另一种写法。
+# **不单列一项**，因为它与上面查的是同一件事——禁止把数据拼成可执行文本。
+#
+# `eval` 被禁了，`sh -c "…${值}…"` 却是它的另一种写法，而且此前不在任何检查
+# 之内。真实后果不是理论上的：`restore.sh` 的远端列举函数把 `rclone lsf` 返回的
+# **远端目录名**拼进内层 shell 的脚本文本，于是一个名为 `x'; <命令>; :'` 的
+# 远端目录能闭合那对单引号 —— 「谁能往备份桶里写东西」就等于「谁能在恢复机上
+# 以 root 执行命令」。
+#
+# 判据是 `${`，不是 `$`。两者分得很干净：
+#   * 危险：`sh -c "… '${dir}' …"`   —— 外层 shell 展开后拼进脚本文本
+#   * 安全：`sh -c "… \"\$1\" …" sh "${dir}"` —— `$1` 是内层 shell 的位置参数，
+#     值经 argv 传入，从结构上不可能被当成语法
+# 后者是本仓库既有的正确写法（probe.sh 全部如此），不该被误伤。
+#
+# **这条检查不完备，故意的。** 它只看「`sh -c "` 与同一行下一个 `"` 之间」，
+# 因此跨行的脚本文本、以及先拼进变量再传给 `sh -c` 的写法都查不出来 ——
+# 规范 §10 已经写明「动态构造或间接执行无法由文本检查完备证明，仍须代码审查」。
+# 能被静态发现的那一类不该因为存在查不出的那一类就放着不查。
+
+shc_hits=0
+for f in "${files[@]}"; do
+    case "${f}" in
+        bin/* | lib/* | script/* | packaging/* | templates/* | install.sh | uninstall.sh) ;;
+        *) continue ;;
+    esac
+    while IFS= read -r hit; do
+        [[ -n "${hit}" ]] || continue
+        shc_hits=$((shc_hits + 1))
+        report_fail "${f}:${hit%%:*} 把 \${…} 拼进了 sh -c 的脚本文本 —— 值要经位置参数传入（sh -c '… \"\$1\" …' sh \"\${值}\"）"
+    done < <(grep -nE '\b(sh|bash)[[:space:]]+-c[[:space:]]+"[^"]*\$\{' "${f}" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+done
+printf 'sh -c 拼接 %d 处\n' "${shc_hits}"
 
 # --- 17. lib 分层与装配 ---
 #

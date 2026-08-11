@@ -45,7 +45,11 @@ source /opt/oneserver/lib/bootstrap.sh
 # 那个 lib —— 那正是本文件开头说的未定义行为。
 
 # 与 install.sh 的 OWNED_TOP、packaging/updater.sh 的 TOP_ORDER 必须一致：
-# 清单覆盖哪些，校验与切换就该管哪些
+# 清单覆盖哪些，校验与切换就该管哪些。
+#
+# 清单还覆盖三个根级文件（VERSION / install.sh / uninstall.sh），它们由切换器
+# 的 TOP_FILES 换。这里不需要列它们：remove_staging_orphans 的 keep 集合来自
+# MF_PATH，本来就含它们；要清的只是「目录里有、清单里没有」的那些。
 readonly -a UPDATE_TOP=('lib' 'templates' 'packaging' 'script' 'bin')
 
 readonly STAGING="${OS_ROOT}/.staging"
