@@ -188,7 +188,9 @@ action_allow_containers() {
     # protected-mode 保持 yes —— 有密码时它不拦，没密码时它是最后一道闸
     os::replace_line --backup "${VALKEY_CONF}" '^bind ' 'bind 0.0.0.0' \
         || os::die 1 "${VALKEY_CONF} 里找不到 bind 行"
-    if [[ ${OS_REPLACE_CHANGED} -eq 1 ]]; then
+    # **紧邻着读**：OS_REPLACE_CHANGED 是单槽易失变量（§10）
+    local -i bind_changed=${OS_REPLACE_CHANGED}
+    if [[ ${bind_changed} -eq 1 ]]; then
         os::record_change '把 Valkey 的监听地址改成 0.0.0.0'
         os::systemd_restart "${VALKEY_UNIT}" || os::die 1 'Valkey 重启失败，监听地址可能未生效'
     fi
@@ -196,10 +198,15 @@ action_allow_containers() {
     local IFS=' '
     os::state_set valkey container_access="${nets[*]}" || true
 
+    # 如实反映这一次有没有产生变更：全都已放行、监听地址也没变时就是 no
+    # （§10 幂等：第二次执行不产生任何新变更）
+    local changed='no'
+    ((added > 0 || bind_changed == 1)) && changed='yes'
+
     os::ok "已放行 ${added} 个新网段（共 ${#nets[@]} 个）；以后新建了容器网络，重跑这一步即可补上"
     os::info "容器里连缓存用宿主网关地址，例如 docker 默认是 172.17.0.1、podman 默认是 10.88.0.1"
     os::info "密码取法：oneserver secure get ${VALKEY_SECRET_KEY}"
-    os::output 0 subnets="${nets[*]}" added="${added}" changed=yes
+    os::output 0 subnets="${nets[*]}" added="${added}" changed="${changed}"
     return 0
 }
 
