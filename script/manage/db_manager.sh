@@ -167,8 +167,12 @@ account_hosts() {
     local user=${1} qu h out=''
     DB_HOSTS=''
     qu=$(os::sql_str "${user}")
+    # **localhost 排第一**，其余按字母序。纯 `ORDER BY Host` 是字母序，数字开头
+    # 的容器网段会排到 localhost 前面 —— 而第一项是唯一带 `user@` 前缀的那个，
+    # 于是一眼看去像「这账号主要从容器网段来」，真正的主账号反而缩在末尾。
     os::sql_query '列出账号来源' -- \
-        "SELECT Host FROM mysql.global_priv WHERE User = ${qu} ORDER BY Host;" || return 1
+        "SELECT Host FROM mysql.global_priv WHERE User = ${qu}
+         ORDER BY (Host = 'localhost') DESC, Host;" || return 1
     local IFS=$'\n'
     for h in ${OS_RUN_OUTPUT}; do
         [[ -n ${h} ]] || continue
