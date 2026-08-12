@@ -369,16 +369,18 @@ check_space() {
     # 512 MB 只在**查不到时**兜底。原来无条件按 512 MB 估，一个 5 GB 的库
     # 会让空间检查一路绿灯，然后在打包途中把分区撑爆 —— 而撑爆分区正是这个
     # 函数存在的全部理由。
+    local -i db_need=0
     if [[ -n ${db} ]]; then
         local dbq
         dbq=$(os::sql_str "${db}")
         if os::sql_query '估算数据库体积' -- \
             "SELECT COALESCE(SUM(data_length + index_length) DIV 1024, 0) FROM information_schema.tables WHERE table_schema = ${dbq}" \
             && [[ ${OS_RUN_OUTPUT} =~ ^[0-9]+$ ]] && [[ ${OS_RUN_OUTPUT} -gt 0 ]]; then
-            need+=${OS_RUN_OUTPUT}
+            db_need=${OS_RUN_OUTPUT}
         else
-            need+=524288
+            db_need=524288
         fi
+        need+=${db_need}
     fi
 
     probe::disk_free_kb "${OS_ARCHIVE_DIR}"
@@ -387,6 +389,25 @@ check_space() {
 
     if ((free < need)); then
         os::err "磁盘空间不足：估计需要 $((need / 1024)) MB，可用 $((free / 1024)) MB"
+        return 1
+    fi
+
+    # **数据库转储先落暂存目录，那可能是另一个文件系统。** 上面查的是归档目录
+    # （/var/backups），而 mysqldump 的 --result-file 写在 os::tmpdir 给的目录里，
+    # D244 之后它在程序目录下 —— 两处各自挂载时，归档那边绿灯不代表转储写得下。
+    # 写不下时 mysqldump 报的是它自己的错，跟「备份空间不够」对不上号，而这个
+    # 函数存在的全部理由就是别让人在打包途中才发现分区满了。
+    #
+    # **查 OS_ROOT 而不是 OS_TMP_ROOT**：后者要到 os::tmpdir 第一次跑才存在，
+    # 对着不存在的路径查可用空间只会得到降级值，然后这条检查被静默跳过。
+    # 它是 OS_ROOT 的子目录，同一个文件系统，查父目录等价且必然存在。
+    ((db_need > 0)) || return 0
+    probe::disk_free_kb "${OS_ROOT}"
+    local tmpfree=${OS_PROBE_VALUE}
+    [[ ${tmpfree} =~ ^[0-9]+$ ]] || return 0
+
+    if ((tmpfree < db_need)); then
+        os::err "暂存空间不足：数据库转储估计需要 $((db_need / 1024)) MB，${OS_TMP_ROOT} 所在文件系统可用 $((tmpfree / 1024)) MB"
         return 1
     fi
     return 0
