@@ -62,6 +62,12 @@
 - `os::query [--timeout <秒>] [--env K=V...] [--stdin <文本>] [--want-stderr] -- <命令...>`
 - `os::retry [--stop-on <码,码>] <次数> [选项同 os::run] <desc> -- <命令...>` —— 指数退避重试；dry-run 下只「跑」一次
 
+## `lib/firewall.sh` · L3 能力
+
+- `os::ufw_allowed <规则文本> <端口> <协议> [来源]` —— 这条放行在不在规则里
+- `os::ufw_allow <端口> <协议> [来源]` —— 放行一条规则
+- `os::ufw_reload` —— 重载 UFW 使规则生效
+
 ## `lib/lock.sh` · L2 基础设施
 
 - `os::lock_acquire [--try] [超时秒]`

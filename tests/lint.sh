@@ -23,7 +23,7 @@
 #  16. `eval` 全项目零使用，且 `sh -c` 的脚本文本里不出现 `${` 展开
 #  17. lib 分层与装配：L0 只有赋值、模块之间不 source、不依赖 jq/python/perl
 #  18. 脚本文件头四件套齐全（script/** 全部，加根卸载器）
-#  19. 脚本元数据静态可判定的部分自洽
+#  19. 脚本元数据与菜单分组数据静态可判定的部分自洽
 #  20. 公开接口的测试覆盖不倒退（棘轮，只降不升）
 #  21. 出参函数的局部变量带 `__` 前缀，回写不被同名局部变量吃掉（棘轮，只降不升）
 #
@@ -1095,6 +1095,35 @@ while IFS= read -r f; do
             || report_fail "${f} 的 @description 宽 ${w} 格，超过 ${desc_max}——菜单里会被截断成省略号"
     done < <(sed -nE 's/^#[[:space:]]*@description[[:space:]]+(.+[^[:space:]])[[:space:]]*$/\1/p' "${f}")
 done < <(printf '%s\n' "${files[@]}")
+
+# --- 分组说明：落在菜单的同一列，且只有收纳分组用得到 ---
+#
+# 分组只剩一个可见成员时，groups.conf 第五列顶替那条成员脚本的 @description
+# 占说明列，超宽同样被截成省略号 —— 同一列同一个阈值。
+#
+# 顶层分组（没有 parent 的）在菜单里只作为分区标题出现，标题没有说明列：
+# 写在那儿的字一个都不会显示，而写的人不会知道。
+while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%#*}"
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    IFS='|' read -r gid _ _ gparent gdesc <<<"${line}"
+    gid="${gid//[[:space:]]/}"
+    gparent="${gparent//[[:space:]]/}"
+    gdesc="${gdesc#"${gdesc%%[![:space:]]*}"}"
+    gdesc="${gdesc%"${gdesc##*[![:space:]]}"}"
+    [[ -n "${gdesc}" ]] || continue
+    [[ -n "${gparent}" ]] \
+        || report_fail "templates/groups.conf 的顶层分组「${gid}」写了说明，但顶层分组在菜单里只是分区标题，这一列不会显示"
+    w=$(
+        # shellcheck source=/dev/null
+        source "${REPO_ROOT}/lib/theme.sh"
+        # shellcheck source=/dev/null
+        source "${REPO_ROOT}/lib/ui.sh"
+        ui::width "${gdesc}"
+    )
+    ((w <= desc_max)) \
+        || report_fail "templates/groups.conf 的分组「${gid}」说明宽 ${w} 格，超过 ${desc_max}——菜单里会被截断成省略号"
+done <"${REPO_ROOT}/templates/groups.conf"
 
 if [[ ${#meta_orders[@]} -gt 0 ]]; then
     while IFS= read -r dup; do

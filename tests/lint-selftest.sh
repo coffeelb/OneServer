@@ -174,6 +174,20 @@ else
     fi
 fi
 
+# --- 7. 分组说明：塞得进说明列，且写在用得到的地方 ---
+#
+# 反例按显示宽度构造：25 个中文字 = 50 格，刚过 48。
+fresh_copy
+printf 'wide | 超宽分组 | 940 | sys | 这一列写成一整句话的结果是菜单里每条都以省略号收尾\n' \
+    >>"${work}/templates/groups.conf"
+expect_red '分组说明超过说明列宽' '说明宽 50 格'
+
+# 顶层分组的说明一个字都不会显示，而写的人拿不到任何反馈。
+fresh_copy
+printf 'orphan | 顶层分组 | 941 | | 写在这儿的字一个都不会上屏\n' \
+    >>"${work}/templates/groups.conf"
+expect_red '顶层分组写了不会显示的说明' '只是分区标题'
+
 printf '\n=== 结论 ===\n'
 if ((fail_count == 0)); then
     printf '全部反例都被拦下\n'

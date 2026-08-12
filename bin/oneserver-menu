@@ -463,10 +463,18 @@ menu_group_summary() {
 
     local -i total=${#names[@]}
     # 只有一个成员时列它的名字，等于把分组名重说一遍（「Podman 容器 › 容器管理」）。
-    # 而这种分组一进去就被自动跳过，被重说的那一层用户根本看不到 —— 改列它的说明，
-    # 这一行才真的在回答「里面装着什么」
+    # 而这种分组一进去就被自动跳过，被重说的那一层用户根本看不到 —— 改说这一栏
+    # 覆盖什么，这一行才真的在回答「里面装着什么」。
+    #
+    # **优先用分组自己的说明**（groups.conf 第五列）。回落到成员脚本的
+    # `@description` 是不得已：那句写的是那一条命令干什么，而成员只剩一条往往
+    # 是别的成员被 `@requires` 隐掉了 —— 于是「数据库 › 查看 Valkey 状态」看着
+    # 像这一栏只有 Valkey，其实是 MariaDB 没装。分组没写说明时仍然回落，
+    # 让 groups.conf 的第五列保持可选。
     if ((total == 1 && cmds == 1)); then
-        printf '%s\n' "${OS_REG_DESC[only]}"
+        local blurb
+        blurb=$(registry::group_desc "${g}")
+        printf '%s\n' "${blurb:-${OS_REG_DESC[only]}}"
         return 0
     fi
     for ((i = 0; i < total; i++)); do

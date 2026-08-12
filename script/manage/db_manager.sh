@@ -8,7 +8,7 @@
 # @order        10
 # @requires     mariadb
 # @privilege    root
-# @requires_lib >= 4.6
+# @requires_lib >= 4.8
 # @provides     db:<name>
 # @args         [--action=<list|create|delete|backup|restore|allow-containers>] [--name=<库名>] [--user=<用户名>] [--allow-any-host=<y|n>] [--auto-password=<y|n>] [--file=<备份文件>] [--confirm-drop=<库名>] [--allow-containers=<y|n>]
 # @description  创建、删除、备份、恢复数据库与关联账号
@@ -68,8 +68,6 @@ readonly DB_DUMP_DIR="${OS_BACKUP_DIR}/db"
 readonly MARIADB_CONF='/etc/mysql/mariadb.conf.d/50-server.cnf'
 readonly MARIADB_UNIT='mariadb.service'
 readonly MARIADB_PORT='3306'
-# ufw 的措辞随 locale 变，而下面要按文本判定放行了没有（同 web.sh / ufw_manager）
-readonly UFW_ENV='LC_ALL=C'
 
 # 函数之间的返回通道。**不用 `printf` + `$( )`** —— os::info / os::ok / os::run
 # 的提示都默认打到 stdout，会被一起吃进变量（D135 就是这么栽的）。
@@ -542,15 +540,11 @@ action_restore() {
 # 这里统一绑 0.0.0.0，边界交给防火墙 —— 代价是数据库在公网网卡上也监听着，
 # 所以下面对 UFW 的要求是硬的：没有真正挡得住的防火墙就不动手。
 
-# 这个网段放行过没有。按「端口 + 来源」认，不做子串匹配
+# 这个网段放行过没有。规则匹配在 lib/firewall.sh（§11）
 db_subnet_allowed() {
-    local subnet=${1} line
+    local subnet=${1}
     probe::ufw_rules
-    while IFS= read -r line; do
-        [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${MARIADB_PORT}(/tcp)?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+${subnet//./\\.}([[:space:]]|$) ]] \
-            && return 0
-    done <<<"${OS_PROBE_VALUE}"
-    return 1
+    os::ufw_allowed "${OS_PROBE_VALUE}" "${MARIADB_PORT}" tcp "${subnet}"
 }
 
 # 网段 → MySQL 账号能用的来源写法：`10.88.0.0/16` → `10.88.0.0/255.255.0.0`。
@@ -693,13 +687,11 @@ action_allow_containers() {
     local -i added=0
     for n in "${nets[@]}"; do
         db_subnet_allowed "${n}" && continue
-        os::record_change "在 UFW 里放行 ${MARIADB_PORT}/tcp，来源 ${n}"
-        os::run --env "${UFW_ENV}" '放行一个容器网段' -- \
-            ufw allow from "${n}" to any port "${MARIADB_PORT}" proto tcp || return 1
+        os::ufw_allow "${MARIADB_PORT}" tcp "${n}" || return 1
         added+=1
     done
     if ((added > 0)); then
-        os::run --env "${UFW_ENV}" '重载 UFW 使规则生效' -- ufw reload || return 1
+        os::ufw_reload || return 1
     fi
 
     # 监听地址：容器连的是网桥网关，只听 127.0.0.1 的话规则放行了也连不上

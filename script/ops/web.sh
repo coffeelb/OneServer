@@ -7,7 +7,7 @@
 # @group        monitor
 # @order        5
 # @privilege    root
-# @requires_lib >= 4.5
+# @requires_lib >= 4.8
 # @provides     web
 # @provides_unit own:oneserver-web-live.service
 # @provides_unit own:oneserver-web-live.timer
@@ -69,9 +69,11 @@ readonly CADDY_IMPORT_RE='^[[:space:]]*import[[:space:]]+incoming/\*\.caddy[[:sp
 readonly WEB_PORT='8730'
 readonly WEB_AUTH_KEY='web.basic_auth'
 readonly COMPONENT='web'
-# ufw 的措辞随 locale 变，而下面要按文本判定「放行了没有」。与 ufw_manager.sh
-# 同一个常量：从这里调它的脚本会死锁（本命令持全局锁，子进程 flock 同一个文件
-# 要等到超时），所以那几条 ufw 只能在本脚本里直接发
+# ufw 的措辞随 locale 变，而下面收回放行时要按文本判定删没删掉。
+#
+# **不派发 oneserver firewall 去做这件事**：本命令持着全局锁，子进程 flock
+# 同一个文件只能等到超时 —— 所以 ufw 只能在本进程里直接发。放行走
+# lib/firewall.sh，只有删规则留在这里（§11 防火墙那行的例外说明）。
 readonly UFW_ENV='LC_ALL=C'
 
 # 面板的门。二选一，不能都没有。
@@ -181,25 +183,20 @@ resolve_guard() {
     return 0
 }
 
-# UFW 里放行过面板端口的 TCP 没有。probe::ufw_rules 的每行形如
-# `[ 1] 8730/tcp   ALLOW IN  Anywhere`，按序号加端口认，不做子串匹配 ——
-# `*8730*` 会被 18730 或某条注释蒙混过去。
-#
-# **协议后面那个锚点不能省。** 少了它，`(/tcp)?` 匹配空串就算数，于是一条
-# `8730/udp` 的规则会被读成「TCP 已放行」，enable 时那句放行提示再也不出现，
-# 而面板照样打不开。真机上第一次跑就撞上了。
+# UFW 里放行过面板端口的 TCP 没有。规则匹配在 lib/firewall.sh（§11）——
+# 那条正则真机上栽过一次（少一个结尾锚点，`8730/udp` 被读成「TCP 已放行」，
+# 于是放行提示再也不出现而面板打不开），四个调用点各写一份就要各栽一次。
 web_port_allowed() {
     probe::ufw_rules
-    local line
-    while IFS= read -r line; do
-        [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${WEB_PORT}(/tcp)?([[:space:]]|$) ]] \
-            && return 0
-    done <<<"${OS_PROBE_VALUE}"
-    return 1
+    os::ufw_allowed "${OS_PROBE_VALUE}" "${WEB_PORT}" tcp
 }
 
 # 放行范围跟着门走。给了网段就只放行那个网段 —— 放成 Anywhere 的话，挡在
-# 外面的就只剩 Caddy 那条 remote_ip，少一层。结果写进 FW_RULE / FW_SCOPE。
+# 外面的就只剩 Caddy 那条 remote_ip，少一层。
+#
+# **FW_RULE 只剩 revoke 用**：删一条规则要拿规则全文，而删不在 firewall.sh 里
+# （§11 防火墙那行的例外说明）。放行走 os::ufw_allow，它自己拼规则。
+# FW_SCOPE 两条路都用，措辞集中在这里。
 FW_RULE=()
 FW_SCOPE=''
 
@@ -217,9 +214,8 @@ firewall_rule_for() {
 
 # enable 收尾：UFW 开着但没放行面板端口时问一句。
 #
-# **默认否**（§15：放宽访问来源默认必须为否）。install_caddy 对 80/443、
-# install_mariadb 对 3306 都是「只提示不代劳」；这里多问一句而不是只提示，
-# 是因为 8730 是本命令自己开出来的端口，不是用户建站时的选择。
+# **默认否**（§15：放宽访问来源默认必须为否）。问一句而不是只丢一行提示，
+# 是因为 8730 是本命令自己开出来的端口 —— 不放行它就等于这条命令做了一半。
 #
 # **只听回环时压根不问**：Caddy 绑在 127.0.0.1 上，包到不了网卡，一条 ufw
 # 规则不会让任何人多打开一个页面，问了只是噪声。
@@ -241,9 +237,8 @@ offer_firewall_allow() {
         return 0
     }
 
-    os::record_change "在 UFW 里放行 ${WEB_PORT}/tcp，来源 ${FW_SCOPE}"
-    os::run --env "${UFW_ENV}" '放行面板端口' -- ufw allow "${FW_RULE[@]}" || return 1
-    os::run --env "${UFW_ENV}" '重载 UFW 使规则生效' -- ufw reload || return 1
+    os::ufw_allow "${WEB_PORT}" tcp "${GUARD_FROM}" || return 1
+    os::ufw_reload || return 1
     os::ok "已放行 ${WEB_PORT}/tcp（来源 ${FW_SCOPE}）"
     return 0
 }

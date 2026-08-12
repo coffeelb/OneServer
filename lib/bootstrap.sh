@@ -147,6 +147,8 @@ source "${OS_LIB_SELF_DIR}/sql.sh"
 # shellcheck source=/dev/null
 source "${OS_LIB_SELF_DIR}/systemd.sh"
 # shellcheck source=/dev/null
+source "${OS_LIB_SELF_DIR}/firewall.sh"
+# shellcheck source=/dev/null
 source "${OS_LIB_SELF_DIR}/probe.sh"
 # shellcheck source=/dev/null
 source "${OS_LIB_SELF_DIR}/template.sh"

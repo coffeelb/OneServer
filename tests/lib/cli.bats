@@ -151,6 +151,36 @@ printf 'SOLO-RAN\n'
 EOF
     chmod +x /opt/oneserver/script/ops/selftest_solo.sh
 
+    # 同样是单成员分组，但**写了说明**（groups.conf 第五列）。这一对夹具压的是
+    # 主屏说明列取谁：写了说明取分组的（这一栏覆盖什么），没写才回落到成员脚本的
+    # @description（那一条命令干什么）—— 上面的 solo 没写第五列，正好留着覆盖回落。
+    printf 'blurb | 有说明分组 | 960 | sys | 分组自己的说明\n' >>/opt/oneserver/templates/groups.conf
+    cat >/opt/oneserver/script/ops/selftest_blurb.sh <<'EOF'
+#!/bin/bash
+#
+# 端到端测试用：分组写了说明时，主屏说明列不该取这条命令的 @description
+#
+# @command      selftest blurb
+# @name         端到端说明
+# @group        blurb
+# @order        925
+# @privilege    any
+# @requires_lib >= 1.0
+# @description  成员命令自己的说明
+#
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 027
+
+source /opt/oneserver/lib/bootstrap.sh
+
+printf 'BLURB-RAN\n'
+EOF
+    chmod +x /opt/oneserver/script/ops/selftest_blurb.sh
+
     # 有下级的命令：它在上一层用 @name，在**自己那一屏**的第一项用 @self_name。
     # 一个名字答不了两个问题，共用的话标题与第一项会逐字重复
     cat >/opt/oneserver/script/ops/selftest_parent.sh <<'EOF'
@@ -321,6 +351,24 @@ menu_num() {
     # 曾经的表现：`r:` 被压进栈，下一圈 menu_screen 认不出它（只认 g:/c:），
     # 画出一屏空菜单后连分组一起弹掉 —— 主屏又出现一次，那条命令永远选不中
     [[ "${output}" == *"SOLO-RAN"* ]]
+}
+
+@test "单成员分组的说明列取分组说明，不取成员命令的 @description" {
+    local screen
+    screen=$(menu_screen '\n')
+    # 成员只剩一条几乎总是因为别的成员被 @requires 隐掉了 —— 那时把成员脚本的
+    # @description 顶上去，读起来像这一栏只有那一条命令
+    [[ "${screen}" == *"分组自己的说明"* ]]
+    [[ "${screen}" != *"成员命令自己的说明"* ]]
+}
+
+@test "分组没写说明时，说明列回落到成员命令的 @description" {
+    local screen
+    screen=$(menu_screen '\n')
+    # groups.conf 第五列是可选的：没写就保持原来的行为，不让分组一行没写说明
+    # 就在主屏留一片空白。只匹配开头 —— 说明列窄了会被渲染层截成 `…`，
+    # 而这条用例问的是「取了谁的文案」，不是「有没有被截断」
+    [[ "${screen}" == *"证明单成员分组"* ]]
 }
 
 @test "单成员分组派发完返回菜单，回到主屏而不是再跑一次同一条命令" {

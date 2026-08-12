@@ -37,7 +37,7 @@ layer_of() {
         paths | defaults | theme) printf 'L0 常量\n' ;;
         ui | log) printf 'L1 输出\n' ;;
         exec | errors | lock) printf 'L2 基础设施\n' ;;
-        secure | state | sql | systemd | probe | template) printf 'L3 能力\n' ;;
+        secure | state | sql | systemd | firewall | probe | template) printf 'L3 能力\n' ;;
         bootstrap | registry) printf 'L4 装配\n' ;;
         *) printf '未分层\n' ;;
     esac

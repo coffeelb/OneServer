@@ -7,7 +7,7 @@
 # @group        db
 # @order        20
 # @privilege    root
-# @requires_lib >= 4.6
+# @requires_lib >= 4.8
 # @args         [--action=<status|allow-containers>] [--allow-containers=<y|n>]
 # @description  查看 Valkey 状态，按需放行容器访问
 #
@@ -35,8 +35,6 @@ source /opt/oneserver/lib/bootstrap.sh
 readonly VALKEY_CONF='/etc/valkey/valkey.conf'
 readonly VALKEY_UNIT='valkey-server.service'
 readonly VALKEY_SECRET_KEY='valkey.password'
-# ufw 的措辞随 locale 变，而下面要按文本判定放行了没有（同 db_manager / web.sh）
-readonly UFW_ENV='LC_ALL=C'
 
 # ------------------------------------------------------------------
 
@@ -69,15 +67,11 @@ valkey_bind() {
     printf '%s' "${out}"
 }
 
-# 这个网段放行过没有。按「端口 + 来源」认，不做子串匹配
+# 这个网段放行过没有。规则匹配在 lib/firewall.sh（§11）
 vk_subnet_allowed() {
-    local subnet=${1} port=${2} line
+    local subnet=${1} port=${2}
     probe::ufw_rules
-    while IFS= read -r line; do
-        [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+${subnet//./\\.}([[:space:]]|$) ]] \
-            && return 0
-    done <<<"${OS_PROBE_VALUE}"
-    return 1
+    os::ufw_allowed "${OS_PROBE_VALUE}" "${port}" tcp "${subnet}"
 }
 
 # ------------------------------------------------------------------
@@ -175,13 +169,11 @@ action_allow_containers() {
     local -i added=0
     for n in "${nets[@]}"; do
         vk_subnet_allowed "${n}" "${port}" && continue
-        os::record_change "在 UFW 里放行 ${port}/tcp，来源 ${n}"
-        os::run --env "${UFW_ENV}" '放行一个容器网段' -- \
-            ufw allow from "${n}" to any port "${port}" proto tcp || return 1
+        os::ufw_allow "${port}" tcp "${n}" || return 1
         added+=1
     done
     if ((added > 0)); then
-        os::run --env "${UFW_ENV}" '重载 UFW 使规则生效' -- ufw reload || return 1
+        os::ufw_reload || return 1
     fi
 
     # 监听地址：容器连的是网桥网关，只听 127.0.0.1 的话规则放行了也连不上。

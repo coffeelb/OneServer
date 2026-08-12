@@ -7,10 +7,10 @@
 # @group        app
 # @order        110
 # @privilege    root
-# @requires_lib >= 4.0
+# @requires_lib >= 4.8
 # @provides     caddy
 # @provides_unit ext:caddy.service
-# @args         [--plugins=<+加|-减|序号|列表|none>] [--skip-official] [--relax-apparmor] [--on-build-error=<retry|prebuilt|abort>] [--fallback-prebuilt=<y|n>]
+# @args         [--plugins=<+加|-减|序号|列表|none>] [--skip-official] [--relax-apparmor] [--on-build-error=<retry|prebuilt|abort>] [--fallback-prebuilt=<y|n>] [--allow-web-ports=<y|n>]
 # @description  装 Caddy，可换成带 DNS 插件的二进制
 #
 
@@ -601,19 +601,73 @@ relax_apparmor() {
     return 0
 }
 
-check_firewall() {
+# Caddy 要对外提供服务就得有这三条。443 的 udp 是 HTTP/3 —— 少了它不会有
+# 任何报错，只是浏览器悄悄退回 TCP，而那正是「配了 HTTP/3 却一直没生效」
+# 这类问题最难查的形态。
+readonly -a CADDY_FW_RULES=(80/tcp 443/tcp 443/udp)
+
+# 这三条里还差哪些，结果写进 CADDY_FW_MISSING。
+#
+# 判定经 os::ufw_allowed（§11）。**从前是 `${rules} == *'443'*` 这样的子串判**，
+# 那会被 `18443`、`4430` 或规则里的任何一处「443」蒙混过去，于是明明没放行
+# 却一声不吭。
+CADDY_FW_MISSING=()
+
+collect_missing_rules() {
+    probe::ufw_rules
+    local rules=${OS_PROBE_VALUE} one
+    CADDY_FW_MISSING=()
+    for one in "${CADDY_FW_RULES[@]}"; do
+        os::ufw_allowed "${rules}" "${one%/*}" "${one#*/}" && continue
+        CADDY_FW_MISSING+=("${one}")
+    done
+    return 0
+}
+
+# 安装收尾：UFW 开着但 80/443 没放行时问一句。
+#
+# **默认否**（§15：放宽访问来源默认必须为否），而且只在 UFW 确实启用时才问 ——
+# 没有防火墙时这几个端口本来就通着，问了是噪声。
+#
+# 问一句而不是只丢一行提示：装 Caddy 的目的就是对外提供服务，而「装完了但外面
+# 访问不到」这件事从 Caddy 自己的日志里看不出来（它照常监听、照常启动），
+# 用户只会看到浏览器转圈。但放不放行仍然是用户的决定 —— 内网反代、云厂商
+# 安全组已经挡在前面、只做本机 TLS 终结，都是不该自动开口的形态。
+offer_firewall_allow() {
     probe::ufw_active
     [[ ${OS_PROBE_VALUE} == yes ]] || return 0
-    probe::ufw_rules
-    local rules=${OS_PROBE_VALUE}
-    local -a missing=()
-    # 只做粗判：这是一句提示，不是准入条件。真要放行走 oneserver firewall allow
-    [[ ${rules} == *'80/tcp'* || ${rules} == *'80 '* ]] || missing+=('80/tcp')
-    [[ ${rules} == *'443'* ]] || missing+=('443/tcp 与 443/udp')
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        local IFS=' '
-        os::warn "UFW 已启用，但没看到放行：${missing[*]}。用 oneserver firewall allow 放行"
-    fi
+    collect_missing_rules
+    [[ ${#CADDY_FW_MISSING[@]} -gt 0 ]] || return 0
+
+    # **在子 shell 里改 IFS**。`local IFS=' '` 是动态作用域，它会一路盖到本函数
+    # 往下调用的每一个函数里，而脚本头把 IFS 设成 $'\n\t' 是有人依赖的。
+    local missing
+    missing=$(
+        IFS=' '
+        printf '%s' "${CADDY_FW_MISSING[*]}"
+    )
+    os::confirm --arg allow-web-ports \
+        "UFW 已启用，但没放行 ${missing} —— 外面访问不到这台机器上的站点。放行？" n || {
+        os::info '留着了。自己放行：oneserver firewall allow --ports=80,443'
+        return 0
+    }
+
+    # **放行失败不让安装失败**。走到这里 Caddy 已经装好、起来、也 enable 了 ——
+    # 以非零中止会让人以为 Caddy 没装上，而实际缺的只是一条防火墙规则，
+    # 用户自己一条命令就能补。这也是这个函数与 web.sh 里同名函数的分界：
+    # 那边放行是 `web enable` 这条命令的一部分，做不到就是没做完。
+    local one
+    for one in "${CADDY_FW_MISSING[@]}"; do
+        os::ufw_allow "${one%/*}" "${one#*/}" || {
+            os::warn "放行 ${one} 失败。Caddy 已经装好了，自己补：oneserver firewall allow --ports=80,443"
+            return 0
+        }
+    done
+    os::ufw_reload || {
+        os::warn '规则已加上但 ufw reload 失败，可能还没生效：oneserver firewall reload'
+        return 0
+    }
+    os::ok "已放行 ${missing}（所有来源）"
     return 0
 }
 
@@ -792,8 +846,6 @@ main() {
     fi
     os::systemd_enable caddy.service
 
-    check_firewall
-
     # 6) 状态与**资源清单**。
     #    没有这一段，F6 的 uninstall 就只能靠猜 —— 而猜错的代价是把 dpkg 管的
     #    文件删掉，或者把用户本来就装着的包 purge 掉。
@@ -849,6 +901,12 @@ main() {
     else
         os::ok "Caddy ${ver} 已是目标状态"
     fi
+
+    # **排在资源清单之后**：这一步会停下来问一句，而在它前面中断就意味着
+    # Caddy 装好了、起来了，state 里却什么都没有 —— uninstall 从此找不到它。
+    # 放行本身与 Caddy 装没装是两件事，问晚一点不损失什么。
+    offer_firewall_allow
+
     os::output 0 version="${ver}" arch="${CADDY_ARCH}" \
         plugins="${CADDY_PLUGINS:-none}" changed="${changed_text}"
     return 0

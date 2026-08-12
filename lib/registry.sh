@@ -51,6 +51,7 @@ OS_REG_GROUP_ID=()
 OS_REG_GROUP_NAME=()
 OS_REG_GROUP_ORDER=()
 OS_REG_GROUP_PARENT=()
+OS_REG_GROUP_DESC=()
 
 # --- registry::resolve 的结果 ---
 
@@ -75,30 +76,34 @@ registry::groups_load() {
     OS_REG_GROUP_NAME=()
     OS_REG_GROUP_ORDER=()
     OS_REG_GROUP_PARENT=()
+    OS_REG_GROUP_DESC=()
     [[ -r ${OS_GROUPS_CONF} ]] || {
         os::warn "读不到分组定义 ${OS_GROUPS_CONF}，菜单将不分组"
         return 0
     }
 
-    local line id name order parent
+    local line id name order parent desc
     while IFS= read -r line || [[ -n ${line} ]]; do
         line=${line%%#*}
         [[ -n ${line//[[:space:]]/} ]] || continue
         # 字段用 `|` 分隔，不用空白。用空白的代价是显示名里不能有空格，
         # 于是「Podman 容器」只能写成夹一个全角空格的「Podman　容器」——
         # 屏幕上那是个两格宽的洞，而根源只是分隔符选错了。
-        IFS='|' read -r id name order parent <<<"${line}"
+        IFS='|' read -r id name order parent desc <<<"${line}"
         id=${id//[[:space:]]/}
         order=${order//[[:space:]]/}
         parent=${parent//[[:space:]]/}
         name=${name#"${name%%[![:space:]]*}"}
         name=${name%"${name##*[![:space:]]}"}
+        desc=${desc#"${desc%%[![:space:]]*}"}
+        desc=${desc%"${desc##*[![:space:]]}"}
         [[ -n ${id} && -n ${name} ]] || continue
         [[ ${order} =~ ^[0-9]+$ ]] || order=${OS_REG__UNKNOWN_GROUP_ORDER}
         OS_REG_GROUP_ID+=("${id}")
         OS_REG_GROUP_NAME+=("${name}")
         OS_REG_GROUP_ORDER+=("${order}")
         OS_REG_GROUP_PARENT+=("${parent}")
+        OS_REG_GROUP_DESC+=("${desc}")
         ((OS_REG_GROUP_COUNT += 1))
     done <"${OS_GROUPS_CONF}"
 
@@ -158,6 +163,24 @@ registry::group_name() {
         fi
     done
     printf '%s\n' "${id}"
+    return 0
+}
+
+# registry::group_desc <id>   打印分组说明（groups.conf 第五列，可选）
+#
+# **没写与未声明都打印空行**，两者对消费者是同一件事：这一列本来就可选，
+# 菜单据此决定要不要回落。怎么写这一列见 groups.conf 的注释，什么时候用它
+# 见 bin/oneserver-menu 的 menu_group_summary。
+registry::group_desc() {
+    local id=${1-}
+    local -i i
+    for ((i = 0; i < OS_REG_GROUP_COUNT; i++)); do
+        if [[ ${OS_REG_GROUP_ID[i]} == "${id}" ]]; then
+            printf '%s\n' "${OS_REG_GROUP_DESC[i]}"
+            return 0
+        fi
+    done
+    printf '\n'
     return 0
 }
 

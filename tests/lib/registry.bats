@@ -309,6 +309,36 @@ echo "unknown=[$(registry::group_name nosuch)]"
     [[ "${output}" == *"unknown=[nosuch]"* ]]
 }
 
+@test "分组说明来自 groups.conf 第五列，没写的留空" {
+    printf 'blurbed | 有说明的分组 | 60 | system | 这一栏管什么，说得清清楚楚\n' >>"${OS_GROUPS}"
+    local f
+    f=$(make_frontend '
+registry::groups_load
+printf "desc=[%s]\\n" "$(registry::group_desc blurbed)"
+printf "empty=[%s]\\n" "$(registry::group_desc env)"
+printf "unknown=[%s]\\n" "$(registry::group_desc nosuch)"
+')
+    run bash "${f}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"desc=[这一栏管什么，说得清清楚楚]"* ]]
+    # 没写第五列的分组留空，菜单据此决定要不要回落到成员脚本的 @description
+    [[ "${output}" == *"empty=[]"* ]]
+    [[ "${output}" == *"unknown=[]"* ]]
+}
+
+@test "分组说明含空格与全角标点不被切碎" {
+    printf 'spaced | 带空格 | 70 | system | Web 服务、数据库 和 缓存\n' >>"${OS_GROUPS}"
+    local f
+    f=$(make_frontend '
+registry::groups_load
+printf "desc=[%s]\\n" "$(registry::group_desc spaced)"
+')
+    run bash "${f}"
+    [ "${status}" -eq 0 ]
+    # 只去两端空白，中间原样保留 —— 分隔符是 `|` 不是空白，正为此
+    [[ "${output}" == *"desc=[Web 服务、数据库 和 缓存]"* ]]
+}
+
 @test "分组可声明父分组，供菜单收纳低频条目" {
     local f
     f=$(make_frontend '
