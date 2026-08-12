@@ -550,3 +550,59 @@ setup() {
         | grep -nE \"\\[[0-9]+;[0-9]+m|'[0-9];[0-9]+m'\""
     [ "${status}" -ne 0 ]
 }
+
+# --- ui::_width 的记忆表 ---
+#
+# 记忆表只对不带限宽的调用生效。危险的是两种调用交替：同一个串先被量过宽度，
+# 再拿去按某个限宽截断 —— 切点（OS_UI__CUT）随限宽变，若被记忆表短路掉，
+# 截出来的就是上一次的切点，中文当场被切成半个字。
+
+@test "width: 记忆命中后带限宽的调用仍然真算切点" {
+    os_test_no_tty
+    local s='中文abc中文'
+    ui::_width "${s}"
+    local w1=${OS_UI__W}
+    ui::_width "${s}"
+    [ "${OS_UI__W}" -eq "${w1}" ]
+    [ "${OS_UI__CUT}" -eq -1 ]
+
+    # 同一个串按不同限宽截断，各自都要正确
+    ui::_truncate "${s}" 6
+    local a=${OS_UI__TRUNC}
+    ui::_truncate "${s}" 9
+    local b=${OS_UI__TRUNC}
+    [ "${a}" != "${b}" ]
+    ui::_width "${a}"
+    [ "${OS_UI__W}" -le 6 ]
+    ui::_width "${b}"
+    [ "${OS_UI__W}" -le 9 ]
+}
+
+@test "width: 空串与带 ANSI 的串都能进记忆表且结果不串" {
+    os_test_no_tty
+    ui::_width ''
+    [ "${OS_UI__W}" -eq 0 ]
+    ui::_width ''
+    [ "${OS_UI__W}" -eq 0 ]
+    [ -z "${OS_UI__PLAIN}" ]
+
+    local colored
+    printf -v colored '\033[31m中文\033[0m'
+    ui::_width "${colored}"
+    [ "${OS_UI__W}" -eq 4 ]
+    [ "${OS_UI__PLAIN}" = '中文' ]
+    ui::_width "${colored}"
+    [ "${OS_UI__W}" -eq 4 ]
+    [ "${OS_UI__PLAIN}" = '中文' ]
+}
+
+@test "width: 记忆表满了整表清空，之后结果照旧正确" {
+    os_test_no_tty
+    local -i i
+    for ((i = 0; i < OS_UI__WMEMO_MAX + 5; i++)); do
+        ui::_width "串${i}"
+    done
+    [ "${#OS_UI__WMEMO_W[@]}" -le "${OS_UI__WMEMO_MAX}" ]
+    ui::_width '中文abc'
+    [ "${OS_UI__W}" -eq 7 ]
+}

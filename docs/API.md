@@ -161,6 +161,7 @@
 - `os::state_get <组件标识> <键> [默认值]`
 - `os::state_has <组件标识>` —— state 中是否已登记该组件，只给返回码
 - `os::state_list [type]` —— 列出组件标识，去重；给了 type 只列该 type 的实例
+- `os::state_snapshot` —— 把整份 state 读进两个平行数组，同一下标是同一个组件
 - `os::state_resources <组件标识> <键>` —— 列出该组件某个多值键的全部值
 - `os::state_units <组件标识>` —— 列出该组件的 unit（带 own:/ext: 前缀）
 - `os::state_resource_add <组件标识> <pkg|file|divert|alt> <值>`

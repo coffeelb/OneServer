@@ -33,6 +33,10 @@ OS_STATE__DEC=''
 OS_STATE__ENC=''
 OS_STATE__CORRUPT=0
 
+# os::state_snapshot 的输出：同一下标是同一个组件
+OS_STATE_SNAP_IDS=()
+OS_STATE_SNAP_VERSIONS=()
+
 # ==================================================================
 # 转义 —— 制表符与换行会撕开行式格式，必须编码
 # ==================================================================
@@ -257,6 +261,66 @@ os::state_list() {
         [[ ${seen} == *"|${rid}|"* ]] && continue
         seen+="|${rid}|"
         printf '%s\n' "${rid}"
+    done <"${f}"
+    return 0
+}
+
+# os::state_snapshot   把整份 state 读进两个平行数组，同一下标是同一个组件
+#
+#   OS_STATE_SNAP_IDS[i]        组件标识，顺序与去重规则同 os::state_list
+#   OS_STATE_SNAP_VERSIONS[i]   该组件的 version，取首个匹配行（同 os::state_get），
+#                               没有 version 行时为空串
+#
+# **每次调用都重读文件，不留跨调用缓存。** 同一个进程里两次调用之间可能夹着一次
+# os::state_set —— install 与 uninstall 正是这么用的。缓存会让第二次拿着写入前的
+# 答案去判可见性，表现是刚装完的组件在菜单里不出现、刚卸载的还留着，而且不报错。
+# 重读的代价是纯 bash 过一遍小文件，买不起这个风险。
+#
+# **为什么要有它**：判定一条 `@requires` 从前是每个组件一次 os::state_list 加一次
+# os::state_get，两者都得经 `$( )` / `< <( )` 取值 —— 每问一次 fork 一个子 shell，
+# 且各自把整份文件重读一遍。菜单一屏要问十几条，这是它最大的一笔开销；而 fork 的
+# 代价随进程已装配的数组规模增长，不是常数。写变量不打印（同 D68 / D74）才能一次
+# 把「有哪些组件」和「各自什么版本」两个答案一起带出来。
+os::state_snapshot() {
+    OS_STATE_SNAP_IDS=()
+    OS_STATE_SNAP_VERSIONS=()
+    state::_source_file || return 0
+    local f=${OS_STATE__SOURCE}
+
+    # 哨兵取一个 id 里不可能出现的字节，空 id 才不会与它初值相等
+    local rid rkey rval seen='' vset='' last=$'\x01'
+    local -i i last_ok=0
+    while IFS=$'\t' read -r rid rkey rval || [[ -n ${rid} ]]; do
+        [[ -n ${rid} ]] || continue
+        # **id 校验只在 id 变了的时候做一次。** 一份 state 十几个组件却上百行
+        # ——unit / pkg / file 这些多值键每条各占一行，而同一个组件的行是连着的。
+        # 逐行跑一次正则是本函数最贵的一笔（实测占它一半以上），而答案在这一
+        # 段里不会变。id 交替出现时自动退回逐行校验，结论不受文件顺序影响。
+        if [[ ${rid} != "${last}" ]]; then
+            last=${rid}
+            last_ok=0
+            os::state_id_valid "${rid}" || continue
+            last_ok=1
+            if [[ ${seen} != *"|${rid}|"* ]]; then
+                seen+="|${rid}|"
+                OS_STATE_SNAP_IDS+=("${rid}")
+                OS_STATE_SNAP_VERSIONS+=('')
+            fi
+        elif ((last_ok == 0)); then
+            continue
+        fi
+        # 只认第一条 version：os::state_get 匹配到就返回，后面的同名行它根本
+        # 读不到。这里若改成后者覆盖前者，同一个问题两个接口会给出不同答案
+        [[ ${rkey} == version ]] || continue
+        [[ ${vset} != *"|${rid}|"* ]] || continue
+        vset+="|${rid}|"
+        state::_decode "${rval}"
+        # 倒着找：这一行的 id 多半就是刚追加的那个
+        for ((i = ${#OS_STATE_SNAP_IDS[@]} - 1; i >= 0; i--)); do
+            [[ ${OS_STATE_SNAP_IDS[i]} == "${rid}" ]] || continue
+            OS_STATE_SNAP_VERSIONS[i]=${OS_STATE__DEC}
+            break
+        done
     done <"${f}"
     return 0
 }

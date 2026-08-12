@@ -95,6 +95,21 @@ human_duration() {
     return 0
 }
 
+# 状态面板 —— **只放不起进程就能答出来的行**：发行版与内核、已运行多久。
+#
+# 判据是成本，不是重要性。主屏是每次进菜单、每跑完一条命令回来都要重画的一屏，
+# 它上面每一行的代价都要乘以一天进多少次菜单。/proc 是纯读，整屏合起来是毫秒
+# 量级；而 `ufw status` 要起一个 python 解释器，`podman ps` / `docker ps` 各要起
+# 一次 Go 二进制再连一次守护进程 —— 高出两三个数量级，在 1 核小机器上就是每次
+# 进菜单干等大半秒。
+#
+# 挪走的那几项各有自己的入口，都在菜单里点得到：防火墙看 `firewall`，Web 面板的
+# 端口与访问策略看 `web`，两个引擎的容器数分别看 `docker` 与 `podman`；`doctor`
+# 另给一份系统概览（含防火墙与 Podman 容器数）。主屏答「这台机器是什么」，
+# 「现在跑得怎么样」是要看的时候才看，不是每屏都付一次钱。
+#
+# 于是主屏也不再依赖容器引擎：podman 或 docker 挂住时，从前全靠 probe 的超时
+# 兜着才开得了机（K14），现在这一屏压根不问它们。
 show_panel() {
     OS_MENU_VERSION='未知'
     if [[ -r ${OS_VERSION_FILE} ]]; then
@@ -112,103 +127,6 @@ show_panel() {
     probe::uptime_seconds
     if [[ ${OS_PROBE_STATUS} == ok ]]; then
         menu_row '已运行' "$(human_duration "${OS_PROBE_VALUE:-0}")"
-    fi
-
-    # state 既记程序也记数据库、备份与网络定位；整份列出来是给卸载用的账本，
-    # 不是给人扫一眼系统的摘要。只收 install 菜单声明的 @provides，且多实例只显
-    # 示一次菜单名：组件类型由元数据给出，不另维护一张容易漂移的程序清单。
-    local -a state_ids=() programs=()
-    local one label type
-    while IFS= read -r one; do
-        [[ -n ${one} ]] && state_ids+=("${one}")
-    done < <(os::state_list)
-    local -i i idx
-    for ((i = 0; i < ${#OS_REG_SORTED[@]}; i++)); do
-        idx=${OS_REG_SORTED[i]}
-        [[ ${OS_REG_COMMAND[idx]} == 'install '* ]] || continue
-        type=${OS_REG_PROVIDES[idx]%%:*}
-        [[ -n ${type} ]] || continue
-        for one in "${state_ids[@]}"; do
-            [[ ${one%%:*} == "${type}" ]] || continue
-            # 直接用 @name。安装项的名字就是应用名（`Caddy`、`PHP-FPM`），
-            # 不再需要削掉「安装」「部署」这类后缀 —— 那是这些条目还叫
-            # 「Caddy 安装」时留下的补丁，而在自己的菜单里再说一遍「安装」
-            # 本来就是废话，源头改掉之后这里也就不必削了
-            programs+=("${OS_REG_NAME[idx]}")
-            break
-        done
-    done
-    local program_text=''
-    for label in "${programs[@]}"; do
-        [[ -n ${program_text} ]] && program_text+=' · '
-        program_text+=${label}
-    done
-    # 这一行不走 menu_row：数据来自 state 文件而不是 probe，没有 OS_PROBE_SOURCE
-    # 可标注。state 是本工具自己写下的账本，读到什么就是什么，不存在缓存与实时之分
-    OS_MENU_PAIRS+=('已装' "${program_text:-尚未记录}")
-
-    probe::ufw_active
-    if [[ ${OS_PROBE_STATUS} != missing ]]; then
-        local ufw='未启用'
-        [[ ${OS_PROBE_VALUE} == yes ]] && ufw='已启用'
-        menu_row '防火墙' "UFW ${ufw}"
-    fi
-
-    # 面板**只在开着时占一行**。它是本工具自带的功能开关，任何机器上都「存在」，
-    # 所以显示一行「未启用」等于给每一台没用它的机器的每一屏加一行永久噪声
-    # —— 同 Podman/Docker 不装就不占行的理由。想知道开没开，进监控组第一项。
-    #
-    # 值回答的是「谁能进」而不只是「开着」：面板监听在网卡上，这和防火墙那行
-    # 是同一类事实。门的形态读 state 里 enable 时存下的 auth/from，**不去解析
-    # Caddy 片段** —— 那是 web.sh 的知识，抄到这里迟早和那边对不上。
-    #
-    # 没有「对所有来源开放」这一档：无密码时门就在 Caddy 配置里（要么绑
-    # 回环，要么 remote_ip 判 403），防火墙放不放行都改不了它。
-    probe::service_enabled 'oneserver-web-fast.timer'
-    if [[ ${OS_PROBE_VALUE} == enabled ]]; then
-        local web_port web_from web_door
-        web_port=$(os::state_get web port '')
-        if [[ $(os::state_get web auth 'yes') == no ]]; then
-            web_from=$(os::state_get web from '')
-            if [[ -n ${web_from} ]]; then
-                web_door="无密码 · 限 ${web_from}"
-            else
-                web_door='无密码 · 仅本机'
-            fi
-        else
-            web_door='密码保护'
-        fi
-        menu_row 'Web 面板' "${web_port:+${web_port} · }${web_door}"
-    fi
-
-    # 先问「装没装」再问「跑着几个」：`podman ps | wc -l` 的退出码来自 wc，
-    # podman 根本不存在时它照样返回 0 和一个 0，于是没装 podman 的机器上
-    # 会多出一行「0 / 0 运行中」
-    probe::component_version podman
-    if [[ ${OS_PROBE_STATUS} == ok ]]; then
-        probe::podman_running
-        local running=${OS_PROBE_VALUE:-0}
-        probe::podman_total
-        menu_row 'Podman' "${running} / ${OS_PROBE_VALUE:-0} 容器运行中"
-    fi
-
-    # 两个引擎各占一行，不合并成一个「容器」总数：它们的容器互相看不见，
-    # 加总起来就再也分不清该去哪个引擎里找
-    probe::component_version docker
-    if [[ ${OS_PROBE_STATUS} == ok ]]; then
-        probe::docker_running
-        local docker_running=${OS_PROBE_VALUE:-0}
-        probe::docker_total
-        menu_row 'Docker' "${docker_running} / ${OS_PROBE_VALUE:-0} 容器运行中"
-    fi
-
-    # `docker` 这个命令名归谁。**只在它不归 Docker 时才说** —— 装着 Docker 的
-    # 机器上打一行「docker 命令：真 Docker」是废话，而状态面板每一行都要挣得
-    # 自己那个位置。真正需要告知的只有反过来那种：机器上没有 Docker，
-    # 粘贴的 docker 命令却照样能跑，这件事从「已装」那一行看不出来
-    probe::container_engine
-    if [[ ${OS_PROBE_VALUE} == podman ]]; then
-        menu_row 'docker 命令' '由 podman 接管'
     fi
 
     # 非 root 时数据来自快照。用 probe 自己给出的来源判断，不去看 EUID ——
@@ -303,6 +221,34 @@ menu_index_of() {
             OS_MENU_IDX=${i}
             return 0
         fi
+    done
+    return 0
+}
+
+# menu_group_of <分组>   显示名 / 父分组 / 说明一次查齐，结果写三个变量
+#
+# 语义与 registry::group_name / group_parent / group_desc 逐字一致，包括未声明
+# 分组的回落（名字回落成 id 本身，父与说明为空）—— 那三个是打印函数，而这里
+# 一屏要问几十遍，`$( )` 每次都 fork。**不动那三个函数本身**：它们的打印契约
+# 有测试在断言，而菜单本来就直接读 OS_REG_* 数组（同 menu_index_tree）。
+#
+# 三个值一次查齐而不是三个函数：调用点问的往往不止一样，分开查就要把同一张
+# 表扫三遍。
+OS_MENU_GNAME=''
+OS_MENU_GPARENT=''
+OS_MENU_GDESC=''
+menu_group_of() {
+    local id=${1-}
+    local -i i
+    OS_MENU_GNAME=${id}
+    OS_MENU_GPARENT=''
+    OS_MENU_GDESC=''
+    for ((i = 0; i < OS_REG_GROUP_COUNT; i++)); do
+        [[ ${OS_REG_GROUP_ID[i]} == "${id}" ]] || continue
+        OS_MENU_GNAME=${OS_REG_GROUP_NAME[i]}
+        OS_MENU_GPARENT=${OS_REG_GROUP_PARENT[i]}
+        OS_MENU_GDESC=${OS_REG_GROUP_DESC[i]}
+        return 0
     done
     return 0
 }
@@ -433,7 +379,7 @@ menu_target_of() {
     return 0
 }
 
-# menu_group_summary <分组>   分组虚拟项的说明列：里面装着什么。
+# menu_group_summary <分组>   分组虚拟项的说明列：里面装着什么，结果写 OS_MENU_SUMMARY。
 #
 # **列全部成员，本函数不自己截断。** 从前只列前两个再补一个「等」，于是
 # 「系统与维护」永远显示成「服务器安全设置 · 脚本更新 等」—— 而那一组四条
@@ -442,10 +388,12 @@ menu_target_of() {
 # 放不下的由渲染层按说明列宽截成 `…`，与整屏其余说明列是同一套截断记号；
 # 自己按条数砍就是在 bin/ 里做宽度排版的近似（规范 §9 不许），而且近似得不准：
 # 两条短名字明明放得下第三条，九条长名字砍到两条仍然要被 `…` 再砍一次。
+OS_MENU_SUMMARY=''
 menu_group_summary() {
     local g=${1} out='' sep='' one
     local -a names=()
     local -i i idx cmds=0 only=-1
+    OS_MENU_SUMMARY=''
     for ((i = 0; i < ${#OS_REG_SORTED[@]}; i++)); do
         idx=${OS_REG_SORTED[i]}
         [[ ${OS_REG_GROUP[idx]} == "${g}" ]] || continue
@@ -456,9 +404,14 @@ menu_group_summary() {
             cmds+=1
         fi
     done
+    # 先把子分组列表复制走再遍历：本函数从前跑在 `$( )` 里，对 OS_MENU_SUBGROUPS
+    # 的改写出不了子 shell；现在它就地执行，而调用方（menu_screen_group）可能
+    # 正在遍历同一个数组。同 menu_screen_cmd 对 OS_MENU_CHILDREN 的做法。
     menu_subgroups "${g}"
-    for one in ${OS_MENU_SUBGROUPS[@]+"${OS_MENU_SUBGROUPS[@]}"}; do
-        names+=("$(registry::group_name "${one}")")
+    local -a subs=(${OS_MENU_SUBGROUPS[@]+"${OS_MENU_SUBGROUPS[@]}"})
+    for one in ${subs[@]+"${subs[@]}"}; do
+        menu_group_of "${one}"
+        names+=("${OS_MENU_GNAME}")
     done
 
     local -i total=${#names[@]}
@@ -472,22 +425,21 @@ menu_group_summary() {
     # 像这一栏只有 Valkey，其实是 MariaDB 没装。分组没写说明时仍然回落，
     # 让 groups.conf 的第五列保持可选。
     if ((total == 1 && cmds == 1)); then
-        local blurb
-        blurb=$(registry::group_desc "${g}")
-        printf '%s\n' "${blurb:-${OS_REG_DESC[only]}}"
+        menu_group_of "${g}"
+        OS_MENU_SUMMARY=${OS_MENU_GDESC:-${OS_REG_DESC[only]}}
         return 0
     fi
     for ((i = 0; i < total; i++)); do
         out+="${sep}${names[i]}"
         sep=' · '
     done
-    printf '%s\n' "${out}"
+    OS_MENU_SUMMARY=${out}
     return 0
 }
 
 menu_screen_root() {
     OS_SCR_TITLE="OneServer ${OS_MENU_VERSION}"
-    local g gp head
+    local g gp gname head
     local -a seen=()
     local -i i j idx dup
     for ((i = 0; i < ${#OS_REG_SORTED[@]}; i++)); do
@@ -495,15 +447,17 @@ menu_screen_root() {
         ((OS_MENU_VISIBLE[idx] == 1)) || continue
         menu_toplevel "${idx}" || continue
         g=${OS_REG_GROUP[idx]}
-        gp=$(registry::group_parent "${g}")
+        # 名字先取走：下面几次 menu_group_of 会覆盖那三个变量
+        menu_group_of "${g}"
+        gp=${OS_MENU_GPARENT}
+        gname=${OS_MENU_GNAME}
         if [[ -z ${gp} ]]; then
             # **主屏上真命令不带说明列。** `@description` 是写给 `--help` 的整句，
             # 摆进主菜单只会被截成一行省略号，九条挨在一起就是九个 `…`。
             # 说明列在这一屏留给虚拟项 —— 它要回答的是「里面装着什么」，
             # 那件事从名字上看不出来。进到下一层，整句说明就都在了。
             menu_target_of "${idx}"
-            menu_emit "${OS_REG_NAME[idx]}" '' \
-                "${OS_MENU_TGT}" "$(registry::group_name "${g}")"
+            menu_emit "${OS_REG_NAME[idx]}" '' "${OS_MENU_TGT}" "${gname}"
             continue
         fi
         # 收纳分组：整组折成一个虚拟项，同组的后续脚本不再各出一条
@@ -518,8 +472,10 @@ menu_screen_root() {
             continue
         fi
         seen+=("${g}")
-        head=$(registry::group_name "${gp}")
-        menu_emit "$(registry::group_name "${g}")" "$(menu_group_summary "${g}")" "g:${g}" "${head}"
+        menu_group_of "${gp}"
+        head=${OS_MENU_GNAME}
+        menu_group_summary "${g}"
+        menu_emit "${gname}" "${OS_MENU_SUMMARY}" "g:${g}" "${head}"
     done
     return 0
 }
@@ -536,9 +492,16 @@ menu_screen_group() {
             menu_emit "${OS_REG_NAME[idx]}" "${OS_REG_DESC[idx]}" "${OS_MENU_TGT}"
         fi
     done
+    # 复制走再遍历，理由同 menu_group_summary：下面的 menu_group_summary 会
+    # 就地重算 OS_MENU_SUBGROUPS
     menu_subgroups "${g}"
-    for one in ${OS_MENU_SUBGROUPS[@]+"${OS_MENU_SUBGROUPS[@]}"}; do
-        menu_emit "$(registry::group_name "${one}")" "$(menu_group_summary "${one}")" "g:${one}"
+    local -a subs=(${OS_MENU_SUBGROUPS[@]+"${OS_MENU_SUBGROUPS[@]}"})
+    local gname
+    for one in ${subs[@]+"${subs[@]}"}; do
+        menu_group_of "${one}"
+        gname=${OS_MENU_GNAME}
+        menu_group_summary "${one}"
+        menu_emit "${gname}" "${OS_MENU_SUMMARY}" "g:${one}"
     done
     return 0
 }
@@ -592,19 +555,24 @@ menu_screen() {
 
 OS_MENU_STACK=()
 
+# 结果写 OS_MENU_LABEL：调用点在面包屑的循环里，栈每深一层就多一次 `$( )`
+OS_MENU_LABEL=''
 menu_node_label() {
     local node=${1}
+    OS_MENU_LABEL=''
     case ${node} in
-        g:*) registry::group_name "${node#g:}" ;;
+        g:*)
+            menu_group_of "${node#g:}"
+            OS_MENU_LABEL=${OS_MENU_GNAME}
+            ;;
         c:*)
             menu_index_of "${node#c:}"
             if ((OS_MENU_IDX >= 0)); then
-                printf '%s\n' "${OS_REG_NAME[OS_MENU_IDX]}"
+                OS_MENU_LABEL=${OS_REG_NAME[OS_MENU_IDX]}
             else
-                printf '%s\n' "${node#c:}"
+                OS_MENU_LABEL=${node#c:}
             fi
             ;;
-        *) printf '\n' ;;
     esac
     return 0
 }
@@ -613,7 +581,8 @@ menu_node_label() {
 menu_path_title() {
     local out='' sep='' one
     for one in ${OS_MENU_STACK[@]+"${OS_MENU_STACK[@]}"}; do
-        out+="${sep}$(menu_node_label "${one}")"
+        menu_node_label "${one}"
+        out+="${sep}${OS_MENU_LABEL}"
         sep=' › '
     done
     printf '%s\n' "${out}"
@@ -743,10 +712,10 @@ menu_loop() {
         if ((${#OS_MENU_STACK[@]} > 0)); then
             node=${OS_MENU_STACK[${#OS_MENU_STACK[@]} - 1]}
         fi
-        # 状态面板只在主屏上屏，而它要跑一整轮 probe（uptime、ufw、两个引擎各一次
-        # ps）。因此进来时在哪一层就先不探，回到主屏那一刻才探 —— 在三级菜单里
-        # 跑完一条命令 exec 回来，白等一次 `docker ps` 是看得出来的。
-        # 面板至少含「已装」一行，非空即已探过，不必另立标志
+        # 状态面板只在主屏上屏。它现在只读 /proc（见 show_panel），代价已经很小，
+        # 但仍然按需探：进来时在哪一层就先不探，回到主屏那一刻才探 —— 面板不上屏
+        # 的那几层，探了也没人看得到。
+        # 面板至少含「系统」一行，非空即已探过，不必另立标志
         if ((${#OS_MENU_STACK[@]} == 0 && ${#OS_MENU_PAIRS[@]} == 0)); then
             show_panel
         fi

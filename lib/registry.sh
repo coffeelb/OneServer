@@ -262,17 +262,23 @@ registry::_meta() {
     return 0
 }
 
-# registry::_index_of <命令>   打印下标，没有则打印 -1
+# registry::_index_of <命令>   下标写进 OS_REG__IDX，没有则 -1
+#
+# 写变量不打印，同 registry::resolve：调用点是 registry::_add，每个脚本文件走一次，
+# 而 `$( )` 每次都 fork。**fork 的代价随本进程已装配的数组规模增长，不是常数** ——
+# 用一个空函数去量它会得出「fork 很便宜」的结论，而扫描发生在整张表边建边查的时候。
+# 脚本越多涨得越快，这正是「以后随便加脚本」最不该付的代价。
+OS_REG__IDX=-1
 registry::_index_of() {
     local cmd=${1-}
     local -i i
+    OS_REG__IDX=-1
     for ((i = 0; i < OS_REG_COUNT; i++)); do
         if [[ ${OS_REG_COMMAND[i]} == "${cmd}" ]]; then
-            printf '%d\n' "${i}"
+            OS_REG__IDX=${i}
             return 0
         fi
     done
-    printf '%d\n' '-1'
     return 0
 }
 
@@ -295,8 +301,8 @@ registry::_add() {
     local IFS=' '
     cmd="${OS_REG__WORDS[*]}"
 
-    local -i dup
-    dup=$(registry::_index_of "${cmd}")
+    registry::_index_of "${cmd}"
+    local -i dup=${OS_REG__IDX}
     if ((dup >= 0)); then
         # @command 全局唯一。撞车时保留先扫到的那个 ——
         # 沉默地让后者覆盖前者，等于让文件名顺序决定跑哪个脚本
@@ -450,7 +456,12 @@ registry::requires_met() {
     local spec=${OS_REG_REQUIRES[idx]}
     [[ -n ${spec} ]] || return 0
 
+    # 整份 state 读一次，本次判定内的各组件共用。**不跨调用复用**：两次判定
+    # 之间可能夹着一次 os::state_set，缓存会让后一次用上写入前的答案
+    os::state_snapshot
+
     local one rest op want type have cmp
+    local -i si i
     local IFS=','
     for one in ${spec}; do
         [[ -n ${one} ]] || continue
@@ -472,17 +483,25 @@ registry::requires_met() {
         fi
         type=${rest}
 
+        si=-1
         if [[ ${type} == *:* ]]; then
-            os::state_has "${type}" || return 1
-            have=$(os::state_get "${type}" version)
+            # 带实例：标识精确匹配
+            for ((i = 0; i < ${#OS_STATE_SNAP_IDS[@]}; i++)); do
+                [[ ${OS_STATE_SNAP_IDS[i]} == "${type}" ]] || continue
+                si=${i}
+                break
+            done
+            ((si >= 0)) || return 1
+            have=${OS_STATE_SNAP_VERSIONS[si]}
         else
-            local -a insts=()
-            local inst
-            while IFS= read -r inst; do
-                [[ -n ${inst} ]] && insts+=("${inst}")
-            done < <(os::state_list "${type}")
-            if [[ ${#insts[@]} -gt 0 ]]; then
-                have=$(os::state_get "${insts[0]}" version)
+            # 不带实例：该 type 的第一个实例，顺序即 state 的行序（同 os::state_list）
+            for ((i = 0; i < ${#OS_STATE_SNAP_IDS[@]}; i++)); do
+                [[ ${OS_STATE_SNAP_IDS[i]%%:*} == "${type}" ]] || continue
+                si=${i}
+                break
+            done
+            if ((si >= 0)); then
+                have=${OS_STATE_SNAP_VERSIONS[si]}
             else
                 # state 里没有就问探测，与 os::__check_requires 同一条规则（D138）：
                 # state 只记本工具装过的东西，用户自己 apt 装的那份照样在跑。

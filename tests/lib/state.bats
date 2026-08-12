@@ -581,3 +581,114 @@ EOF
     [ "$(os::state_get caddy version)" = '2.10' ]
     [ "$(sha256sum "${OS_STATE_BAK}")" = "${bak_before}" ]
 }
+
+# --- os::state_snapshot ---
+#
+# 它是 registry::requires_met 的取数通道，替掉的是「每个组件一次 os::state_list
+# 加一次 os::state_get」那两个子 shell。**因此它必须与被替掉的两个接口逐位同义**：
+# 顺序、去重、非法 id 过滤跟 os::state_list，取哪一条 version 跟 os::state_get。
+# 差一点点的后果不是慢，是菜单把某条命令藏了或者多显示了。
+
+@test "snapshot: id 的顺序、去重与非法过滤同 os::state_list" {
+    os::state_set caddy version=2.10
+    os::state_set 'php:8.3' version=8.3.11
+    os::state_set 'php:8.1' version=8.1.2
+    # 非法 id 与空行直接塞进文件：os::state_set 写不出这种行
+    printf 'PHP\tversion\t9\n:8.3\tversion\t9\n\n' >>"${OS_STATE_FILE}"
+
+    os::state_snapshot
+    local ids='' one
+    for one in "${OS_STATE_SNAP_IDS[@]}"; do ids+="${one},"; done
+    local listed=''
+    while IFS= read -r one; do listed+="${one},"; done < <(os::state_list)
+    [ "${ids}" = "${listed}" ]
+    [ "${ids}" = 'caddy,php:8.3,php:8.1,' ]
+}
+
+@test "snapshot: 版本与 os::state_get 一致，含转义值的解码" {
+    os::state_set caddy version=2.10
+    os::state_set 'php:8.3' version=8.3.11
+    os::state_set weird version="$(printf 'a\tb')"
+
+    os::state_snapshot
+    local -i i
+    for ((i = 0; i < ${#OS_STATE_SNAP_IDS[@]}; i++)); do
+        [ "${OS_STATE_SNAP_VERSIONS[i]}" = "$(os::state_get "${OS_STATE_SNAP_IDS[i]}" version)" ]
+    done
+}
+
+@test "snapshot: 有 id 没有 version 行时保留 id、版本为空" {
+    os::state_set caddy method=apt
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 1 ]
+    [ "${OS_STATE_SNAP_IDS[0]}" = 'caddy' ]
+    [ -z "${OS_STATE_SNAP_VERSIONS[0]}" ]
+}
+
+@test "snapshot: 同一 id 多条 version 行取第一条，同 os::state_get" {
+    mkdir -p "${OS_STATE_DIR}"
+    printf 'caddy\tversion\t2.10\ncaddy\tversion\t9.99\n' >"${OS_STATE_FILE}"
+    os::state_snapshot
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = '2.10' ]
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = "$(os::state_get caddy version)" ]
+}
+
+@test "snapshot: state 文件不存在或为空时是空数组，不报错" {
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 0 ]
+    [ "${#OS_STATE_SNAP_VERSIONS[@]}" -eq 0 ]
+
+    mkdir -p "${OS_STATE_DIR}"
+    : >"${OS_STATE_FILE}"
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 0 ]
+}
+
+@test "snapshot: 主文件损坏时回退 .bak，同其余读接口" {
+    mkdir -p "${OS_STATE_DIR}"
+    printf 'php:8.3\tversion\t8.3\n' >"${OS_STATE_BAK}"
+    printf '\u0001主文件损坏\n' >"${OS_STATE_FILE}"
+    os::state_snapshot
+    [ "${OS_STATE_SNAP_IDS[0]}" = 'php:8.3' ]
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = '8.3' ]
+}
+
+# 这一条是本接口的核心契约，改动时最先会被牺牲掉的也是它：
+# 一旦有人为了再快一点加上跨调用缓存，同一个进程里 install / uninstall 之后的
+# 判定就会用上写入前的答案 —— 刚装完的组件在菜单里不出现，且不报错。
+@test "snapshot: 每次调用重读文件，不跨调用缓存" {
+    os::state_set caddy version=2.6.4
+    os::state_snapshot
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = '2.6.4' ]
+
+    os::state_set caddy version=2.8.0
+    os::state_snapshot
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = '2.8.0' ]
+
+    os::state_set valkey version=8.0.1
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 2 ]
+
+    os::state_del caddy
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 1 ]
+    [ "${OS_STATE_SNAP_IDS[0]}" = 'valkey' ]
+}
+
+# id 校验按「id 变了才做一次」跳着走，因此必须压两种反例：同一个 id 不连续、
+# 非法 id 连着好几行。任一处判错，菜单就会多显示或少显示一整块功能。
+@test "snapshot: id 交错出现、非法 id 连续多行时结论不变" {
+    mkdir -p "${OS_STATE_DIR}"
+    printf 'caddy\tversion\t2.10\n' >"${OS_STATE_FILE}"
+    printf 'PHP\tversion\t9\nPHP\tmethod\tapt\n' >>"${OS_STATE_FILE}"
+    printf 'valkey\tversion\t8.0.1\n' >>"${OS_STATE_FILE}"
+    printf 'caddy\tmethod\tapt\n' >>"${OS_STATE_FILE}"
+    printf 'valkey\tversion\t9.9.9\n' >>"${OS_STATE_FILE}"
+
+    os::state_snapshot
+    [ "${#OS_STATE_SNAP_IDS[@]}" -eq 2 ]
+    [ "${OS_STATE_SNAP_IDS[0]}" = 'caddy' ]
+    [ "${OS_STATE_SNAP_IDS[1]}" = 'valkey' ]
+    [ "${OS_STATE_SNAP_VERSIONS[0]}" = '2.10' ]
+    [ "${OS_STATE_SNAP_VERSIONS[1]}" = '8.0.1' ]
+}

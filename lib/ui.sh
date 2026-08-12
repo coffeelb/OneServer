@@ -70,6 +70,14 @@ OS_UI__TREE_BOTTOM=''
 OS_UI__TREE_H=''
 OS_UI__PFX=''
 OS_UI__FRAME=0
+# ui::_width 的记忆表，键是原串、值分别是显示宽度与剥掉 ANSI 之后的串。
+#
+# **必须是 `-gA`**：本文件由 bootstrap 在文件作用域 source，但测试的装配入口是
+# 一个函数（tests/helper/load.sh 的 os_load_lib）——`declare -A` 在函数里执行
+# 就成了那个函数的局部变量，函数一返回表就没了，之后每次引用都是未定义。
+declare -gA OS_UI__WMEMO_W=()
+declare -gA OS_UI__WMEMO_P=()
+OS_UI__WMEMO_MAX=128
 OS_UI__PROGRESS_LAST=-1
 OS_UI__SHIFT=0
 
@@ -207,7 +215,8 @@ ui::_tree_heading() {
     local lead=${OS_UI__COLORED}
     ui::_style "${style}"
     ui::_colorize "${fd}" "${OS_UI__C}" "${OS_UI__B}" "${text}"
-    printf '%s %s\n' "${lead}" "${OS_UI__COLORED}" >&"${fd}"
+    printf -v OS_UI__L '%s %s' "${lead}" "${OS_UI__COLORED}"
+    ui::_emit "${fd}" "${OS_UI__L}"
     return 0
 }
 
@@ -215,7 +224,7 @@ ui::_tree_heading() {
 ui::_tree_spacer() {
     local -i fd=${1:-1}
     ui::_tree_pfx "${fd}" 0
-    printf '%s\n' "${OS_UI__PFX%"${OS_UI__PFX##*[![:space:]]}"}" >&"${fd}"
+    ui::_emit "${fd}" "${OS_UI__PFX%"${OS_UI__PFX##*[![:space:]]}"}"
     return 0
 }
 
@@ -231,7 +240,7 @@ ui::_tree_bottom_rule() {
     done
     ui::_style muted
     ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__TREE_BOTTOM}${bar}"
-    printf '%s\n' "${OS_UI__COLORED}" >&"${fd}"
+    ui::_emit "${fd}" "${OS_UI__COLORED}"
     return 0
 }
 
@@ -270,6 +279,47 @@ ui::_silent() {
 }
 
 # ==================================================================
+# 整帧缓冲 —— 只有 ui::menu 打开它
+# ==================================================================
+#
+# 一屏菜单是几十次 printf，也就是几十次 write。终端按到达顺序画，于是慢链路上
+# 看得见半张菜单先出来再补齐；配上「先清屏再逐行画」，每次重画都闪一下。攒成
+# 一帧一次写出，中间态就不存在了。
+#
+# **不装 trap 兜底。** trap 是 shell 级状态，在这里装 EXIT/ERR 会盖掉 bootstrap
+# 已经装好的收尾（日志、probe 快照）。代价是缓冲区间内若有命令非零退出，
+# 攒着的整屏一个字都出不来 —— 所以那段里只准有 printf、算术与字符串操作，
+# 且**不得有 return**：中途退出把整屏咽掉，比画一半更糟（K8）。
+#
+# 缓冲之外的调用方（ui::screen_heading、ui::frame_begin）照旧立刻输出，
+# 它们与菜单的先后顺序因此不变。
+OS_UI__BUF=''
+OS_UI__BUFFERING=0
+# 缓冲期间每行的行尾补丁：重画整屏时是「清到行尾」，其余情况为空
+OS_UI__BUF_EOL=''
+# ui::_emit 的行缓冲：调用点在渲染热路径上，不为每行新建一个局部量
+OS_UI__L=''
+
+# ui::_emit <fd> <行>   缓冲开着就攒起来，否则立刻写
+ui::_emit() {
+    if ((OS_UI__BUFFERING == 1)); then
+        OS_UI__BUF+="${2}${OS_UI__BUF_EOL}"$'\n'
+        return 0
+    fi
+    printf '%s\n' "${2}" >&"${1}"
+    return 0
+}
+
+# ui::_fd_tty <fd>   这个流是不是真连着终端
+ui::_fd_tty() {
+    if [[ ${1} -eq 2 ]]; then
+        [[ -t 2 ]]
+    else
+        [[ -t 1 ]]
+    fi
+}
+
+# ==================================================================
 # 显示宽度 ——规范的核心，七个必须有对抗性测试的函数之一
 # ==================================================================
 
@@ -296,6 +346,21 @@ ui::_width() {
     local LC_ALL=C
     local s=${1-}
     local -i limit=${2:--1}
+
+    # 同一个字符串一屏要被量三四遍（_truncate 内部两次、_pad 再一次），而这里是
+    # 逐字节解 UTF-8 的循环。**只记不带限宽的那种调用**：带限宽时还要按限宽回写
+    # OS_UI__CUT，短路会拿上一次的切点去切这一次的宽度，中文当场被切成半个字。
+    local __key=''
+    if ((limit < 0)); then
+        # 键带前缀：bash 的关联数组不接受空下标，而空串是合法输入
+        __key="w${s}"
+        if [[ -n ${OS_UI__WMEMO_W[${__key}]+x} ]]; then
+            OS_UI__W=${OS_UI__WMEMO_W[${__key}]}
+            OS_UI__PLAIN=${OS_UI__WMEMO_P[${__key}]}
+            OS_UI__CUT=-1
+            return 0
+        fi
+    fi
 
     local esc=${OS_UI__ESC}
     while [[ ${s} == *"${esc}["* ]]; do
@@ -385,6 +450,18 @@ ui::_width() {
         OS_UI__CUT=${n}
     fi
     OS_UI__W=${w}
+
+    if [[ -n ${__key} ]]; then
+        # 满了就整表清空，不做淘汰：这张表服务的是「一屏之内同一个串被量很多遍」，
+        # 屏与屏之间本来就该换一批。ui.sh 也被打几千行的长跑脚本用（backup 的
+        # 逐行输出），没有上限它会一直涨。
+        if ((${#OS_UI__WMEMO_W[@]} >= OS_UI__WMEMO_MAX)); then
+            OS_UI__WMEMO_W=()
+            OS_UI__WMEMO_P=()
+        fi
+        OS_UI__WMEMO_W[${__key}]=${w}
+        OS_UI__WMEMO_P[${__key}]=${OS_UI__PLAIN}
+    fi
     return 0
 }
 
@@ -921,7 +998,8 @@ ui::_menu_pairs() {
         if [[ -z ${OS_UI__PAIR_V[i]-} ]]; then
             ui::_style muted
             ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__PAIR_K[i]}"
-            printf '%s%s\n' "${pfx}" "${OS_UI__COLORED}" >&"${fd}"
+            printf -v OS_UI__L '%s%s' "${pfx}" "${OS_UI__COLORED}"
+            ui::_emit "${fd}" "${OS_UI__L}"
             continue
         fi
         ui::_truncate "${OS_UI__PAIR_K[i]}" "${kw}"
@@ -930,7 +1008,8 @@ ui::_menu_pairs() {
         ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__PAD}"
         key_text=${OS_UI__COLORED}
         ui::_truncate "${OS_UI__PAIR_V[i]}" "${value_width}"
-        printf '%s%s  %s\n' "${pfx}" "${key_text}" "${OS_UI__TRUNC}" >&"${fd}"
+        printf -v OS_UI__L '%s%s  %s' "${pfx}" "${key_text}" "${OS_UI__TRUNC}"
+        ui::_emit "${fd}" "${OS_UI__L}"
     done
     return 0
 }
@@ -1029,10 +1108,25 @@ ui::menu() {
         return 0
     fi
 
-    # 已在 frame 中的调用必须保留上方总览，即使调用方漏传 --keep-screen。
-    if ((keep_screen == 0 && OS_UI__FRAME == 0)); then
-        ui::clear_screen "${fd}"
+    # --- 整帧缓冲开始。到函数末尾一次写出，**这中间不得有 return** ---
+    #
+    # 重画整屏时不再走 `[2J`：那会先把屏幕清成空白再逐行画，肉眼就是闪一下。
+    # 改成「光标归位 → 铺新帧（每行自带清到行尾）→ 清掉尾部残留」，屏幕上
+    # 任何一刻都是一张完整的菜单。前一屏比这一屏长时，多出来的部分由末尾的
+    # 清除收掉。
+    #
+    # 已在 frame 中的调用必须保留上方总览，即使调用方漏传 --keep-screen；
+    # 非终端（管道、日志、JSON）一个转义字节都不发，输出与从前逐字节相同。
+    local -i redraw=0
+    if ((keep_screen == 0 && OS_UI__FRAME == 0)) && ui::_fd_tty "${fd}"; then
+        redraw=1
     fi
+    OS_UI__BUF=''
+    OS_UI__BUF_EOL=''
+    if ((redraw == 1)); then
+        OS_UI__BUF_EOL="${OS_UI__ESC}[K"
+    fi
+    OS_UI__BUFFERING=1
 
     local -i fw=${OS_UI_WIDTH}
     if ((fw > OS_THEME_MENU_WIDTH)); then
@@ -1058,7 +1152,8 @@ ui::menu() {
         ui::_truncate "${notice}" $((fw - ind - 2))
         ui::_style error
         ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__SYM_ERR} ${OS_UI__TRUNC}"
-        printf '%s%s\n' "${content_pfx}" "${OS_UI__COLORED}" >&"${fd}"
+        printf -v OS_UI__L '%s%s' "${content_pfx}" "${OS_UI__COLORED}"
+        ui::_emit "${fd}" "${OS_UI__L}"
     fi
     OS_UI__PAIR_K=(${status_keys[@]+"${status_keys[@]}"})
     OS_UI__PAIR_V=(${status_vals[@]+"${status_vals[@]}"})
@@ -1120,14 +1215,17 @@ ui::menu() {
             ui::_truncate "${descs[item_i]}" "${desc_width}"
             ui::_style muted
             ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__TRUNC}"
-            printf '%s%s  %s %s  %s\n' "${content_pfx}" "${number_text}" "${OS_UI__PAD}" "${mark:- }" "${OS_UI__COLORED}" >&"${fd}"
+            printf -v OS_UI__L '%s%s  %s %s  %s' "${content_pfx}" "${number_text}" "${OS_UI__PAD}" "${mark:- }" "${OS_UI__COLORED}"
+            ui::_emit "${fd}" "${OS_UI__L}"
         elif [[ -n ${mark} ]]; then
             # 带说明的条目把标签补齐到 lw，这里也补：一屏里混着有说明和没说明的
             # 下潜项时，`›` 必须落在同一列，否则它会忽左忽右
             ui::_pad "${label}" "${lw}" left
-            printf '%s%s  %s %s\n' "${content_pfx}" "${number_text}" "${OS_UI__PAD}" "${mark}" >&"${fd}"
+            printf -v OS_UI__L '%s%s  %s %s' "${content_pfx}" "${number_text}" "${OS_UI__PAD}" "${mark}"
+            ui::_emit "${fd}" "${OS_UI__L}"
         else
-            printf '%s%s  %s\n' "${content_pfx}" "${number_text}" "${label}" >&"${fd}"
+            printf -v OS_UI__L '%s%s  %s' "${content_pfx}" "${number_text}" "${label}"
+            ui::_emit "${fd}" "${OS_UI__L}"
         fi
         item_i+=1
     done
@@ -1159,8 +1257,19 @@ ui::menu() {
         ui::_truncate "${nav_text}" $((fw - ind))
         ui::_style muted
         ui::_colorize "${fd}" "${OS_UI__C}" 0 "${OS_UI__TRUNC}"
-        printf '%s%s\n' "${indent}" "${OS_UI__COLORED}" >&"${fd}"
+        printf -v OS_UI__L '%s%s' "${indent}" "${OS_UI__COLORED}"
+        ui::_emit "${fd}" "${OS_UI__L}"
     fi
+
+    # --- 整帧缓冲结束：一次写出 ---
+    OS_UI__BUFFERING=0
+    OS_UI__BUF_EOL=''
+    if ((redraw == 1)); then
+        printf '%s[H%s%s[J' "${OS_UI__ESC}" "${OS_UI__BUF}" "${OS_UI__ESC}" >&"${fd}"
+    else
+        printf '%s' "${OS_UI__BUF}" >&"${fd}"
+    fi
+    OS_UI__BUF=''
     return 0
 }
 
