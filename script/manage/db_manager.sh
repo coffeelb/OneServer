@@ -156,24 +156,66 @@ DB_LIST_READY=0
 DB_NAMES=()
 DB_ACCOUNTS=()
 
+# 这个账号当前的**全部**来源，结果写进 DB_HOSTS，形如 `u@localhost · 10.88.0.0/255.255.0.0`。
+# 第一个带 `u@`，其余只列主机部分 —— 三四个容器网段时前缀重复三四遍，一行就满了。
+#
+# **不用 `$( )` 返回**：os::sql_query 的提示打在 stdout 上，命令替换会把它一起
+# 吃进变量（D135）。查不到就给空串，由调用方决定怎么回落。
+DB_HOSTS=''
+
+account_hosts() {
+    local user=${1} qu h out=''
+    DB_HOSTS=''
+    qu=$(os::sql_str "${user}")
+    os::sql_query '列出账号来源' -- \
+        "SELECT Host FROM mysql.global_priv WHERE User = ${qu} ORDER BY Host;" || return 1
+    local IFS=$'\n'
+    for h in ${OS_RUN_OUTPUT}; do
+        [[ -n ${h} ]] || continue
+        if [[ -z ${out} ]]; then
+            out="${user}@${h}"
+        else
+            out+=" · ${h}"
+        fi
+    done
+    DB_HOSTS=${out}
+    return 0
+}
+
 load_db_rows() {
     DB_NAMES=()
     DB_ACCOUNTS=()
     DB_LIST_READY=1
 
     user_databases || os::die 1 '查询数据库列表失败'
+    # **先把库名收进数组再遍历。** 下面要为每个库查一次账号来源，而
+    # os::sql_query 的结果同样落在 OS_RUN_OUTPUT —— 直接 `for name in
+    # ${OS_RUN_OUTPUT}` 的话，第一次查询就把正在遍历的那份列表冲掉了。
+    local -a names=()
+    mapfile -t names <<<"${OS_RUN_OUTPUT}"
+
     local name user host
-    local IFS=$'\n'
-    for name in ${OS_RUN_OUTPUT}; do
+    for name in ${names[@]+"${names[@]}"}; do
         [[ -n ${name} ]] || continue
         # 关联账号从 state 读。读不到不是错：用户手工建的库本来就不在 state 里
         user=$(os::state_get "db:${name}" user)
-        host=$(os::state_get "db:${name}" host)
         DB_NAMES+=("${name}")
-        if [[ -n ${user} ]]; then
-            DB_ACCOUNTS+=("${user}@${host}")
-        else
+        if [[ -z ${user} ]]; then
             DB_ACCOUNTS+=('（非本工具创建，无关联账号记录）')
+            continue
+        fi
+
+        # **来源以库里的现状为准，不读 state 的 host。** 那个字段是建库那一刻写
+        # 下的，而 allow-containers 会为同一个账号新增容器网段来源（localhost
+        # 那条按设计保留）—— 只显示 state 的话，放行完容器访问回到这一屏看到的
+        # 还是 localhost，像是那一步没生效。
+        account_hosts "${user}" || true
+        if [[ -n ${DB_HOSTS} ]]; then
+            DB_ACCOUNTS+=("${DB_HOSTS}")
+        else
+            # 库里查不到这个账号（被手工删过），如实说，别假装它还在
+            host=$(os::state_get "db:${name}" host)
+            DB_ACCOUNTS+=("${user}@${host}（登记过，但库里已不存在）")
         fi
     done
     return 0
