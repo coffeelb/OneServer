@@ -8,7 +8,7 @@
 # @order        20
 # @privilege    root
 # @requires_lib >= 4.3
-# @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--file=<归档文件名>] [--mode=<all|db|files>] [--only=<归档内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
+# @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--into=<类型:名字>] [--file=<归档文件名>] [--mode=<all|db|files>] [--only=<归档内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
 # @description  从归档或外部备份恢复，覆盖前自动留副本
 #
 
@@ -97,6 +97,29 @@ source /opt/oneserver/lib/bootstrap.sh
 # 三道门在这条路上换成了另外四条：来源由人当场指定而不是从远端列表里挑出来的、
 # 解包前审查完整清单、解包只落 staging 不碰落点、覆盖前照旧强制留副本。
 # 剩下的可信性由使用者负责，这句话会打进确认清单里。
+#
+# ## 七、归档说得出「它是什么」，说不出「该往哪写」
+#
+# manifest 里的 `db_name` 与 `source_path` 是**备份那一刻源机器上的事实**，
+# 不是这台机器上的落点。同名回滚时两者恰好重合，于是很容易把它们当成同一件事
+# —— 换台机器恢复、或者站点换过名字时，照 manifest 写的下场是：凭空建出一个
+# 归档里那个名字的库、把文件铺到归档里那个路径，而本机真正在跑的那个站纹丝不动。
+# 每一步都会报成功。
+#
+# 所以**落点一律经 `ex_resolve_dest` 解析**，与外部导入同一套 `site:`/`db:`/`path:`
+# 标识、同一个函数：落点回答的是「本机有什么」，与归档从哪来无关。`--into`
+# 就是把这个落点显式写出来。归档自身的落点在本机成立时它是默认项，不成立时
+# 它根本不出现在选项里 —— 让人从本机现有的站点里挑一个，或者停下。
+#
+# ## 八、恢复出来的配置一律以活系统为准
+#
+# 范围比密码大：wp-config 里的库名、账号、密码、主机，以及缓存的主机、端口、
+# 密码、前缀，**每一项在新机器上都可能与归档里那份不同**。
+# 「归档里的数据 + 本机的配置」才是一个能跑起来的站点，两边混着来的都不是。
+#
+# 因此对齐配置是恢复的**必经步骤**，不是「取得到就顺手改一下」：凭据取不到就
+# 在动手之前停（`fixup_credentials --check`），已经写完了才发现改不了的话，
+# 用户看到的是「恢复成功」加一句警告，而站点是坏的。
 
 readonly RS_PRE_DIR="${OS_BACKUP_DIR}/pre-restore"
 
@@ -116,12 +139,19 @@ RS_MF_SITE_TYPE=''
 RS_REMOTE=''
 RS_REMOTE_DIR=''
 
-# 外部导入的落点与来源，同样是函数之间的返回通道
+# 落点与来源，同样是函数之间的返回通道。
+#
+# **落点这四个变量两条路共用**（见文件头第七点）：它们记的是「本机这次要往哪写」，
+# 由 `ex_resolve_dest` 从 state 解析出来，与归档或外部来源都无关。名字保留 EX_
+# 前缀是因为解析函数在外部导入那一段，换前缀要动的调用点远多于它带来的清晰度。
 EX_DEST_DIR=''
 EX_DEST_DB=''
 # 落点是站点时才非空：具体站点类型与 state 实例名，决定要不要校对凭据
 EX_SITE_TYPE=''
 EX_SITE_NAME=''
+# 落点的标识原文（`site:blog` 这种）。归档那条路要拿它当不可逆确认串 ——
+# 让人照着打的必须是**将被覆盖的那个东西**的名字，不是归档自称的名字
+EX_DEST_SPEC=''
 EX_SRC_FILES=''
 EX_SRC_SQL=''
 # tar | zip | dir | file
@@ -460,12 +490,18 @@ snapshot_db() {
     os::run '收紧恢复前副本目录权限' -- chmod 0700 "${RS_PRE_DIR}"
     os::info "先把当前的 ${db} 备一份"
     # 凭据零参与：D121，OS root 走 unix_socket
-    # db/charset/out 经位置参数（"$1"/"$2"/"$3"）传给 sh -c，不拼进脚本文本——
+    # db/charset/out 经位置参数（"$1"/"$2"/"$3"）传给内层 shell，不拼进脚本文本——
     # read_manifest 已经把 db 校验成 [a-z0-9_-]，这里再加一层：不管校验是否
     # 有漏网之鱼，值都不会被当成 shell 语法解释。
-    # shellcheck disable=SC2016  # 理由：$1/$2/$3 是内层 sh 的位置参数，故意不让外层展开
-    os::run '备份恢复前的数据库' -- sh -c \
-        'mysqldump --single-transaction --routines --triggers --events --quick --hex-blob --default-character-set="$1" "$2" | gzip > "$3"' \
+    #
+    # 用 bash -c 而不是 sh -c，理由与 restore_db 完全相同：sh 在 Debian 上是
+    # dash，没有 pipefail，于是 mysqldump 失败时退出码取自管道末端的 gzip ——
+    # 恒为 0。现场是「恢复前副本：…」照常打印，而那份 .sql.gz 里是空的，
+    # 紧接着 restore_db 就在这个假象上把现有的库 DROP 掉。**这一步的全部意义
+    # 就是留退路，它报成功而实际没留，比不备份更危险。**
+    # shellcheck disable=SC2016  # 理由：$1/$2/$3 是内层 bash 的位置参数，故意不让外层展开
+    os::run '备份恢复前的数据库' -- bash -c \
+        'set -o pipefail; mysqldump --single-transaction --routines --triggers --events --quick --hex-blob --default-character-set="$1" "$2" | gzip > "$3"' \
         _ "${OS_DEFAULT_DB_CHARSET}" "${db}" "${out}" \
         || {
             os::err "当前数据库备份失败，恢复中止（不在没有退路的情况下覆盖数据）"
@@ -732,24 +768,41 @@ restore_db() {
     return 0
 }
 
-# 恢复后校对凭据。**这是「恢复完站点反而挂了」的唯一成因。**
+# fixup_credentials [--check] <站点类型> <实例名> [站点目录]   把恢复出来的配置对齐到活系统
 #
-# 归档里的 wp-config.php 存的是**备份那一刻**的数据库密码，而恢复只重建了库
+# **这是「恢复完站点反而挂了」的唯一成因。**
+#
+# 归档里的 wp-config.php 存的是**备份那一刻源机器上**的配置，而恢复只重建了库
 # 里的数据 —— MySQL 账号的密码用的还是活系统上那个。两边对不上，站点连不上库。
-# 缓存密码同理，而且更隐蔽：连不上时 WordPress 每个请求都要等一次认证超时，
-# 表现是「能打开但慢得没法用」，比白屏难查得多。
+# 缓存同理，而且更隐蔽：连不上时每个请求都要等一次连接超时，表现是「能打开但
+# 慢得没法用」，比白屏难查得多。
 #
-# **以活系统为准，不是以归档为准。** MySQL 里的账号、凭据库里的密码都是活的，
-# 归档里那份是历史快照。让配置去迁就活系统，而不是把活账号的密码改回历史值
-# —— 后者等于拿备份里的明文密码去覆盖现有账号。
+# **以活系统为准，不是以归档为准**（文件头第八点）。MySQL 里的账号、凭据库里的
+# 密码、本机装没装 Valkey 都是活的，归档里那份是历史快照。让配置去迁就活系统，
+# 而不是把活账号的密码改回历史值 —— 后者等于拿备份里的明文密码去覆盖现有账号。
+#
+# 校对范围是**整套连接参数**，不只是密码：库名与账号在换名恢复时会变（`--into`），
+# 缓存的主机、端口、前缀在换机器时会变。前缀尤其不能漏 —— deploy 写进去的是
+# `<站点名>:`，两个站点共用一个 Valkey 而前缀相同，缓存键会互相覆盖，
+# 表现是「另一个站点的内容串到这个站点上」。
+#
+# 数据库那四行**必须存在**，缺一行就是硬失败：一份没有 DB_NAME 的 wp-config
+# 本来就跑不起来，这时报成功等于把问题往后推。缓存那几行相反，归档里没有就
+# 不加（见 fixup_cache）—— 没配过缓存的站点不该因为一次恢复就凭空多出缓存配置。
 #
 # 盐**不动**：它只影响登录 cookie，保留归档里的反而让已登录用户不掉线。
+#
+# `--check` 只判断「本机有没有对齐所需的凭据」，不碰任何文件。**它必须在动手
+# 之前跑**：这个判断在读完 manifest 那一刻就已经成立，而写入之后才发现的话，
+# 库已经建好、文件已经就位，用户看到的是「恢复成功」加一行警告，而站点是坏的。
 fixup_credentials() {
-    local site_type=${1} name=${2} source=${3}
+    local check=0
+    if [[ ${1-} == --check ]]; then
+        check=1
+        shift
+    fi
+    local site_type=${1} name=${2} source=${3-}
     [[ ${site_type} == wordpress ]] || return 0
-
-    local conf="${source}/wp-config.php"
-    [[ -f ${conf} ]] || return 0
 
     local id="wordpress:${name}"
     # 与 deploy_wordpress.sh 用同一条规则算 key（§11：命名空间由框架统一
@@ -761,13 +814,22 @@ fixup_credentials() {
     db_user=$(os::state_get "${id}" db_user)
     db_host=$(os::state_get "${id}" db_host localhost)
 
-    # 本机没有这份凭据 = 多半是换了台机器恢复。**这时不能瞎改** ——
-    # 归档里那份配置至少与归档里的数据是一套的，改成半套反而更糟。
+    # 本机没有这份凭据 = 落点站不是本工具部署的，或者凭据库丢了。
+    # **这时不能继续**：改不了配置就只剩「归档里的历史配置 + 本机的库」这种
+    # 半套组合，站点起不来，而前面每一步都会报成功。
     if [[ -z ${db} || -z ${db_user} ]] || ! os::secure_load "${secret_key}" pass; then
-        os::warn "本机凭据库里没有 ${id} 的数据库密码，wp-config.php 保持归档里的原样"
-        os::info "它期望的账号在配置文件里：${conf}"
-        os::info "要么在 MySQL 里按那份配置建好账号，要么先跑 oneserver deploy wordpress 再恢复"
-        return 0
+        os::err "本机凭据库里没有 ${id} 的数据库账号或密码，无法把配置对齐到这台机器"
+        os::info '先跑 oneserver deploy wordpress 部署好这个站，再恢复；'
+        os::info '或者用 --into=site:<本机已有的站点> 指定一个落点'
+        return 1
+    fi
+    [[ ${check} -eq 0 ]] || return 0
+
+    local conf="${source}/wp-config.php"
+    if [[ ! -f ${conf} ]]; then
+        os::err "恢复出来的站点里没有 wp-config.php：${conf}"
+        os::info "归档里本来就不含它。恢复前副本在 ${RS_PRE_DIR}"
+        return 1
     fi
 
     os::section '校对站点配置里的凭据'
@@ -788,15 +850,85 @@ fixup_credentials() {
         "define( 'DB_HOST', '$(os::php_str "${db_host}")' );" || return 1
     os::ok "数据库凭据已对齐到本机当前值（库 ${db}，账号 ${db_user}@${db_host}）"
 
-    # 缓存密码只在归档里本来就配了缓存时才校对 —— 没配过就不该凭空加上，
-    # 那是在替用户做他没要求的决定。替换不中返回非零，这里当正常情况放过。
+    fixup_cache "${conf}" "${name}" || return 1
+    return 0
+}
+
+# wp_has_define <wp-config 路径> <常量名>   文件里有没有这一行 define
+#
+# 判据与 os::replace_line 的正则同源，**先问存在性再替换**：那个接口一行都没
+# 匹配到时会报错（它防的是「正则写错却往文件末尾塞一行」），拿它的返回值当
+# 存在性判断，代价是每恢复一个从没配过缓存的站点就刷几行红字 —— 而那是完全
+# 正常的情况。
+wp_has_define() {
+    local conf=${1} const=${2} line
+    while IFS= read -r line; do
+        [[ ${line} =~ ^define\(\ *\'${const}\' ]] || continue
+        return 0
+    done <"${conf}"
+    return 1
+}
+
+# fixup_cache <wp-config 路径> <落点站的实例名>   缓存配置同样对齐到活系统
+#
+# 常量名与取值都跟 deploy_wordpress.sh 的 build_extra 一一对应 —— 那边写什么，
+# 这边就把归档带来的那份改成什么。两处分叉的表现是「部署的站点缓存正常、
+# 恢复的站点缓存不正常」，而且只在高并发时才看得出来。
+#
+# **归档里没有的行一律不加**：没配过缓存的站点不该因为一次恢复就凭空多出缓存
+# 配置（见 fixup_credentials 的头注释）。
+fixup_cache() {
+    local conf=${1} name=${2}
+
     local cpass=''
-    if os::secure_load valkey.password cpass; then
-        if os::replace_line "${conf}" "^define\( *'WP_REDIS_PASSWORD'" \
-            "define( 'WP_REDIS_PASSWORD', '$(os::php_str "${cpass}")' );"; then
-            os::ok '缓存密码已对齐到本机当前值'
-        fi
+    probe::component_version valkey
+    if [[ -n ${OS_PROBE_VALUE} ]] && os::secure_load valkey.password cpass; then
+        # 常量名与新行用 `|` 分隔：常量名里不可能有它，而 `${one#*|}` 取的是
+        # 第一个 `|` 之后的全部，密码里恰好带 `|` 也拆不坏
+        #
+        # 前缀带的是**落点站的名字**，不是归档里那个：换名恢复之后两个站点
+        # 会共用一个 Valkey，前缀不跟着换就互相覆盖对方的缓存键
+        local -a want=(
+            "WP_REDIS_HOST|define( 'WP_REDIS_HOST', '127.0.0.1' );"
+            "WP_REDIS_PORT|define( 'WP_REDIS_PORT', 6379 );"
+            "WP_REDIS_PASSWORD|define( 'WP_REDIS_PASSWORD', '$(os::php_str "${cpass}")' );"
+            "WP_REDIS_PREFIX|define( 'WP_REDIS_PREFIX', '$(os::php_str "${name}:")' );"
+        )
+        local one const
+        local -i hit=0
+        for one in "${want[@]}"; do
+            const=${one%%|*}
+            wp_has_define "${conf}" "${const}" || continue
+            os::replace_line "${conf}" "^define\( *'${const}'" "${one#*|}" || return 1
+            hit=1
+        done
+        # 一行都没命中就是「这个站从来没配过缓存」，那时**什么都不说** ——
+        # 报一句「已对齐」而文件里根本没有这几行，是在给没发生的动作发回执
+        [[ ${hit} -eq 0 ]] || os::ok "缓存配置已对齐到本机当前值（前缀 ${name}:）"
+        return 0
     fi
+
+    # 本机没有可用的 Valkey，而归档里那份配置指着源机器上的一台。
+    # **留着比没有更糟**：连不上时 WordPress 每个请求都要等一次连接超时，
+    # deploy 那边「装了才写」防的就是这件事，恢复这条路同样得防。
+    if wp_has_define "${conf}" WP_CACHE; then
+        os::replace_line "${conf}" "^define\( *'WP_CACHE'" \
+            "define( 'WP_CACHE', false );" || return 1
+        os::warn '本机没有可用的 Valkey，归档带来的缓存配置已停用（WP_CACHE = false）'
+    fi
+
+    # **WP_CACHE 关不掉对象缓存**，所以这一步不能因为上面没改成而跳过：那个
+    # 开关管的是页面缓存，而 Redis Object Cache 的 drop-in 一旦躺在 wp-content
+    # 下就会自己去连，连不上照样每请求超时一次。别处迁来的站点常常有 drop-in
+    # 却没有 WP_CACHE 这一行，两者的有无互不蕴含。
+    # 它是站点文件不是配置，所以**挪走而不是删**，与其它覆盖动作同一条纪律。
+    local drop="${conf%/*}/wp-content/object-cache.php"
+    [[ -f ${drop} ]] || return 0
+    local ts
+    printf -v ts '%(%Y%m%d-%H%M%S)T' -1
+    stash_current "${drop}" "object-cache-${ts}.php" || return 1
+    os::warn '对象缓存 drop-in 已挪走 —— 本机连不上它要连的那台缓存，留着会让每个请求都等一次超时'
+    os::info '装上 Valkey 之后重新启用缓存插件即可'
     return 0
 }
 
@@ -814,7 +946,7 @@ restore_files() {
         return 1
     }
     [[ -n ${source} ]] || {
-        os::err 'manifest 里没有源路径，无法确定恢复到哪'
+        os::err '没有落点目录，无法确定恢复到哪'
         return 1
     }
 
@@ -1514,8 +1646,40 @@ set_site_url() {
         return 1
     fi
 
+    # 只恢复数据库时，落点原有 wp-config 的前缀不一定属于刚导入的库。直接拿
+    # 它 UPDATE 的结果有两种：表不存在，数据库已经重建后才报失败；或者同库里
+    # 恰好有那张表，于是改到另一个站点。先看库里的事实，再决定写哪张表。
+    os::sql_query '定位站点地址表' -- \
+        "SHOW TABLES FROM $(os::sql_ident "${db}") LIKE '%options'" || return 1
+    local configured="${prefix}options" options_table='' candidate
+    local -a candidates=()
+    while IFS= read -r candidate; do
+        [[ -n ${candidate} ]] || continue
+        candidates+=("${candidate}")
+        [[ ${candidate} != "${configured}" ]] || options_table=${candidate}
+    done <<<"${OS_RUN_OUTPUT}"
+
+    if [[ -z ${options_table} ]]; then
+        if [[ ${#candidates[@]} -eq 1 ]]; then
+            options_table=${candidates[0]}
+            os::warn "配置前缀是「${prefix}」，刚导入的库里唯一的 options 表是 ${options_table}"
+            os::info "siteurl / home 将改在 ${options_table}；恢复完成后仍要把 ${conf} 的 \$table_prefix 对齐"
+        else
+            os::err "配置前缀是「${prefix}」，无法在库 ${db} 里唯一定位要改的 options 表"
+            if [[ ${#candidates[@]} -gt 0 ]]; then
+                for candidate in "${candidates[@]}"; do
+                    os::info "  候选：${candidate}"
+                done
+            else
+                os::info "库 ${db} 里没有任何 %options 表"
+            fi
+            os::info '为避免改到另一个站点，siteurl / home 未改动'
+            return 1
+        fi
+    fi
+
     local table val
-    table="$(os::sql_ident "${db}").$(os::sql_ident "${prefix}options")"
+    table="$(os::sql_ident "${db}").$(os::sql_ident "${options_table}")"
     val=$(os::sql_str "${url}")
 
     os::sql_query '读取当前站点地址' -- \
@@ -1860,6 +2024,13 @@ import_external() {
 
     [[ -z ${EX_SRC_SQL} ]] || sql_scan "${EX_SRC_SQL}" || os::die 1 '读不出 SQL 转储，未做任何改动'
 
+    # 与归档那条路同一个判断、同一个函数：改不了配置就别开始。
+    # 条件与下面真正调用 fixup_credentials 的那一处一致 —— 只灌库不换文件时
+    # 站点目录里的配置本来就是本机的，没有要对齐的东西
+    [[ -z ${EX_SITE_TYPE} || -z ${EX_SRC_FILES} ]] \
+        || fixup_credentials --check "${EX_SITE_TYPE}" "${EX_SITE_NAME}" \
+        || os::die 3 '落点站点的凭据不全，未做任何改动'
+
     local site_url=''
     if [[ -n ${EX_SITE_TYPE} ]]; then
         os::ask --match '^$|^https?://[^[:space:]]+$' \
@@ -1883,6 +2054,9 @@ import_external() {
         && items+=("数据库 ${EX_DEST_DB} 的现有内容将被 ${EX_SRC_SQL##*/} 覆盖（会先自动备一份）")
     [[ -n ${EX_SRC_FILES} ]] \
         && items+=("${EX_DEST_DIR} 将被 ${EX_SRC_FILES##*/} 的内容替换（会先整个挪到 ${RS_PRE_DIR}）")
+    # 改配置也是覆盖，与归档那条路同一条纪律：按确认之前必须看得见
+    [[ -z ${EX_SITE_TYPE} || -z ${EX_SRC_FILES} ]] \
+        || items+=("${EX_DEST_DIR}/wp-config.php 里的数据库与缓存配置（改成本机 ${EX_SITE_NAME} 的值）")
     [[ -n ${site_url} ]] \
         && items+=("${EX_DEST_DB} 里的 siteurl 与 home 将改为 ${site_url}")
     # 三道门在这条路上不存在，这件事必须让人在按下确认之前看见
@@ -1925,6 +2099,117 @@ import_external() {
     os::info "覆盖前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
     post_restore_hints "${EX_SITE_TYPE}"
     os::output 0 target="${target}" source="${EX_SRC_FILES:-${EX_SRC_SQL}}" changed=yes
+    return 0
+}
+
+# ==================================================================
+# 落点 —— 归档这条路
+# ==================================================================
+
+# rs_dest_candidates   本机现有的站点，一行一个 `site:<名字>=<说明>`
+#
+# 认站点的判据与 backup.sh 的 bk_sites 同源（类型在 OS_DEFAULT_BACKUP_SITE_TYPES
+# 里、state 中有 path 键）——**能被备份的就该能被恢复到**，两边判据分叉的表现是
+# 某个站点备得出来却选不上作落点。
+rs_dest_candidates() {
+    RS_ENTRIES=''
+    local -a types=()
+    local IFS=$', \t\n'
+    read -ra types <<<"${OS_DEFAULT_BACKUP_SITE_TYPES}"
+    IFS=$'\n\t'
+
+    local type id n path db out=''
+    for type in ${types[@]+"${types[@]}"}; do
+        [[ -n ${type} ]] || continue
+        while IFS= read -r id; do
+            [[ -n ${id} ]] || continue
+            n=${id#*:}
+            path=$(os::state_get "${id}" path)
+            [[ -n ${path} ]] || continue
+            db=$(os::state_get "${id}" db)
+            out+="site:${n}=本机的 ${n}（库 ${db:-（无）} · 目录 ${path}）"$'\n'
+        done < <(os::state_list "${type}")
+    done
+    RS_ENTRIES=${out%$'\n'}
+    [[ -n ${RS_ENTRIES} ]]
+}
+
+# rs_plan_dest   定这次恢复往哪写，结果落在 EX_DEST_* / EX_SITE_*
+#
+# 见文件头第七点：manifest 说得出归档是什么，说不出这台机器上该往哪写。
+# 落点解析与外部导入共用 `ex_resolve_dest`，唯一的例外写在函数体里。
+rs_plan_dest() {
+    local self="${RS_MF_TYPE}:${RS_MF_NAME}"
+    local -i self_ok=1
+
+    # 站点归档：归档自身的落点只有在本机**完全成立**时才算数 —— 站点在 state 里、
+    # 库名与目录都对得上。差一项就说明本机这个站与归档讲的不是同一个东西，
+    # 照 manifest 写的结果是一套谁也用不到的孤儿库与孤儿目录，而每一步都报成功。
+    if [[ ${RS_MF_TYPE} == site ]]; then
+        # site_type 缺失的归档（字段是后加的）说不出自己是哪一类站点，
+        # 也就无从和 state 里的实例对上号 —— 这种归档没有「自身落点」可言，
+        # 一律让人显式指一个，而不是拿一个猜出来的类型去查 state
+        if [[ -n ${RS_MF_SITE_TYPE} ]] && os::state_has "${RS_MF_SITE_TYPE}:${RS_MF_NAME}"; then
+            local sdb spath
+            sdb=$(os::state_get "${RS_MF_SITE_TYPE}:${RS_MF_NAME}" db)
+            spath=$(os::state_get "${RS_MF_SITE_TYPE}:${RS_MF_NAME}" path)
+            if [[ ${sdb} != "${RS_MF_DB}" || ${spath} != "${RS_MF_SOURCE}" ]]; then
+                self_ok=0
+                os::warn "本机的站点 ${RS_MF_NAME} 与归档对不上"
+                os::kv '本机' "库 ${sdb:-（无）} · 目录 ${spath}" \
+                    '归档' "库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}"
+            fi
+        elif [[ -z ${RS_MF_SITE_TYPE} ]]; then
+            self_ok=0
+            os::warn "这份归档没说自己是哪一类站点，对不上本机的任何实例"
+        else
+            self_ok=0
+            os::warn "本机 state 里没有站点 ${RS_MF_NAME}（这份归档属于 ${self}）"
+            os::info '照归档原样恢复只会建出一套与本机任何站点都无关的库和目录，站点不会因此跑起来'
+        fi
+    fi
+
+    local -a opts=()
+    [[ ${self_ok} -eq 0 ]] \
+        || opts+=("${self}=按归档原样恢复（库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}）")
+    if rs_dest_candidates; then
+        local line
+        while IFS= read -r line; do
+            [[ -n ${line} ]] || continue
+            # 自身那一项已经在首位时不再重复；**不成立时它必须留在清单里** ——
+            # 「站名对上、库改过名」正是要让人显式挑一次本机那个库的场合
+            [[ ${line%%=*} != "${self}" || ${self_ok} -eq 0 ]] || continue
+            opts+=("${line}")
+        done <<<"${RS_ENTRIES}"
+    fi
+    [[ ${#opts[@]} -gt 0 ]] || {
+        os::err '本机没有任何可以作为落点的站点'
+        os::info '先 oneserver deploy wordpress 部署一个（站名不必与归档相同），再回来恢复'
+        return 1
+    }
+    [[ ${#opts[@]} -gt 1 ]] || os::info '只有一个可用落点，下面这一项是唯一选择'
+
+    # 自身落点成立时它是首项，非交互下取首项即「原样恢复」，是安全的默认。
+    # 不成立时**没有**安全默认：非交互下必须以 2 停下，绝不能替用户从清单里
+    # 挑一个站点覆盖掉 —— 那是不可逆的，而他压根没提过这个站的名字。
+    local -a req=()
+    [[ ${self_ok} -eq 1 ]] || req=(--required)
+    local into=''
+    os::select ${req[@]+"${req[@]}"} --arg into '恢复到哪个落点' into "${opts[@]}"
+    EX_DEST_SPEC=${into}
+
+    # `db:` 与 `path:` 归档的原样恢复不走 ex_resolve_dest：那边要求库或路径别名
+    # 事先存在，而这类归档在一台干净机器上恢复时，库与目录本来就该由本次恢复
+    # 建出来 —— 「换台机器重建」正是备份存在的理由。站点归档没有这个例外，
+    # 它的落点身份必须来自 state，否则凭据无从对齐。
+    if [[ ${into} == "${self}" && ${self_ok} -eq 1 && ${RS_MF_TYPE} != site ]]; then
+        EX_DEST_DB=${RS_MF_DB}
+        EX_DEST_DIR=${RS_MF_SOURCE}
+        return 0
+    fi
+    # 到这里的失败是 `--into`/交互选择本身无效，不是「机器缺依赖」。交给 main
+    # 保留退出码 2；没有任何候选落点的那条分支仍返回 1，并由 main 映射成 3。
+    ex_resolve_dest "${into}" || return 2
     return 0
 }
 
@@ -2032,16 +2317,30 @@ main() {
         return 0
     fi
 
-    # --- 5. 选模式 ---
+    # --- 5. 定落点 ---
     #
-    # **选项按这份归档里真有什么来给。** 原来三个选项固定摆着，而一份只有库的
-    # 归档选「仅文件」的下场是当场报错退出 —— 把一个工具自己知道不成立的选择
-    # 摆到人面前，等他选错再纠正他。
+    # **在选模式之前**：模式选项取决于「归档里有什么」与「落点接得住什么」
+    # 两件事，而后者到这一步才知道。
+    local -i dest_rc=0
+    rs_plan_dest || dest_rc=$?
+    case ${dest_rc} in
+        0) ;;
+        2) os::die 2 '指定的恢复落点无效，未做任何改动' ;;
+        *) os::die 3 '定不出落点，未做任何改动' ;;
+    esac
+
+    # --- 6. 选模式 ---
+    #
+    # **选项按这份归档里真有什么、落点又接得住什么来给。** 原来三个选项固定
+    # 摆着，而一份只有库的归档选「仅文件」的下场是当场报错退出 —— 把一个工具
+    # 自己知道不成立的选择摆到人面前，等他选错再纠正他。
     local -a modes=()
-    [[ -n ${RS_MF_DB} && -n ${RS_MF_ROOT} ]] && modes+=('all=数据库与文件')
-    [[ -n ${RS_MF_DB} ]] && modes+=('db=仅数据库')
-    [[ -n ${RS_MF_ROOT} ]] && modes+=('files=仅文件')
-    [[ ${#modes[@]} -gt 0 ]] || os::die 3 '这份归档里既没有数据库也没有文件，内容不完整'
+    [[ -n ${RS_MF_DB} && -n ${EX_DEST_DB} && -n ${RS_MF_ROOT} && -n ${EX_DEST_DIR} ]] \
+        && modes+=('all=数据库与文件')
+    [[ -n ${RS_MF_DB} && -n ${EX_DEST_DB} ]] && modes+=('db=仅数据库')
+    [[ -n ${RS_MF_ROOT} && -n ${EX_DEST_DIR} ]] && modes+=('files=仅文件')
+    [[ ${#modes[@]} -gt 0 ]] \
+        || os::die 3 '这份归档里的内容与落点对不上（归档只有库而落点只有目录，或者反过来）'
     [[ ${#modes[@]} -gt 1 ]] || os::info '这份归档里只有一种内容，下面这一项是唯一选择'
 
     local mode=''
@@ -2060,42 +2359,88 @@ main() {
         os::info '只想回滚一部分文件、不动数据库的话，选「仅文件」（--mode=files）'
     fi
 
-    # --- 6. 确认。覆盖是不可逆的，走规范那一套 ---
-    local -a items=()
-    if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${RS_MF_DB} ]]; then
-        items+=("数据库 ${RS_MF_DB} 的当前内容（会先自动备一份）")
+    # 归档里的库带着**备份那一刻的域名**。换机器恢复十有八九连域名一起换，
+    # 而 siteurl / home 不改的话，浏览器打开就被 301 到旧域名去 —— 站点看起来
+    # 「恢复了但打不开」。外部导入一直问这一句，归档这条路才是跨机迁移的主入口，
+    # 更不该少。只在库确实要被恢复、且落点是站点时问：其余情况没有要改的东西。
+    local site_url=''
+    if [[ -n ${EX_SITE_TYPE} && ${mode} != files ]]; then
+        os::ask --match '^$|^https?://[^[:space:]]+$' \
+            --hint '换服务器不换域名就留空 —— 归档里带来的地址本来就是对的' \
+            --arg site-url '站点的新域名（留空 = 不动 siteurl / home）' site_url ''
     fi
-    if [[ ${mode} == all || ${mode} == files ]] && [[ -n ${RS_MF_ROOT} ]]; then
+
+    # 这次会不会改配置，到这里才定得下来。完整文件恢复一定覆盖 wp-config；
+    # 部分恢复通常不碰它，但 `--only=wp-config.php` 是明确例外，不能因为走了
+    # `--only` 就把源机器凭据原样留在落点。要改就先确认改得成：凭据齐不齐在
+    # **动手之前**就问得出来，
+    # 留到恢复完再补一句警告的话，那时库已经重建、文件已经就位
+    local fixup=0
+    local only_path=${only#/}
+    only_path=${only_path#./}
+    only_path=${only_path%/}
+    if [[ ${mode} != db && -n ${EX_SITE_TYPE} ]] \
+        && [[ -z ${only} || ${only_path} == wp-config.php ]]; then
+        fixup=1
+    fi
+    [[ ${fixup} -eq 0 ]] \
+        || fixup_credentials --check "${EX_SITE_TYPE}" "${EX_SITE_NAME}" \
+        || os::die 3 '落点站点的凭据不全，未做任何改动'
+
+    # --- 7. 确认。覆盖是不可逆的，走规范那一套 ---
+    #
+    # **清单里写的是落点，不是归档里那两个名字。** 归档自称什么已经在上面
+    # 「这份归档是什么」里说过了；这里回答的是唯一要紧的那个问题：
+    # 按下确认之后，这台机器上的哪个库、哪个目录会没。
+    local -a items=()
+    if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${EX_DEST_DB} ]]; then
+        items+=("数据库 ${EX_DEST_DB} 的当前内容（会先自动备一份）")
+    fi
+    if [[ ${mode} == all || ${mode} == files ]] && [[ -n ${EX_DEST_DIR} ]]; then
         if [[ -n ${only} ]]; then
-            items+=("目录 ${RS_MF_SOURCE}/${only#/}（会先整个挪到 ${RS_PRE_DIR}）")
+            items+=("目录 ${EX_DEST_DIR}/${only#/}（会先整个挪到 ${RS_PRE_DIR}）")
         else
-            items+=("目录 ${RS_MF_SOURCE}（会先整个挪到 ${RS_PRE_DIR}）")
+            items+=("目录 ${EX_DEST_DIR}（会先整个挪到 ${RS_PRE_DIR}）")
         fi
     fi
+    # 改配置同样是覆盖，同样要在按确认之前看得见 —— 它是恢复出来的站点能不能
+    # 跑起来的那一步，不是收尾的小动作
+    [[ ${fixup} -eq 0 ]] \
+        || items+=("${EX_DEST_DIR}/wp-config.php 里的数据库与缓存配置（改成本机 ${EX_SITE_NAME} 的值）")
+    [[ -z ${site_url} ]] \
+        || items+=("${EX_DEST_DB} 里的 siteurl 与 home 将改为 ${site_url}")
     [[ ${#items[@]} -gt 0 ]] || os::die 2 '这个模式下没有任何可恢复的内容'
 
-    if ! os::destroy_confirm --arg confirm-restore "${target}" -- "${items[@]}"; then
+    # **确认串是落点，不是归档。** 让人照着打的那个名字必须指向即将被覆盖的
+    # 东西 —— 换名恢复时打归档那个名字，等于为一件他没看清的事签字。
+    # 同名回滚时两者本来就相同，`--confirm-restore` 的既有用法不受影响。
+    if ! os::destroy_confirm --arg confirm-restore "${EX_DEST_SPEC}" -- "${items[@]}"; then
         os::info '已取消，未做任何改动'
         os::output 0 changed=no
         return 0
     fi
 
-    # --- 7. 解出内容并恢复 ---
+    # --- 8. 解出内容并恢复 ---
     os::critical_begin '恢复数据'
     local rc=0
-    if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${RS_MF_DB} ]]; then
+    if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${EX_DEST_DB} ]]; then
         local dir
         os::tmpdir dir || os::die 1 '无法创建临时目录'
         os::query --timeout 3600 -- tar -xzf "${RS_ARCHIVE}" -C "${dir}" database.sql \
             || os::die 1 '归档里取不出 database.sql'
-        restore_db "${RS_MF_DB}" "${dir}/database.sql" || rc=1
+        restore_db "${EX_DEST_DB}" "${dir}/database.sql" || rc=1
     fi
-    if [[ ${rc} -eq 0 && (${mode} == all || ${mode} == files) ]] && [[ -n ${RS_MF_ROOT} ]]; then
-        restore_files "${RS_ARCHIVE}" "${RS_MF_SOURCE}" "${RS_MF_ROOT}" "${only}" || rc=1
-        # 只在整份恢复时校对：`--only` 恢复的是子目录，配置文件没被覆盖
-        if [[ ${rc} -eq 0 && -z ${only} ]]; then
-            fixup_credentials "${RS_MF_SITE_TYPE}" "${RS_MF_NAME}" "${RS_MF_SOURCE}" || rc=1
+    if [[ ${rc} -eq 0 && (${mode} == all || ${mode} == files) ]] && [[ -n ${EX_DEST_DIR} ]]; then
+        restore_files "${RS_ARCHIVE}" "${EX_DEST_DIR}" "${RS_MF_ROOT}" "${only}" || rc=1
+        # 条件与上面那次 --check 完全一致：说了要改就一定改，改不成就是失败
+        if [[ ${rc} -eq 0 && ${fixup} -eq 1 ]]; then
+            fixup_credentials "${EX_SITE_TYPE}" "${EX_SITE_NAME}" "${EX_DEST_DIR}" || rc=1
         fi
+    fi
+    # 放在配置对齐之后：它要从 wp-config 读表前缀，而 mode=all 时那份文件
+    # 这一步之前才刚落地。与外部导入同一个函数、同一个位置。
+    if [[ ${rc} -eq 0 && -n ${site_url} ]]; then
+        set_site_url "${EX_DEST_DIR}/wp-config.php" "${EX_DEST_DB}" "${site_url}" || rc=1
     fi
     os::critical_end
 
@@ -2106,13 +2451,16 @@ main() {
 
     # 库来自归档、而文件这次没恢复（--mode=db）时，站点目录里的 wp-config
     # 仍是本机的那份，它的表前缀未必与归档里的库对得上
-    [[ ${mode} != db || -z ${RS_MF_SITE_TYPE} || -z ${RS_MF_SOURCE} ]] \
-        || ex_check_prefix "${RS_MF_SOURCE}/wp-config.php" "${RS_MF_DB}"
+    [[ ${mode} != db || -z ${EX_SITE_TYPE} || -z ${EX_DEST_DIR} ]] \
+        || ex_check_prefix "${EX_DEST_DIR}/wp-config.php" "${EX_DEST_DB}"
 
+    # `target` 是这份归档的标识，不是落点 —— 落点由上面 restore_db 与
+    # restore_files 各自报出实际写到了哪里，这里不重复一遍
     os::ok "恢复完成：${target}（${mode}）"
     os::info "恢复前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
-    post_restore_hints "${RS_MF_SITE_TYPE}"
-    os::output 0 target="${target}" mode="${mode}" archive="${file}" changed=yes
+    post_restore_hints "${EX_SITE_TYPE}"
+    os::output 0 target="${target}" mode="${mode}" archive="${file}" \
+        dest_db="${EX_DEST_DB}" dest_dir="${EX_DEST_DIR}" changed=yes
     return 0
 }
 

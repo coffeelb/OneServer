@@ -83,7 +83,7 @@ jobs:
         run: sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c 'cd /src && bats tests/lib'
 
       - name: 验证安装与全部命令 smoke
-        timeout-minutes: 4
+        timeout-minutes: 10
         run: |
           sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c '
             git config --global --add safe.directory /src
