@@ -60,7 +60,8 @@ jobs:
   unit:
     name: ${{ matrix.distro }} 隔离测试
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 只当兜底：job 超时会被标成 cancelled 而拿不到日志，让 step 超时先触发
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -78,15 +79,11 @@ jobs:
         run: sudo -E bash tests/testenv.sh reset "${{ matrix.distro }}"
 
       - name: 运行 lib 单元测试
+        timeout-minutes: 10
         run: sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c 'cd /src && bats tests/lib'
 
-      # 单独给这一步设超时，而不是只靠 job 级的 15 分钟：job 超时会被标成
-      # cancelled，而 **cancelled 的 job 拿不到日志**（GitHub 只在 job 正常
-      # 结束后归档），于是「卡在哪条命令」这个唯一有用的信息恰好丢失。
-      # step 超时则是 failure，日志照常保留，smoke.sh 打印的最后一条命令名
-      # 就指向挂住的那一条。
       - name: 验证安装与全部命令 smoke
-        timeout-minutes: 8
+        timeout-minutes: 4
         run: |
           sudo -E bash tests/testenv.sh exec "${{ matrix.distro }}" bash -c '
             git config --global --add safe.directory /src
