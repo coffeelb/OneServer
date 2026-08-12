@@ -24,8 +24,13 @@ done < <(sed -nE 's/^#[[:space:]]*@command[[:space:]]+(.+[^[:space:]])[[:space:]
     exit 1
 }
 
+# **每条命令跑之前先报名字。** 这些命令里有真去联网、真扫磁盘的（dry-run 只
+# 拦副作用，`os::query` 的只读探测照常执行），一条挂住整个 CI 就停在那儿 ——
+# 而不打印的话，日志最后一行是上一条命令的结果，看不出卡在谁身上。
+# 走 stderr：这个脚本的 stdout 留给最后那句总结。
 for command in "${commands[@]}"; do
     IFS=' ' read -r -a words <<<"${command}"
+    printf 'smoke: %s\n' "${command}" >&2
     "${ONESERVER_BIN}" "${words[@]}" --help >/dev/null
 
     # 第二条路径走真实 bootstrap、平台检查、依赖检查和非交互参数契约，但用
