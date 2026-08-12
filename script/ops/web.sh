@@ -142,6 +142,42 @@ ensure_public_dir() {
         mkdir -m "${OS_PUBLIC_DIR_MODE}" "${OS_PUBLIC_DIR}"
 }
 
+# Caddy 直接从当前版本的 templates/ 读页面。更新归档在 umask 027 下解包时，
+# 旧版本可能把目录落成 0750；文件本身即使是 0644，Caddy 也穿不过父目录。
+# enable 在生成片段之前校正分发模板路径并以真实 caddy 身份验读，不能再把
+# 「文件存在」当成「HTTP 服务读得到」。/etc 下的用户覆盖不擅自放宽父目录；
+# 它若不可读就明确失败，让用户决定那棵配置树的暴露范围。
+ensure_caddy_page_access() {
+    local src
+    src=$(page_source)
+    [[ -f ${src} ]] || {
+        os::err "面板页面模板不存在：${src}"
+        return 1
+    }
+
+    if [[ ${src} == "${OS_TEMPLATE_DIR}/dashboard.html" ]]; then
+        local path want got
+        for path in "${OS_ROOT}" "${OS_TEMPLATE_DIR}"; do
+            want=755
+            os::query -- stat -c %a -- "${path}" || return 1
+            got=${OS_RUN_OUTPUT}
+            [[ ${got} == "${want}" ]] \
+                || os::run '校正面板模板目录权限' -- chmod 0755 -- "${path}" || return 1
+        done
+        os::query -- stat -c %a -- "${src}" || return 1
+        [[ ${OS_RUN_OUTPUT} == 644 ]] \
+            || os::run '校正面板页面权限' -- chmod 0644 -- "${src}" || return 1
+    fi
+
+    os::require_cmd runuser
+    os::query -- runuser -u caddy -- test -r "${src}" || {
+        os::err "Caddy 用户读不到面板页面：${src}"
+        os::info '不会自动放宽 /etc 下的用户覆盖目录；请检查 namei -l 输出后自行决定权限'
+        return 1
+    }
+    return 0
+}
+
 web_enabled() {
     probe::service_enabled 'oneserver-web-fast.timer'
     [[ ${OS_PROBE_VALUE} == enabled ]]
@@ -295,6 +331,7 @@ write_caddy_snippet() {
     probe::component_version caddy
     [[ -n ${OS_PROBE_VALUE} ]] || return 0
     os::require_cmd caddy
+    ensure_caddy_page_access || return 1
 
     if [[ ! -d ${CADDY_INBOX} ]]; then
         # Caddy 进程以 caddy 用户运行，父目录没有执行权限时 import 会静默匹配
@@ -723,13 +760,19 @@ do_status() {
         os::kv "${u}" "${en} / ${act}${OS_PROBE_VALUE:+ · 下次 ${OS_PROBE_VALUE}}"
     done
 
-    # 页面由 Caddy 直接从模板目录读，永远等于当前版本，所以**不问版本、
-    # 也不报「N 秒前」**——后者会让人以为它也在被刷新，于是把一个正常的旧
-    # 时间戳当成故障。这里只确认那个文件还在
-    if [[ -f "$(page_source)" ]]; then
-        os::kv '面板页面' '已就位'
-    else
+    # 页面由 Caddy 直接从模板目录读。存在不等于 Caddy 读得到：更新曾把
+    # templates/ 落成 0750，页面在、HTTP 却只回空 403。状态页必须以服务身份
+    # 验读，不能继续报一个与真实访问相反的「已就位」。
+    local page
+    page=$(page_source)
+    if [[ ! -f ${page} ]]; then
         os::warn '面板页面模板缺失，跑 oneserver web --action=enable 重建'
+    elif command -v runuser >/dev/null 2>&1 && id caddy >/dev/null 2>&1 \
+        && ! os::query -- runuser -u caddy -- test -r "${page}"; then
+        os::warn "面板页面存在，但 Caddy 用户读不到：${page}"
+        os::info '运行 oneserver web enable 会校正分发模板权限；用户覆盖目录不会被自动放宽'
+    else
+        os::kv '面板页面' '已就位 · Caddy 可读'
     fi
 
     # 采集产物分两问：**齐不齐**查全部，**新不新鲜**只看两份档位快照。

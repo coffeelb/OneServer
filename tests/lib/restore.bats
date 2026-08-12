@@ -204,6 +204,168 @@ archive_main_run() {
     [[ "${output}" == *'DEST=wp_wordpress1|/srv/live-wordpress'* ]]
 }
 
+@test "数据库归档：第一层只给原库与覆盖入口，选覆盖后才列数据库" {
+    restore_run '
+        RS_MF_TYPE=db
+        RS_MF_NAME=forgejo
+        RS_MF_DB=forgejo
+
+        os::require_cmd() { return 0; }
+        ex_db_exists() { [[ "${1}" == target_b ]]; }
+        os::sql_query() {
+            OS_RUN_OUTPUT=$'"'"'forgejo\ntarget_a\ntarget_b'"'"'
+            return 0
+        }
+        os::select() {
+            case "$*" in
+                *恢复到哪个落点*)
+                    printf "FIRST_ARG=%s\n" "$@"
+                    printf -v "${4}" "%s" __pick_db__
+                    ;;
+                *覆盖本机哪个数据库*)
+                    printf "SECOND_ARG=%s\n" "$@"
+                    printf -v "${6}" "%s" db:target_b
+                    ;;
+            esac
+        }
+
+        rs_plan_dest
+        printf "DEST=%s|CREATE=%s\n" "${EX_DEST_DB}" "${RS_DEST_DB_CREATE}"
+    '
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'FIRST_ARG=db:forgejo=恢复为数据库 forgejo'* ]]
+    [[ "${output}" == *'FIRST_ARG=__pick_db__=覆盖本机现有数据库'* ]]
+    [[ "${output}" != *'FIRST_ARG=db:target_a=target_a'* ]]
+    [[ "${output}" == *'SECOND_ARG=db:target_a=target_a'* ]]
+    [[ "${output}" == *'SECOND_ARG=db:target_b=target_b'* ]]
+    [[ "${output}" == *'DEST=target_b|CREATE=0'* ]]
+    [[ "${output}" != *wordpress* ]]
+}
+
+@test "数据库归档：原库不存在时确认使用项目的 mariadb create 命令" {
+    restore_run '
+        OS_NON_INTERACTIVE=1
+        RS_MF_TYPE=db
+        RS_MF_NAME=forgejo
+        RS_MF_DB=forgejo
+        CREATED=0
+
+        os::require_cmd() { return 0; }
+        ex_db_exists() { [[ ${CREATED} -eq 1 ]]; }
+        os::sql_query() { OS_RUN_OUTPUT=""; return 0; }
+        os::lock_release() { printf "LOCK=release\n"; }
+        os::lock_acquire() { printf "LOCK=acquire\n"; }
+        os::record_change() { printf "CHANGE=%s\n" "$*"; }
+        os::defer() { printf "DEFER_ARG=%s\n" "$@"; }
+        os::run_out() {
+            printf "CREATE_ARG=%s\n" "$@"
+            CREATED=1
+            OS_RUN_SKIPPED=0
+            OS_RUN_OUTPUT="{}"
+            return 0
+        }
+
+        rs_plan_dest
+        printf "PLAN=%s|CREATE=%s\n" "${EX_DEST_DB}" "${RS_DEST_DB_CREATE}"
+        rs_create_database "${EX_DEST_DB}"
+    '
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'PLAN=forgejo|CREATE=1'* ]]
+    [[ "${output}" == *'LOCK=release'*'LOCK=acquire'* ]]
+    [[ "${output}" == *'CREATE_ARG=通过数据库管理创建恢复落点'* ]]
+    [[ "${output}" == *'CREATE_ARG=mariadb'* ]]
+    [[ "${output}" == *'CREATE_ARG=create'* ]]
+    [[ "${output}" == *'CREATE_ARG=--name=forgejo'* ]]
+    [[ "${output}" == *'CREATE_ARG=--user=forgejo'* ]]
+    [[ "${output}" == *'CREATE_ARG=--allow-any-host=n'* ]]
+    [[ "${output}" == *'CREATE_ARG=--auto-password=y'* ]]
+    [[ "${output}" == *'CREATE_ARG=--output=json'* ]]
+    [[ "${output}" == *'CREATE_ARG=--non-interactive'* ]]
+    [[ "${output}" == *'CHANGE=通过数据库管理创建了恢复落点 db:forgejo'* ]]
+    [[ "${output}" == *'DEFER_ARG=rs_remove_created_database'* ]]
+    [[ "${output}" == *'DEFER_ARG=forgejo'* ]]
+}
+
+@test "数据库归档：新建落点的失败回滚仍走项目 MariaDB 删除命令" {
+    local bindir="${BATS_TEST_TMPDIR}/rollback-bin"
+    local rollback_trace="${BATS_TEST_TMPDIR}/rollback-args"
+    mkdir -p "${bindir}"
+    printf '%s\n' \
+        '#!/bin/bash' \
+        "printf '%s\\n' \"\$@\" >'${rollback_trace}'" \
+        'exit 0' >"${bindir}/oneserver"
+    chmod +x "${bindir}/oneserver"
+
+    restore_run "
+        OS_BIN_DIR='${bindir}'
+        OS_LOCK_HELD=1
+        os::lock_release() { printf 'LOCK=release\\n'; OS_LOCK_HELD=0; }
+        os::lock_acquire() { printf 'LOCK=acquire\\n'; OS_LOCK_HELD=1; }
+
+        rs_remove_created_database forgejo
+    "
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'LOCK=release'*'LOCK=acquire'* ]]
+    grep -Fxq mariadb "${rollback_trace}"
+    grep -Fxq delete "${rollback_trace}"
+    grep -Fxq -- '--name=forgejo' "${rollback_trace}"
+    grep -Fxq -- '--confirm-drop=forgejo' "${rollback_trace}"
+    grep -Fxq -- '--force-destroy' "${rollback_trace}"
+    grep -Fxq -- '--non-interactive' "${rollback_trace}"
+}
+
+@test "数据库归档：新建空库不伪造恢复前副本，导入失败说明会回滚" {
+    restore_run '
+        SNAPSHOT_CALLED=0
+        snapshot_db() { SNAPSHOT_CALLED=1; }
+        os::sql_ident() { printf "`%s`" "${1}"; }
+        os::sql_exec() { return 0; }
+        os::run() { return 1; }
+
+        rc=0
+        restore_db forgejo "${TEST_TMP}/database.sql" 0 1 || rc=$?
+        printf "RC=%s|SNAPSHOT=%s|PRE=%s\n" "${rc}" "${SNAPSHOT_CALLED}" "${RS_PRE_CREATED}"
+    '
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'将通过失败回滚撤销'* ]]
+    [[ "${output}" == *'RC=1|SNAPSHOT=0|PRE=0'* ]]
+    [[ "${output}" != *'上面那份恢复前副本'* ]]
+}
+
+@test "路径归档：第一层不混入站点，其他登记路径放在第二层" {
+    restore_run '
+        RS_MF_TYPE=path
+        RS_MF_NAME=forgejo-data
+        RS_MF_SOURCE=/srv/forgejo
+
+        os::state_list() {
+            [[ ${1} == backup-path ]] && printf "%s\n" backup-path:docs
+        }
+        os::state_get() {
+            [[ "${1}|${2}" == "backup-path:docs|source" ]] && printf "%s" /srv/docs
+        }
+        os::select() {
+            printf "PICK=%s\n" "$*"
+            printf -v "${4}" "%s" path:forgejo-data
+        }
+
+        rs_plan_dest
+        printf "DEST=%s\n" "${EX_DEST_DIR}"
+    '
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'path:forgejo-data=恢复到原路径 /srv/forgejo'* ]]
+    [[ "${output}" == *'__pick_path__=恢复到其他已登记路径'* ]]
+    [[ "${output}" != *wordpress* ]]
+    [[ "${output}" == *'DEST=/srv/forgejo'* ]]
+}
+
+@test "MariaDB 菜单不再暴露独立备份与恢复动作" {
+    local manager="${OS_TEST_REPO_ROOT}/script/manage/db_manager.sh"
+    run grep -nE "backup=备份数据库|restore=从备份恢复|action_(backup|restore)" "${manager}"
+    [ "${status}" -eq 1 ]
+    grep -Fq '@args         [--action=<list|create|delete|allow-containers>]' "${manager}"
+}
+
 @test "--into=site:x：库、文件与凭据全部使用 x 的 state" {
     local dest="${BATS_TEST_TMPDIR}/site-x"
     archive_main_run x wp_x "${dest}" "${BATS_TEST_TMPDIR}/archive-wordpress" site:x
@@ -212,6 +374,7 @@ archive_main_run() {
     grep -Fq "FILES=${BATS_TEST_TMPDIR}/archive.tar.gz|${dest}|wordpress|" "${TRACE}"
     grep -Fq 'SECURE=wordpress.x.db_pass' "${TRACE}"
     grep -Fq 'CONFIRM=site:x' "${TRACE}"
+    grep -Fq 'RUN=备份恢复前的数据库' "${TRACE}"
     ! grep -Fq 'DROP DATABASE IF EXISTS `wp_wordpress`' "${TRACE}"
 }
 
@@ -223,6 +386,7 @@ archive_main_run() {
     grep -Fq "FILES=${BATS_TEST_TMPDIR}/archive.tar.gz|${dest}|wordpress|" "${TRACE}"
     grep -Fq 'SECURE=wordpress.wordpress.db_pass' "${TRACE}"
     grep -Fq 'CONFIRM=site:wordpress' "${TRACE}"
+    grep -Fq 'RUN=备份恢复前的数据库' "${TRACE}"
 }
 
 @test "--only=wp-config.php：部分恢复仍会读取落点凭据并改写配置" {

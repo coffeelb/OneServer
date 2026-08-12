@@ -74,7 +74,7 @@ example.com {
 }
 
 example.example.com {
-    reverse_proxy http://127.0.0.1:3005
+    reverse_proxy 127.0.0.1:3005
 
     tls {
         dns cloudflare {env.CLOUDFLARE_API_TOKEN}

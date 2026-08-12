@@ -148,6 +148,16 @@ do_switch() {
         [[ -e "${STAGING}/${topf}" ]] || die "暂存区缺 ${topf}，什么都没有替换"
     done
 
+    # update.sh 以 umask 027 解包并配合 tar --no-same-permissions。文件权限随后
+    # 会按 manifest 校正，但 Git 不记录目录模式，目录此前会原样停在 0750。
+    # 换上线后，Caddy 等非 root 服务连 templates/ 都无法遍历，面板的静态文件
+    # 于是返回空 403。分发树只含程序与公开模板，目录统一为 0755；state/data
+    # 不在 TOP_ORDER，仍严格保持 0750。
+    for top in "${TOP_ORDER[@]}"; do
+        find "${STAGING}/${top}" -type d -exec chmod 0755 -- {} + \
+            || die "无法校正暂存区 ${top} 的目录权限"
+    done
+
     # data/ 是跨版本保留的运行时状态，不在 TOP_ORDER 里。必须在第一次 rename
     # 之前保证它能被 unit 的 ReadWritePaths 使用；否则代码已经切换后才发现
     # 目录创建失败，会把机器留在「新版代码 + 不可用数据目录」的状态。

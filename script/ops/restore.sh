@@ -106,10 +106,11 @@ source /opt/oneserver/lib/bootstrap.sh
 # 归档里那个名字的库、把文件铺到归档里那个路径，而本机真正在跑的那个站纹丝不动。
 # 每一步都会报成功。
 #
-# 所以**落点一律经 `ex_resolve_dest` 解析**，与外部导入同一套 `site:`/`db:`/`path:`
-# 标识、同一个函数：落点回答的是「本机有什么」，与归档从哪来无关。`--into`
-# 就是把这个落点显式写出来。归档自身的落点在本机成立时它是默认项，不成立时
-# 它根本不出现在选项里 —— 让人从本机现有的站点里挑一个，或者停下。
+# 所以落点先按归档类型规划：站点只能落到本机 state 中完整成立的站点；
+# 数据库可覆盖现有库，或按归档原名通过 `oneserver mariadb create` 创建后恢复；
+# 路径可落回 manifest 的原路径，或本机已登记的备份路径。其他显式 `--into`
+# 仍经 `ex_resolve_dest` 用同一套 `site:`/`db:`/`path:` 标识解析。这样恢复站点不会
+# 凭归档猜本机配置，纯数据库与纯路径归档也不再被 WordPress 的落点模型绑死。
 #
 # ## 八、恢复出来的配置一律以活系统为准
 #
@@ -135,6 +136,9 @@ RS_MF_CREATED=''
 RS_MF_HOST=''
 # 具体站点类型（wordpress …）。恢复后要不要校对凭据、怎么校对，全看它
 RS_MF_SITE_TYPE=''
+# 只有真正留下了恢复前副本才为 1。用它控制结束提示，避免新建空库
+# 的恢复也声称 pre-restore 里有旧数据。
+RS_PRE_CREATED=0
 
 RS_REMOTE=''
 RS_REMOTE_DIR=''
@@ -142,8 +146,9 @@ RS_REMOTE_DIR=''
 # 落点与来源，同样是函数之间的返回通道。
 #
 # **落点这四个变量两条路共用**（见文件头第七点）：它们记的是「本机这次要往哪写」，
-# 由 `ex_resolve_dest` 从 state 解析出来，与归档或外部来源都无关。名字保留 EX_
-# 前缀是因为解析函数在外部导入那一段，换前缀要动的调用点远多于它带来的清晰度。
+# 由落点规划或 `ex_resolve_dest` 填充，记的始终是本机真正要写入的位置。
+# 名字保留 EX_ 前缀是因为通用解析函数在外部导入那一段，换前缀要动的调用点
+# 远多于它带来的清晰度。
 EX_DEST_DIR=''
 EX_DEST_DB=''
 # 落点是站点时才非空：具体站点类型与 state 实例名，决定要不要校对凭据
@@ -152,6 +157,9 @@ EX_SITE_NAME=''
 # 落点的标识原文（`site:blog` 这种）。归档那条路要拿它当不可逆确认串 ——
 # 让人照着打的必须是**将被覆盖的那个东西**的名字，不是归档自称的名字
 EX_DEST_SPEC=''
+# 数据库归档按原名恢复、而本机还没有这个库时为 1。真正创建推迟到不可逆确认
+# 之后，并调用 `oneserver mariadb create`，不在恢复脚本里复制账号与凭据逻辑。
+RS_DEST_DB_CREATE=0
 EX_SRC_FILES=''
 EX_SRC_SQL=''
 # tar | zip | dir | file
@@ -507,6 +515,7 @@ snapshot_db() {
             os::err "当前数据库备份失败，恢复中止（不在没有退路的情况下覆盖数据）"
             return 1
         }
+    RS_PRE_CREATED=1
     os::ok "恢复前副本：${out}"
     return 0
 }
@@ -530,6 +539,7 @@ stash_current() {
     os::run '收紧恢复前副本目录权限' -- chmod 0700 "${RS_PRE_DIR}"
     [[ -e ${live} ]] || return 0
     os::run '移走当前内容作为恢复前副本' -- mv "${live}" "${RS_PRE_DIR}/${label}" || return 1
+    RS_PRE_CREATED=1
     os::ok "恢复前副本：${RS_PRE_DIR}/${label}"
     return 0
 }
@@ -737,14 +747,16 @@ rs_normalize_owner() {
     return 0
 }
 
-# restore_db <库名> <sql 文件> [剥离库级语句]
+# restore_db <库名> <sql 文件> [剥离库级语句] [目标库是本次刚创建的]
 #
 # sql 文件可以是 `.sql` 或 `.sql.gz`；第三个参数为 1 时把 `USE` /
 # `CREATE DATABASE` / `DROP DATABASE` 三类语句在管道里注释掉（外来 dump 才需要，
 # 判断在 sql_scan，**用户的原文件一个字节不动**）。
 restore_db() {
-    local db=${1} sqlfile=${2} strip=${3:-0}
-    snapshot_db "${db}" || return 1
+    local db=${1} sqlfile=${2} strip=${3:-0} fresh=${4:-0}
+    # 刚通过数据库管理创建出来的是空库，没有旧数据需要留副本；其余覆盖仍严格
+    # 执行 D140，快照失败就不碰目标库。
+    [[ ${fresh} -eq 1 ]] || snapshot_db "${db}" || return 1
 
     local ident
     ident=$(os::sql_ident "${db}")
@@ -761,7 +773,11 @@ restore_db() {
         'set -o pipefail; case "$3" in *.gz) gunzip -c -- "$3" ;; *) cat -- "$3" ;; esac | if [ "$4" = 1 ]; then sed -E "s@^(USE[[:space:]]|CREATE[[:space:]]+DATABASE|DROP[[:space:]]+DATABASE)@-- oneserver-import: \1@"; else cat; fi | mysql --default-character-set="$1" "$2"' \
         _ "${OS_DEFAULT_DB_CHARSET}" "${db}" "${sqlfile}" "${strip}" \
         || {
-            os::err "导入失败。当前库已被清空，用上面那份恢复前副本可以回到原状"
+            if [[ ${fresh} -eq 1 ]]; then
+                os::err '导入失败。新建落点可能只含部分数据，将通过失败回滚撤销'
+            else
+                os::err "导入失败。当前库已被清空，用上面那份恢复前副本可以回到原状"
+            fi
             return 1
         }
     os::ok "数据库 ${db} 已恢复"
@@ -2096,7 +2112,8 @@ import_external() {
         || ex_check_prefix "${EX_DEST_DIR}/wp-config.php" "${EX_DEST_DB}"
 
     os::ok "导入完成：${target}"
-    os::info "覆盖前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
+    [[ ${RS_PRE_CREATED} -eq 0 ]] \
+        || os::info "覆盖前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
     post_restore_hints "${EX_SITE_TYPE}"
     os::output 0 target="${target}" source="${EX_SRC_FILES:-${EX_SRC_SQL}}" changed=yes
     return 0
@@ -2106,12 +2123,12 @@ import_external() {
 # 落点 —— 归档这条路
 # ==================================================================
 
-# rs_dest_candidates   本机现有的站点，一行一个 `site:<名字>=<说明>`
+# rs_site_dest_candidates   本机现有的站点，一行一个 `site:<名字>=<说明>`
 #
 # 认站点的判据与 backup.sh 的 bk_sites 同源（类型在 OS_DEFAULT_BACKUP_SITE_TYPES
 # 里、state 中有 path 键）——**能被备份的就该能被恢复到**，两边判据分叉的表现是
 # 某个站点备得出来却选不上作落点。
-rs_dest_candidates() {
+rs_site_dest_candidates() {
     RS_ENTRIES=''
     local -a types=()
     local IFS=$', \t\n'
@@ -2134,6 +2151,107 @@ rs_dest_candidates() {
     [[ -n ${RS_ENTRIES} ]]
 }
 
+# rs_db_dest_candidates   除归档原库外，本机现有的用户数据库。
+#
+# 第一层菜单只显示「按原名恢复 / 覆盖本机数据库」两项；真正的库清单放到用户选中
+# 第二项之后，避免十几个库把第一层选择淹没。系统库永远不列。
+rs_db_dest_candidates() {
+    RS_ENTRIES=''
+    os::require_cmd mysql
+    os::sql_query '列出可恢复的数据库落点' -- \
+        "SELECT schema_name FROM information_schema.schemata
+         WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys')
+         ORDER BY schema_name;" || return 1
+
+    local name entries_text=''
+    while IFS= read -r name; do
+        [[ -n ${name} && ${name} != "${RS_MF_DB}" ]] || continue
+        valid_db_name "${name}" || continue
+        entries_text+="db:${name}=${name}"$'\n'
+    done <<<"${OS_RUN_OUTPUT}"
+    RS_ENTRIES=${entries_text%$'\n'}
+    [[ -n ${RS_ENTRIES} ]]
+}
+
+# rs_path_dest_candidates   已登记的路径落点，不含与归档原路径完全相同的那项。
+rs_path_dest_candidates() {
+    RS_ENTRIES=''
+    local id name path entries_text=''
+    while IFS= read -r id; do
+        [[ -n ${id} ]] || continue
+        name=${id#*:}
+        path=$(os::state_get "${id}" source)
+        [[ -n ${path} && ${path} != "${RS_MF_SOURCE}" ]] || continue
+        entries_text+="path:${name}=${name}（${path}）"$'\n'
+    done < <(os::state_list backup-path)
+    RS_ENTRIES=${entries_text%$'\n'}
+    [[ -n ${RS_ENTRIES} ]]
+}
+
+# rs_remove_created_database <库名>   失败时撤销 rs_create_database 的完整产物。
+#
+# 创建是通过项目命令完成的，撤销也必须通过项目命令：这样库、账号、凭据与 state
+# 仍由数据库管理的一份逻辑处理。删除命令会先为可能已经部分导入的数据留快照。
+# 回滚发生时父进程通常重新持有全局锁，先释放，否则子命令会等自己超时。
+rs_remove_created_database() {
+    local db=${1}
+    local -i held=${OS_LOCK_HELD} rc=0
+    os::lock_release
+    "${OS_BIN_DIR}/oneserver" mariadb delete \
+        "--name=${db}" "--confirm-drop=${db}" \
+        --force-destroy --non-interactive --output=json \
+        >/dev/null 2>&1 || rc=$?
+    if [[ ${held} -eq 1 ]]; then
+        os::lock_acquire --try "${OS_DEFAULT_LOCK_WAIT}" || return 1
+    fi
+    return "${rc}"
+}
+
+# 调项目自己的数据库创建命令。父进程持着全局锁，直接派发会让子进程等锁超时，
+# 所以只在这条受控边界暂时释放；子命令结束后无论成功失败都先重新取锁。
+rs_create_database() {
+    local db=${1}
+    [[ ${RS_DEST_DB_CREATE} -eq 1 ]] || return 0
+
+    os::info "数据库 ${db} 不存在，先通过数据库管理创建数据库与账号"
+    # 创建命令走它自己的完整校验、凭据与 state 流程；这里显式采用那条命令的
+    # 安全默认值（同名账号、仅 localhost、自动密码），避免把子命令的交互提示
+    # 重定向进 run_out 日志后形成一个屏幕上看不见的等待点。
+    local -a cmd=(
+        "${OS_BIN_DIR}/oneserver" mariadb create
+        "--name=${db}" "--user=${db}"
+        --allow-any-host=n --auto-password=y
+        --non-interactive --output=json
+    )
+
+    os::lock_release
+    local -i rc=0
+    os::run_out --allow-fail '通过数据库管理创建恢复落点' -- "${cmd[@]}" || rc=$?
+    local -i skipped=${OS_RUN_SKIPPED}
+    # 子命令已经成功，此刻即使重新取锁失败，父进程的 EXIT trap 也必须知道系统
+    # 发生了什么并能撤销。登记不能放到 lock_acquire 之后。
+    if [[ ${rc} -eq 0 && ${skipped} -ne 1 ]]; then
+        os::record_change "通过数据库管理创建了恢复落点 db:${db}"
+        os::defer rs_remove_created_database "${db}"
+    fi
+    os::lock_acquire
+
+    [[ ${rc} -eq 0 ]] || {
+        os::err "数据库管理未能创建 ${db}，恢复尚未开始"
+        return 1
+    }
+    if [[ ${skipped} -eq 1 ]]; then
+        os::info "[dry-run] 将通过 oneserver mariadb create --name=${db} 创建恢复落点"
+        return 0
+    fi
+    ex_db_exists "${db}" || {
+        os::err "数据库创建命令结束后仍找不到 ${db}，恢复尚未开始"
+        return 1
+    }
+    os::ok "数据库 ${db} 与关联账号已由数据库管理创建"
+    return 0
+}
+
 # rs_plan_dest   定这次恢复往哪写，结果落在 EX_DEST_* / EX_SITE_*
 #
 # 见文件头第七点：manifest 说得出归档是什么，说不出这台机器上该往哪写。
@@ -2141,6 +2259,7 @@ rs_dest_candidates() {
 rs_plan_dest() {
     local self="${RS_MF_TYPE}:${RS_MF_NAME}"
     local -i self_ok=1
+    RS_DEST_DB_CREATE=0
 
     # 站点归档：归档自身的落点只有在本机**完全成立**时才算数 —— 站点在 state 里、
     # 库名与目录都对得上。差一项就说明本机这个站与归档讲的不是同一个东西，
@@ -2169,22 +2288,61 @@ rs_plan_dest() {
         fi
     fi
 
-    local -a opts=()
-    [[ ${self_ok} -eq 0 ]] \
-        || opts+=("${self}=按归档原样恢复（库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}）")
-    if rs_dest_candidates; then
-        local line
-        while IFS= read -r line; do
-            [[ -n ${line} ]] || continue
-            # 自身那一项已经在首位时不再重复；**不成立时它必须留在清单里** ——
-            # 「站名对上、库改过名」正是要让人显式挑一次本机那个库的场合
-            [[ ${line%%=*} != "${self}" || ${self_ok} -eq 0 ]] || continue
-            opts+=("${line}")
-        done <<<"${RS_ENTRIES}"
-    fi
+    local -a opts=() nested=()
+    local line
+    case ${RS_MF_TYPE} in
+        site)
+            [[ ${self_ok} -eq 0 ]] \
+                || opts+=("${self}=按归档原样恢复（库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}）")
+            if rs_site_dest_candidates; then
+                while IFS= read -r line; do
+                    [[ -n ${line} ]] || continue
+                    # 自身那一项已经在首位时不再重复；不成立时仍列本机那一项，
+                    # 让用户明确选择本机真实的库与目录。
+                    [[ ${line%%=*} != "${self}" || ${self_ok} -eq 0 ]] || continue
+                    opts+=("${line}")
+                done <<<"${RS_ENTRIES}"
+            fi
+            ;;
+        db)
+            [[ -n ${RS_MF_DB} ]] || {
+                os::err '数据库归档的 manifest 里没有数据库名'
+                return 1
+            }
+            os::require_cmd mysql
+            if ex_db_exists "${RS_MF_DB}"; then
+                opts+=("${self}=覆盖原数据库 ${RS_MF_DB}")
+            else
+                opts+=("${self}=恢复为数据库 ${RS_MF_DB}（不存在则创建）")
+                RS_DEST_DB_CREATE=1
+            fi
+            if rs_db_dest_candidates; then
+                while IFS= read -r line; do
+                    [[ -n ${line} ]] && nested+=("${line}")
+                done <<<"${RS_ENTRIES}"
+                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_db__=覆盖本机现有数据库')
+            fi
+            ;;
+        path)
+            [[ -n ${RS_MF_SOURCE} ]] || {
+                os::err '路径归档的 manifest 里没有源路径'
+                return 1
+            }
+            opts+=("${self}=恢复到原路径 ${RS_MF_SOURCE}")
+            if rs_path_dest_candidates; then
+                while IFS= read -r line; do
+                    [[ -n ${line} ]] && nested+=("${line}")
+                done <<<"${RS_ENTRIES}"
+                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_path__=恢复到其他已登记路径')
+            fi
+            ;;
+        *)
+            os::err "归档类型 ${RS_MF_TYPE} 没有可用的恢复落点逻辑"
+            return 1
+            ;;
+    esac
     [[ ${#opts[@]} -gt 0 ]] || {
-        os::err '本机没有任何可以作为落点的站点'
-        os::info '先 oneserver deploy wordpress 部署一个（站名不必与归档相同），再回来恢复'
+        os::err '本机没有任何可用的恢复落点'
         return 1
     }
     [[ ${#opts[@]} -gt 1 ]] || os::info '只有一个可用落点，下面这一项是唯一选择'
@@ -2196,6 +2354,11 @@ rs_plan_dest() {
     [[ ${self_ok} -eq 1 ]] || req=(--required)
     local into=''
     os::select ${req[@]+"${req[@]}"} --arg into '恢复到哪个落点' into "${opts[@]}"
+    if [[ ${into} == __pick_db__ ]]; then
+        os::select --reask --required --arg into '覆盖本机哪个数据库' into "${nested[@]}"
+    elif [[ ${into} == __pick_path__ ]]; then
+        os::select --reask --required --arg into '恢复到哪个已登记路径' into "${nested[@]}"
+    fi
     EX_DEST_SPEC=${into}
 
     # `db:` 与 `path:` 归档的原样恢复不走 ex_resolve_dest：那边要求库或路径别名
@@ -2207,6 +2370,14 @@ rs_plan_dest() {
         EX_DEST_DIR=${RS_MF_SOURCE}
         return 0
     fi
+    # 命令行显式 `--into=db:<归档原名>` 与交互第一项语义相同：干净机器上同样
+    # 允许创建，且仍必须走数据库管理命令。
+    if [[ ${RS_MF_TYPE} == db && ${into} == "db:${RS_MF_DB}" ]]; then
+        EX_DEST_DB=${RS_MF_DB}
+        [[ ${RS_DEST_DB_CREATE} -eq 1 ]] || ex_db_exists "${RS_MF_DB}" || RS_DEST_DB_CREATE=1
+        return 0
+    fi
+    [[ ${RS_MF_TYPE} != db ]] || RS_DEST_DB_CREATE=0
     # 到这里的失败是 `--into`/交互选择本身无效，不是「机器缺依赖」。交给 main
     # 保留退出码 2；没有任何候选落点的那条分支仍返回 1，并由 main 映射成 3。
     ex_resolve_dest "${into}" || return 2
@@ -2394,7 +2565,11 @@ main() {
     # 按下确认之后，这台机器上的哪个库、哪个目录会没。
     local -a items=()
     if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${EX_DEST_DB} ]]; then
-        items+=("数据库 ${EX_DEST_DB} 的当前内容（会先自动备一份）")
+        if [[ ${RS_DEST_DB_CREATE} -eq 1 ]]; then
+            items+=("通过数据库管理创建数据库 ${EX_DEST_DB} 与关联账号，再导入归档数据")
+        else
+            items+=("数据库 ${EX_DEST_DB} 的当前内容（会先自动备一份）")
+        fi
     fi
     if [[ ${mode} == all || ${mode} == files ]] && [[ -n ${EX_DEST_DIR} ]]; then
         if [[ -n ${only} ]]; then
@@ -2420,6 +2595,13 @@ main() {
         return 0
     fi
 
+    # 创建数据库会暂时释放锁并启动独立的项目命令，不能放进不可中断区；同时
+    # 必须在最终确认之后，避免用户只是浏览恢复选项就凭空多出一个数据库和账号。
+    if [[ (${mode} == all || ${mode} == db) && ${RS_DEST_DB_CREATE} -eq 1 ]]; then
+        rs_create_database "${EX_DEST_DB}" \
+            || os::die 1 '创建数据库恢复落点失败，归档尚未导入'
+    fi
+
     # --- 8. 解出内容并恢复 ---
     os::critical_begin '恢复数据'
     local rc=0
@@ -2428,7 +2610,7 @@ main() {
         os::tmpdir dir || os::die 1 '无法创建临时目录'
         os::query --timeout 3600 -- tar -xzf "${RS_ARCHIVE}" -C "${dir}" database.sql \
             || os::die 1 '归档里取不出 database.sql'
-        restore_db "${EX_DEST_DB}" "${dir}/database.sql" || rc=1
+        restore_db "${EX_DEST_DB}" "${dir}/database.sql" 0 "${RS_DEST_DB_CREATE}" || rc=1
     fi
     if [[ ${rc} -eq 0 && (${mode} == all || ${mode} == files) ]] && [[ -n ${EX_DEST_DIR} ]]; then
         restore_files "${RS_ARCHIVE}" "${EX_DEST_DIR}" "${RS_MF_ROOT}" "${only}" || rc=1
@@ -2446,7 +2628,10 @@ main() {
 
     if [[ ${rc} -ne 0 ]]; then
         os::output 1 target="${target}" mode="${mode}"
-        os::die 1 "恢复未完成。恢复前副本在 ${RS_PRE_DIR}"
+        if [[ ${RS_PRE_CREATED} -eq 1 ]]; then
+            os::die 1 "恢复未完成。恢复前副本在 ${RS_PRE_DIR}"
+        fi
+        os::die 1 '恢复未完成；本次新建的数据库落点将按已登记的回滚撤销'
     fi
 
     # 库来自归档、而文件这次没恢复（--mode=db）时，站点目录里的 wp-config
@@ -2457,7 +2642,8 @@ main() {
     # `target` 是这份归档的标识，不是落点 —— 落点由上面 restore_db 与
     # restore_files 各自报出实际写到了哪里，这里不重复一遍
     os::ok "恢复完成：${target}（${mode}）"
-    os::info "恢复前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
+    [[ ${RS_PRE_CREATED} -eq 0 ]] \
+        || os::info "恢复前的副本留在 ${RS_PRE_DIR}，确认站点正常后可以自行清理"
     post_restore_hints "${EX_SITE_TYPE}"
     os::output 0 target="${target}" mode="${mode}" archive="${file}" \
         dest_db="${EX_DEST_DB}" dest_dir="${EX_DEST_DIR}" changed=yes

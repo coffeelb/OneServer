@@ -99,6 +99,25 @@ os_marks_are() {
     [ "$(cat "${ROOT}/secure.conf")" = 'db.password=s3cret' ]
 }
 
+@test "switch: umask 收紧过的分发目录上线前统一校正为 0755" {
+    os_mk_root
+    os_mk_staging 0
+    local top
+    while read -r top; do
+        mkdir -p "${STAGING}/${top}/nested"
+        chmod 0750 "${STAGING}/${top}" "${STAGING}/${top}/nested"
+    done < <(os_tops)
+
+    run bash "${UPDATER}" switch --root="${ROOT}" --staging="${STAGING}"
+    [ "${status}" -eq 0 ]
+    while read -r top; do
+        [ "$(stat -c %a "${ROOT}/${top}")" = '755' ]
+        [ "$(stat -c %a "${ROOT}/${top}/nested")" = '755' ]
+    done < <(os_tops)
+    # 运行时目录不属于分发树，仍保持最小权限
+    [ "$(stat -c %a "${ROOT}/data")" = '750' ]
+}
+
 @test "switch: 老版本没有 data 时在切换前建成 root:root 0750" {
     os_mk_root
     os_mk_staging 0

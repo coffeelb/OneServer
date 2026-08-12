@@ -326,8 +326,8 @@ main() {
         os::sql_exec '授予单库权限' -- \
             "GRANT ALL PRIVILEGES ON ${qdb}.* TO ${quser}@${qhost}; FLUSH PRIVILEGES;"
 
-        # 同时登记成 db:<库名>，这样 oneserver mariadb list 看得到它、
-        # oneserver mariadb backup 备得了它 —— 两个命令共用一份真相
+        # 同时登记成 db:<库名>，这样数据库管理与统一备份都从同一份 state
+        # 识别它，不会出现站点在而数据库清单里没有的分叉。
         os::state_set "db:${db_name}" engine=mariadb user="${db_user}" host="${OS_DEFAULT_DB_USER_HOST}" \
             charset="${OS_DEFAULT_DB_CHARSET}" collate="${OS_DEFAULT_DB_COLLATE}" \
             owner="${id}"

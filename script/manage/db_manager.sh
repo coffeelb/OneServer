@@ -10,8 +10,8 @@
 # @privilege    root
 # @requires_lib >= 4.8
 # @provides     db:<name>
-# @args         [--action=<list|create|delete|backup|restore|allow-containers>] [--name=<库名>] [--user=<用户名>] [--allow-any-host=<y|n>] [--auto-password=<y|n>] [--file=<备份文件>] [--confirm-drop=<库名>] [--allow-containers=<y|n>]
-# @description  创建、删除、备份、恢复数据库与关联账号
+# @args         [--action=<list|create|delete|allow-containers>] [--name=<库名>] [--user=<用户名>] [--allow-any-host=<y|n>] [--auto-password=<y|n>] [--confirm-drop=<库名>] [--allow-containers=<y|n>]
+# @description  创建、删除数据库与关联账号，管理容器访问
 #
 
 set -Eeuo pipefail
@@ -60,7 +60,7 @@ source /opt/oneserver/lib/bootstrap.sh
 # 它没有这些东西，而它的实体（数据库本身）按规范属「永不自动删除」。
 # 想删库只有一条路：`oneserver mariadb delete`，那里走 `os::destroy_confirm`。
 
-readonly DB_DUMP_DIR="${OS_BACKUP_DIR}/db"
+readonly DB_SNAPSHOT_DIR="${OS_BACKUP_DIR}/pre-delete"
 
 # 「允许容器访问」要动的两样东西。**与 install_mariadb.sh 是同两个常量**——
 # 那边装的时候定监听地址，这边是装完之后按需放开给容器，改的是同一个文件、
@@ -71,12 +71,7 @@ readonly MARIADB_PORT='3306'
 
 # 函数之间的返回通道。**不用 `printf` + `$( )`** —— os::info / os::ok / os::run
 # 的提示都默认打到 stdout，会被一起吃进变量（D135 就是这么栽的）。
-DB_DUMP_FILE=''
-
-# 供 os::select 用的候选清单，由下面两个 load_* 填。
-# 同样走全局数组而不是命令替换：user_databases 的结果在 OS_RUN_OUTPUT 里，
-# 而 `$( )` 是子 shell，执行状态与查询失败都传不出来。
-DB_CHOICES=()
+DB_SNAPSHOT_FILE=''
 
 # ------------------------------------------------------------------
 
@@ -131,22 +126,6 @@ user_exists() {
 }
 
 # ------------------------------------------------------------------
-
-# 备份目录里本工具产生的归档 → DB_CHOICES，新的在前
-load_backup_choices() {
-    DB_CHOICES=()
-    # 目录经位置参数进内层 shell，不拼进脚本文本（规范 §10）
-    os::query --timeout 10 -- sh -c \
-        "ls -1t \"\$1\" 2>/dev/null | grep -E '[.]sql[.]gz\$'" \
-        sh "${DB_DUMP_DIR}" || true
-    local one
-    local IFS=$'\n'
-    for one in ${OS_RUN_OUTPUT}; do
-        [[ -n ${one} ]] || continue
-        DB_CHOICES+=("${one}")
-    done
-    return 0
-}
 
 # 总览表的编号就是当前操作周期的选择符，避免把同一批库再打印一遍。
 # 与容器清单同一套：清单缓存进数组，总览按它渲染，动作按它把编号翻回库名 ——
@@ -372,21 +351,21 @@ action_delete() {
     # 这是「确认了才删」之外的第二道 —— 人是会打对全名然后后悔的
     local dump=''
     if [[ ${OS_DRYRUN} -ne 1 ]]; then
-        dump_database "${name}" || os::die 1 '删除前的备份失败，已中止（不会在没有副本的情况下删库）'
-        dump=${DB_DUMP_FILE}
-        os::ok "删除前已备份到 ${dump}"
+        snapshot_database "${name}" || os::die 1 '删除前的快照失败，已中止（不会在没有副本的情况下删库）'
+        dump=${DB_SNAPSHOT_FILE}
+        os::ok "删除前快照：${dump}"
     fi
 
     local -a items=("数据库 ${name}（含全部表与数据）")
     [[ -n ${user} ]] && items+=("账号 ${user}@${host}")
-    [[ -n ${dump} ]] && items+=("（已先备份到 ${dump}，删除后可用 oneserver mariadb restore 恢复）")
+    [[ -n ${dump} ]] && items+=("（已先留快照 ${dump}；恢复时先建回同名数据库，再从统一入口导入）")
 
     # 打全名确认，--yes 对它不生效，非交互下要 --force-destroy
     if ! os::destroy_confirm --arg confirm-drop "${name}" -- "${items[@]}"; then
         # 文案得跟事实对得上：删除前的副本在确认点之前就已经落盘（规范要求
         # 「不可逆操作必须先落副本」），放弃删除不会把它撤销掉
         if [[ -n ${dump} ]]; then
-            os::info "已取消，数据库未删除（删除前的备份 ${dump} 仍保留）"
+            os::info "已取消，数据库未删除（删除前快照 ${dump} 仍保留）"
         else
             os::info '已取消，未删除任何东西'
         fi
@@ -412,29 +391,33 @@ action_delete() {
     os::secure_del "db.${name}.password" || true
     os::state_del "db:${name}" || true
 
-    os::ok "数据库 ${name} 已删除（副本保留在 ${dump:-无}）"
-    os::output 0 name="${name}" backup="${dump}" changed=yes
+    os::ok "数据库 ${name} 已删除（删除前快照：${dump:-无}）"
+    if [[ -n ${dump} ]]; then
+        os::info "需要恢复快照时先建回数据库：oneserver mariadb create --name=${name}"
+        os::info "再导入：oneserver restore --from=external --source=${dump} --target=db:${name}"
+    fi
+    os::output 0 name="${name}" snapshot="${dump}" changed=yes
     return 0
 }
 
-# mysqldump | gzip，结果路径写进 DB_DUMP_FILE。
+# 删除前用 mysqldump | gzip 留快照，结果路径写进 DB_SNAPSHOT_FILE。
 #
 # 用 `sh -c` 是因为这里要的是一条**管道**，而 os::run 只接一条命令。
 # 进 `sh -c` 的每一个变量都必须是本脚本自己造的或过了白名单的：
-# 库名经 shell_safe_name（只允许 [A-Za-z0-9_-]），路径由 DB_DUMP_DIR 与
+# 库名经 shell_safe_name（只允许 [A-Za-z0-9_-]），路径由 DB_SNAPSHOT_DIR 与
 # 时间戳拼成。**没有任何一段直接来自用户输入** —— 这是规范禁 eval 的同一条
 # 思路：与其想清楚 sh 的引号规则，不如让不合规的东西根本进不来。
-dump_database() {
+snapshot_database() {
     local name=${1}
-    DB_DUMP_FILE=''
+    DB_SNAPSHOT_FILE=''
     shell_safe_name "${name}"
 
-    os::run '创建数据库备份目录' -- mkdir -p "${DB_DUMP_DIR}"
-    os::run '收紧备份目录权限' -- chmod 0700 "${DB_DUMP_DIR}"
+    os::run '创建删除前快照目录' -- mkdir -p "${DB_SNAPSHOT_DIR}"
+    os::run '收紧快照目录权限' -- chmod 0700 "${DB_SNAPSHOT_DIR}"
 
     local ts
     printf -v ts '%(%Y%m%d-%H%M%S)T' -1
-    local out="${DB_DUMP_DIR}/${name}-${ts}.sql.gz"
+    local out="${DB_SNAPSHOT_DIR}/${name}-${ts}.sql.gz"
 
     # 写临时文件再 mv：中途失败留下的半截 .sql.gz 看起来是个正常备份，
     # 而它恢复出来的是半个数据库 —— 比没有备份更危险
@@ -450,7 +433,7 @@ dump_database() {
     fi
     os::run '就位备份文件' -- mv -f "${tmp}" "${out}"
     os::run '收紧备份文件权限' -- chmod 0600 "${out}"
-    DB_DUMP_FILE=${out}
+    DB_SNAPSHOT_FILE=${out}
     return 0
 }
 
@@ -460,107 +443,6 @@ shell_safe_name() {
     valid_name "${1}" || os::die 2 "数据库名「${1}」不能安全地进入命令行"
     return 0
 }
-
-action_backup() {
-    local name=''
-    select_database name '要备份哪个数据库'
-
-    if [[ ${OS_DRYRUN} -eq 1 ]]; then
-        os::info "[dry-run] 将把 ${name} 备份到 ${DB_DUMP_DIR}/"
-        os::output 0 name="${name}" changed=dry-run
-        return 0
-    fi
-
-    dump_database "${name}" || os::die 1 "备份 ${name} 失败"
-    local out=${DB_DUMP_FILE}
-    os::kv '数据库' "${name}" '备份文件' "${out}"
-    os::ok "已备份 ${name}"
-    os::output 0 name="${name}" file="${out}" changed=yes
-    return 0
-}
-
-action_restore() {
-    load_backup_choices
-    [[ ${#DB_CHOICES[@]} -gt 0 ]] \
-        || os::die 2 "${DB_DUMP_DIR} 里没有备份文件（先跑 oneserver mariadb backup）"
-
-    # 备份文件不在总览里（那一屏列的是库），所以这里自己列一份带编号的表 ——
-    # 与其余「从清单里挑对象」的地方同一套写法：列表格 + 输编号
-    local -a cells=()
-    local -i i
-    for ((i = 0; i < ${#DB_CHOICES[@]}; i++)); do
-        cells+=("[$((i + 1))]" "${DB_CHOICES[i]}")
-    done
-    os::table '编号' '备份文件（新的在前）' -- "${cells[@]}"
-
-    local file=''
-    os::ask --arg file '从哪一份备份恢复（输入上方编号；命令行可传 --file）' file
-    if [[ ${file} =~ ^[0-9]+$ ]]; then
-        local -i sel=$((file - 1))
-        ((sel >= 0 && sel < ${#DB_CHOICES[@]})) \
-            || os::die 2 "没有编号为「${file}」的备份文件"
-        file=${DB_CHOICES[sel]}
-    fi
-
-    # **只收文件名，不收路径**，而且必须匹配本工具自己产生的命名。
-    #
-    # 这不是为了省事：恢复要跑一条 `gunzip … | mysql …` 的管道，而管道只能
-    # 经 `sh -c` 表达。用户给的任意路径进 `sh -c` 就是一条注入面，
-    # 而把它限死成「DB_DUMP_DIR 里、由本工具按固定格式命名的那些文件」之后，
-    # 进命令行的每一个字符都是本脚本自己造的（规范禁 eval 的同一条思路）。
-    # 代价是不能恢复别处的 dump —— 外来转储走
-    # `oneserver restore --from=external --target=db:<库名>`，那条路自带清单审查
-    # 与库级语句预扫描，不该在这里再开一个口子。
-    local base=${file##*/}
-    if [[ ${base} != "${file}" ]]; then
-        os::err "--file 只接受文件名，不接受路径。本工具的备份都在 ${DB_DUMP_DIR}/"
-        os::die 2 "别处来的转储用：oneserver restore --from=external --target=db:<库名>"
-    fi
-    if [[ ! ${base} =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]; then
-        os::die 2 "认不出的备份文件名：${base}（应形如 <库名>-20260803-120000.sql.gz）"
-    fi
-    local path="${DB_DUMP_DIR}/${base}"
-    [[ -f ${path} ]] || os::die 2 "备份文件不存在：${path}"
-
-    # 目标库名从文件名推：`<库名>-20260803-120000.sql.gz`
-    local name=${base%%-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*}
-    valid_name "${name}" || os::die 2 "从文件名推出的库名不合法：${name}"
-    shell_safe_name "${name}"
-
-    db_exists "${name}" || os::die 2 "目标数据库 ${name} 不存在，请先 oneserver mariadb create --name=${name}"
-
-    # 恢复会覆盖现有数据 —— 与删库同级，走 destroy_confirm。
-    # 先把现状 dump 一份，恢复错了还能回去
-    local pre=''
-    if [[ ${OS_DRYRUN} -ne 1 ]]; then
-        dump_database "${name}" || os::die 1 '恢复前的备份失败，已中止'
-        pre=${DB_DUMP_FILE}
-        os::ok "恢复前已备份当前内容到 ${pre}"
-    fi
-
-    if ! os::destroy_confirm --arg confirm-drop "${name}" -- "数据库 ${name} 的现有内容将被 ${base} 覆盖" "（已先备份到 ${pre:-无}）"; then
-        os::info '已取消，未改动任何数据'
-        os::output 0 name="${name}" changed=no
-        return 0
-    fi
-
-    os::record_change "用 ${base} 覆盖了数据库 ${name}"
-    # 用 os::run 不用 os::query：这是**有副作用**的，dry-run 必须跳过它。
-    # （虽然上面 destroy_confirm 在 dry-run 下已经返回 1 提前走掉了，
-    #  但正确性不该依赖「另一处恰好拦住了」——那种依赖在重构里最先断。）
-    # 同 dump_database：值经位置参数传给 sh -c，不拼进脚本文本
-    # shellcheck disable=SC2016  # 理由：$1/$2/$3 是内层 sh 的位置参数，故意不让外层展开
-    os::run '恢复数据库' -- sh -c \
-        'gunzip -c "$1" | mysql --default-character-set="$2" "$3"' \
-        _ "${path}" "${OS_DEFAULT_DB_CHARSET}" "${name}" \
-        || os::die 1 "恢复失败，恢复前的副本在 ${pre}"
-
-    os::ok "已从 ${base} 恢复 ${name}"
-    os::output 0 name="${name}" file="${path}" pre_backup="${pre}" changed=yes
-    return 0
-}
-
-# ------------------------------------------------------------------
 
 # ==================================================================
 # 允许容器访问数据库
@@ -785,7 +667,7 @@ main() {
     if [[ ${OS_PROBE_VALUE} != active ]]; then
         os::die 3 'MariaDB 未在运行。先 oneserver install mariadb，或 systemctl start mariadb'
     fi
-    os::require_cmd mysql mysqldump gzip gunzip openssl
+    os::require_cmd mysql mysqldump gzip openssl
 
     # 位置参数优先；没给才走交互（--action=... 由 os::select 自己从命令行取）
     local action=${1-}
@@ -796,7 +678,7 @@ main() {
 
     os::action_menu --overview action_list --arg action '操作' dispatch \
         'create=新建数据库与账号' 'delete=删除数据库' \
-        'backup=备份数据库' 'restore=从备份恢复' 'allow-containers=允许容器访问数据库'
+        'allow-containers=允许容器访问数据库'
 }
 
 dispatch() {
@@ -804,10 +686,8 @@ dispatch() {
         list) action_list ;;
         create) action_create ;;
         delete) action_delete ;;
-        backup) action_backup ;;
-        restore) action_restore ;;
         allow-containers) action_allow_containers ;;
-        *) os::die 2 "未知操作「${1}」，可用：list create delete backup restore allow-containers" ;;
+        *) os::die 2 "未知操作「${1}」，可用：list create delete allow-containers" ;;
     esac
 }
 

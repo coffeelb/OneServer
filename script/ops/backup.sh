@@ -896,7 +896,7 @@ bk_stale_after() {
 # 类型在这里**没有写死**：行来自 archives/<type>/<name>/ 与 resolve_targets。
 # 将来加容器数据（volume: / compose: 之类）这种新目标，本函数一个字都不用改。
 action_overview() {
-    local sched at targets remote remote_dir last last_status
+    local sched at targets remote remote_dir last last_status local_keep remote_keep
     sched=$(os::state_get backup schedule none)
     at=$(os::state_get backup at '')
     targets=$(os::state_get backup targets "${OS_DEFAULT_BACKUP_TARGETS}")
@@ -904,6 +904,8 @@ action_overview() {
     remote_dir=$(os::state_get backup remote_dir '')
     last=$(os::state_get backup last '')
     last_status=$(os::state_get backup last_status '')
+    local_keep=$(os::state_get backup local_keep "${OS_DEFAULT_BACKUP_LOCAL_KEEP}")
+    remote_keep=$(os::state_get backup remote_keep "${OS_DEFAULT_BACKUP_REMOTE_KEEP}")
 
     # --- 一、定时 ---
     os::section '定时备份'
@@ -924,7 +926,9 @@ action_overview() {
         os::kv '频率' "${sched}${at:+ ${at}}" \
             '下次执行' "${next}" \
             '定时任务上次结果' "${result_text}" \
-            '定时目标' "${targets}"
+            '定时目标' "${targets}" \
+            '本地保留' "每个目标 ${local_keep} 份" \
+            '远端保留' "每个目标 ${remote_keep} 份"
         if [[ -n ${result} && ${result} != success ]]; then
             os::warn '上一次定时备份没有成功 —— 用「查看备份日志」看原因'
         fi
@@ -1386,6 +1390,16 @@ action_schedule() {
         '定时备份哪些目标？（逗号分隔；名字位写 * = 该类全部，all = 四类全要）' targets \
         "$(os::state_get backup targets "${OS_DEFAULT_BACKUP_TARGETS}")"
 
+    # 定时任务不该暗中继承「上次手动备份」的保留数。在设置定时时显式确认，
+    # 后续 timer 调用 backup run --non-interactive 时就从 state 取这两个值。
+    local local_keep='' remote_keep=''
+    os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg local-keep \
+        '每个目标的本地备份保留几份' local_keep \
+        "$(os::state_get backup local_keep "${OS_DEFAULT_BACKUP_LOCAL_KEEP}")"
+    os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg remote-keep \
+        '每个目标的远端备份保留几份' remote_keep \
+        "$(os::state_get backup remote_keep "${OS_DEFAULT_BACKUP_REMOTE_KEEP}")"
+
     local oncal
     if [[ ${freq} == weekly ]]; then
         local -a dows=(Sun Mon Tue Wed Thu Fri Sat)
@@ -1410,11 +1424,14 @@ action_schedule() {
         [[ -n ${u} ]] && os::state_unit_add backup "${u}"
     done < <(os::systemd_touched)
 
-    os::state_set backup schedule="${freq}" at="${at}" oncalendar="${oncal}" targets="${targets}"
+    os::state_set backup schedule="${freq}" at="${at}" oncalendar="${oncal}" targets="${targets}" \
+        local_keep="${local_keep}" remote_keep="${remote_keep}"
     os::kv '频率' "${freq}" '时间' "${at}" 'OnCalendar' "${oncal}" '目标' "${targets}" \
+        '本地保留' "每个目标 ${local_keep} 份" '远端保留' "每个目标 ${remote_keep} 份" \
         '查看下次执行' 'systemctl list-timers oneserver-backup.timer'
     os::ok '定时备份已启用'
-    os::output 0 frequency="${freq}" at="${at}" targets="${targets}" changed=yes
+    os::output 0 frequency="${freq}" at="${at}" targets="${targets}" \
+        local_keep="${local_keep}" remote_keep="${remote_keep}" changed=yes
     return 0
 }
 

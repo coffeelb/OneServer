@@ -101,6 +101,44 @@ backup_run() {
     [ -f "${dir}/20260811-010101.tar.gz" ]
 }
 
+@test "设置定时备份：显式询问并持久化本地与远端保留份数" {
+    backup_run '
+        os::select() { printf -v "${4}" "%s" daily; }
+        os::ask() {
+            case "$*" in
+                *执行时间*) printf -v "${8}" "%s" 03:15 ;;
+                *每周几*) printf -v "${8}" "%s" 0 ;;
+                *定时备份哪些目标*) printf -v "${6}" "%s" db:forgejo ;;
+                *本地备份保留几份*) printf -v "${8}" "%s" 7 ;;
+                *远端备份保留几份*) printf -v "${8}" "%s" 13 ;;
+                *) return 2 ;;
+            esac
+        }
+        os::state_get() { printf "%s" "${3-}"; }
+        os::tmpdir() {
+            printf -v "${1}" "%s" "${BATS_TEST_TMPDIR}"
+        }
+        os::install_template() { return 0; }
+        os::systemd_install() { return 0; }
+        os::systemd_enable() { return 0; }
+        os::systemd_touched() { return 0; }
+        os::state_unit_add() { return 0; }
+        os::state_set() { printf "STATE_ARG=%s\n" "$@"; }
+        os::kv() { printf "KV_ARG=%s\n" "$@"; }
+        os::ok() { return 0; }
+        os::output() { printf "OUTPUT_ARG=%s\n" "$@"; }
+
+        action_schedule
+    '
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'STATE_ARG=local_keep=7'* ]]
+    [[ "${output}" == *'STATE_ARG=remote_keep=13'* ]]
+    [[ "${output}" == *'KV_ARG=本地保留'*'KV_ARG=每个目标 7 份'* ]]
+    [[ "${output}" == *'KV_ARG=远端保留'*'KV_ARG=每个目标 13 份'* ]]
+    [[ "${output}" == *'OUTPUT_ARG=local_keep=7'* ]]
+    [[ "${output}" == *'OUTPUT_ARG=remote_keep=13'* ]]
+}
+
 @test "多个变量的 read 必须自带 IFS= 前缀" {
     # 文件级 IFS 是 $'\n\t'：不带前缀的 `read -r a b` 在空格分隔的输入上
     # 不会拆列，而是把整行塞进第一个变量 —— 不报错，只是值错，
