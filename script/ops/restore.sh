@@ -1369,14 +1369,14 @@ ex_depth() {
 # 一项都不命中**不是错误**：只迁 wp-content 的包本来就没有标志文件，
 # 那时整个来源就是根，落到哪里由 --target 决定。
 ex_locate_root() {
-    local want=${1-}
+    local wanted_subdir=${1-}
     EX_ROOT=''
 
-    if [[ -n ${want} ]]; then
-        local w=${want#/}
+    if [[ -n ${wanted_subdir} ]]; then
+        local w=${wanted_subdir#/}
         w=${w%/}
         if [[ -z ${w} || ${w} == *..* ]]; then
-            os::err "--subdir 只收来源内的相对路径，收到「${want}」"
+            os::err "--subdir 只收来源内的相对路径，收到「${wanted_subdir}」"
             return 1
         fi
         local m found=''
@@ -2118,7 +2118,7 @@ rs_dest_candidates() {
     read -ra types <<<"${OS_DEFAULT_BACKUP_SITE_TYPES}"
     IFS=$'\n\t'
 
-    local type id n path db out=''
+    local type id n path db entries_text=''
     for type in ${types[@]+"${types[@]}"}; do
         [[ -n ${type} ]] || continue
         while IFS= read -r id; do
@@ -2127,10 +2127,10 @@ rs_dest_candidates() {
             path=$(os::state_get "${id}" path)
             [[ -n ${path} ]] || continue
             db=$(os::state_get "${id}" db)
-            out+="site:${n}=本机的 ${n}（库 ${db:-（无）} · 目录 ${path}）"$'\n'
+            entries_text+="site:${n}=本机的 ${n}（库 ${db:-（无）} · 目录 ${path}）"$'\n'
         done < <(os::state_list "${type}")
     done
-    RS_ENTRIES=${out%$'\n'}
+    RS_ENTRIES=${entries_text%$'\n'}
     [[ -n ${RS_ENTRIES} ]]
 }
 
