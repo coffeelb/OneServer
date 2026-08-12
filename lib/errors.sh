@@ -331,17 +331,27 @@ OS_ERR__TMPDIRS=()
 # 登记进 OS_ERR__TMPDIRS，退出路径才删得掉它。`d=$(os::tmpdir)` 会 fork 一个子
 # shell，目录**真的建出来了**，登记却只发生在那个转瞬即逝的子 shell 里 —— 父进程
 # 的清理列表始终是空的。表现不是报错：每调用一次泄漏一个目录，而清理代码看起来
-# 一直在跑。tmpfs 那条占着内存直到重启；`--exec` 那条留在真实磁盘上，里面是
-# xcaddy 几十 MB 的构建产物，只能靠 `oneserver clean` 的孤儿扫描手工收。
+# 一直在跑。被 SIGKILL 打断时目录会留在磁盘上，靠 `oneserver clean` 的孤儿扫描收。
 #
-# 默认落在 tmpfs（$OS_TMP_ROOT，/run 下）：那里的内容永远不写盘，凭据类
-# 临时文件必须走这条。
+# 落点**只有一条**，在磁盘上（$OS_TMP_ROOT，理由见 paths.sh 与 D244）。从前
+# 分两条：默认落 /run 的 tmpfs，`--exec` 才走磁盘。tmpfs 那条撤了 —— 它买的
+# 保护是象征性的（凭据真身明文躺在 secure.conf 上，且 tmpfs 会被换出到 swap），
+# 换来的却是 104 MB 的天花板，WordPress 解包、备份暂存都塞不下。
 #
-# `--exec` 落在磁盘（$OS_TMP_EXEC_ROOT）。**systemd 给 /run 挂 noexec**，
-# 下载下来要现场跑一次的二进制放 tmpfs 里，chmod 0755 之后执行照样是
-# Permission denied（退出码 126）—— 而现场表现是「下载的二进制跑不起来」：
-# 文件完好、体积正确、ELF 魔数也对，就是跑不了，一眼看不出跟挂载选项有关。
-# **--exec 的目录里禁止放凭据**，它在磁盘上。
+# **`--exec` 保留，含义收窄成「验证这个目录真的能执行」**：给 /tmp 与 /var/tmp
+# 挂 noexec 是常见的加固手段，那时 chmod +x 之后 exec 仍然 Permission denied
+# （退出码 126），而现场表现是「下载的二进制跑不起来」—— 文件完好、体积正确、
+# ELF 魔数也对，就是跑不了，一眼看不出跟挂载选项有关。更新切换器正是靠这条
+# 通道投递的（见 update.sh 的注释），它断了等于安全修复发不出去。
+#
+# **不无条件做这个验证**：加固过的机器上 /var/tmp 就是 noexec，那时只有真正
+# 要执行东西的调用该失败，其余的照常可用 —— 无条件验证会让整个工具在那种
+# 机器上全线失效。
+#
+# **仍然要注意落点在哪个文件系统上**：这里给的是 /var/tmp，而解包出来要 mv 到
+# /var/www 或 /usr/local 的东西，跨设备 mv 是复制加删除，既不原子又要双份空间。
+# 那类场景应当直接在**目标所在的文件系统**上开暂存目录（见 install_nodejs.sh 的
+# `.staging.$$` 与 deploy_wordpress.sh 的 `.oneserver-wp.$$`），这个函数管不了。
 os::tmpdir() {
     # 内部名一律带 __os_ 前缀：输出变量靠动态作用域写回，调用方最自然的
     # `local dir; os::tmpdir dir` 会被同名局部变量截住（同 os::state_health）
@@ -352,12 +362,13 @@ os::tmpdir() {
     fi
     shift
 
-    local __os_td_root=${OS_TMP_ROOT}
     local -i __os_td_want_exec=0
     if [[ ${1-} == '--exec' ]]; then
         __os_td_want_exec=1
-        __os_td_root=${OS_TMP_EXEC_ROOT}
+        shift
     fi
+
+    local __os_td_root=${OS_TMP_ROOT}
 
     if ! mkdir -p "${__os_td_root}" 2>/dev/null; then
         errors::_stderr error "无法创建临时目录根 ${__os_td_root}"
@@ -408,9 +419,9 @@ os::tmpdir() {
 errors::_clean_tmpdirs() {
     local d
     for d in ${OS_ERR__TMPDIRS[@]+"${OS_ERR__TMPDIRS[@]}"}; do
-        # 两个根都要认：--exec 建出来的目录在磁盘上，漏掉就会攒垃圾
+        # 只有一个根要认了（D244 之前是两个：tmpfs 一个、磁盘一个）
         [[ -n ${d} ]] || continue
-        [[ ${d} == "${OS_TMP_ROOT}"/* || ${d} == "${OS_TMP_EXEC_ROOT}"/* ]] || continue
+        [[ ${d} == "${OS_TMP_ROOT}"/* ]] || continue
         rm -rf -- "${d}" 2>/dev/null || true
     done
     OS_ERR__TMPDIRS=()
@@ -559,6 +570,39 @@ errors::on_exit() {
             code=1
             ;;
     esac
+
+    # 上面那张表只拦**不在 §8 集合里**的码，而外部命令的退出码完全可能正好撞上
+    # 集合里的一个：tar 用 2 表示 fatal error、`systemctl is-active` 用 3 表示
+    # 服务没在跑、grep 用 1 表示没匹配。撞上 2/3/4 的那些会一路穿到进程出口，
+    # 而框架据此认定「前置检查拦下的，什么都没做」，于是**回滚一条都不回放**。
+    #
+    # 真机上的形态：WordPress 解包因 /run 装不下而失败（tar 以 2 退出），
+    # 库和账号却留在机器上，下一次部署被自己的「账号已存在但库不存在」检查挡住，
+    # 用户手里只剩一个要手工 DROP USER 才能解开的死局，而他并不知道那个账号
+    # 是上一次失败留下的。
+    #
+    # **判据用变更清单，不用「有没有经过 os::die」**：`lock.sh` 与 `secure.sh`
+    # 里还有若干合法的 `exit 3/4`，它们不经过 os::die，靠调用路径区分要改动
+    # 每一处。而 §8 给 2/3/4 写的系统状态就是「未变更」—— 清单非空本身就是
+    # 这个码与事实矛盾的证明，判据比来源可靠。
+    #
+    # 归一成 1 之后什么都不用再写：1 的处理路径（回滚 + 失败报告 + 变更清单）
+    # 正是这种情形该走的那条。
+    #
+    # **dry-run 下不成立**：预演里 os::run 一条都没真跑，而 os::record_change
+    # 照记不误（清单在那时表达的是「将会发生什么」）。拿它当「已经改了东西」
+    # 的证据会把一次正常的「预演时参数打错了」也说成执行失败。
+    if ((OS_DRYRUN != 1)) \
+        && [[ ${code} -eq 2 || ${code} -eq 3 || ${code} -eq 4 ]] \
+        && ((${#OS_ERR__CHANGES[@]} > 0)); then
+        log::write error \
+            "退出码 ${code} 声称未变更，但变更清单里有 ${#OS_ERR__CHANGES[@]} 项，已归一为 1 并按失败处理" framework
+        # **也要上屏**，与 130 那条同样的理由：这是脚本写错了退出码，而只写进
+        # 日志的话没有人会去看。下面的失败报告会接着打变更清单与回滚结果。
+        errors::_stderr warn \
+            "退出码 ${code} 表示未变更，但已经记录到变更——多半是某个 os::run 的失败没转成 os::die 1，被调命令的退出码直接漏了出来"
+        code=1
+    fi
 
     # 装配层可以定义 os::__on_exit_hook 来做收尾（落 probe 快照、把 unit 写进
     # state）。这不是对 L4 的依赖：这里只检查「有没有这个函数」，不知道也不关心

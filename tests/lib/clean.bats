@@ -98,11 +98,12 @@ fn_body() {
     [ "${status}" -ne 0 ]
 }
 
-@test "孤儿临时目录：只认磁盘上那条 --exec 通道，不碰 tmpfs" {
+# D244 之后 os::tmpdir 只剩磁盘这一条通道，孤儿全在那儿 —— 扫描范围因此
+# 比过去大，也才真的扫得全
+@test "孤儿临时目录：扫的是 os::tmpdir 唯一的那个落点" {
     fn_body scan_tmp >"${BODY}"
-    grep -q 'OS_TMP_EXEC_ROOT' "${BODY}"
-    # /run 下那个是 tmpfs，重启即空，清它没有意义。OS_TMP_EXEC_ROOT 里含
-    # OS_TMP 前缀，所以要连右花括号一起比，否则永远匹配得上
-    run grep -nF '${OS_TMP_ROOT}' "${BODY}"
+    grep -qF '${OS_TMP_ROOT}' "${BODY}"
+    # 落点已合并，不该再有第二个根
+    run grep -nF 'OS_TMP_EXEC_ROOT' "${BODY}"
     [ "${status}" -ne 0 ]
 }

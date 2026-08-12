@@ -719,6 +719,10 @@ printf '检查了 %d 个带二级菜单的脚本\n' "${menu_checked}"
 #
 # **os::install_file 曾经不在这张表里**，于是采集器用它往盘上刷了一份历史曲线 ——
 # 一个不持锁的进程在写持久文件，正是这一档要防的那件事，而检查全程绿灯。
+#
+# **os::tmpdir 是 D244 之后加进来的**：它从前落 /run 的 tmpfs（重启即空，不算
+# 持久写），落点搬到 /var/tmp 之后，调它就是在磁盘上建目录。现有两个采集器都
+# 没用它，这条是防下一个。
 # 黑名单只拦得住已经想到的那些：新增任何落地写接口时都得回来看一眼这里。
 # public/ 下的只读产物走 os::write_public，那是这一档唯一允许的写通道。
 # 静态门禁不假装自己能理解任意 shell：除公开写接口外，再覆盖常见外部写命令
@@ -734,7 +738,7 @@ for f in "${files[@]}"; do
     while IFS= read -r hit; do
         [[ -n "${hit}" ]] || continue
         report_fail "${f}：@privilege root-nolock 不得调用 ${hit}"
-    done < <(grep -oE '\bos::(run|run_out|state_set|state_del|state_resource_add|state_resource_del|state_unit_add|install_template|install_file|secure_set|secure_del|destroy_confirm)\b' "${f}" \
+    done < <(grep -oE '\bos::(run|run_out|state_set|state_del|state_resource_add|state_resource_del|state_unit_add|install_template|install_file|secure_set|secure_del|destroy_confirm|tmpdir)\b' "${f}" \
         | sort -u || true)
     while IFS= read -r hit; do
         [[ -n "${hit}" ]] || continue

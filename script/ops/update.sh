@@ -312,7 +312,7 @@ remove_staging_orphans() {
 # 删掉正在跑的那个文件正是 K13 的形态。
 stage_updater() {
     os::run --allow-fail '清理上一轮的切换器目录' -- \
-        find "${OS_TMP_EXEC_ROOT}" -maxdepth 1 -name 'os.*' -type d -exec rm -rf -- {} + || true
+        find "${OS_TMP_ROOT}" -maxdepth 1 -name 'os.*' -type d -exec rm -rf -- {} + || true
 
     local dir=''
     os::tmpdir dir --exec || return 1

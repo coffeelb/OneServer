@@ -232,6 +232,11 @@ main() {
     local path=''
     os::ask --match '^/' --hint '要绝对路径' \
         --arg path '站点目录' path "${OS_DEFAULT_WP_ROOT}/${name}"
+    # **拿到就剥掉尾随斜杠。** 校验只要求以 `/` 开头，`/var/www/blog/` 是合法
+    # 输入，而后面两处都受不了它：`${path%/*}` 推父目录会得到站点目录自己
+    # （暂存目录于是建在站点里面），`mv -T ... "${path}/"` 在目标还不存在时
+    # GNU mv 直接以「Not a directory」拒绝。归一化在这里做，后面全都一致。
+    while [[ ${path} == */ && ${#path} -gt 1 ]]; do path=${path%/}; done
 
     local db_name=''
     os::ask --validate db_ident_valid --hint '只收字母数字下划线短横' \
@@ -344,9 +349,41 @@ main() {
     os::tmpdir dir || os::die 1 '无法创建临时目录'
     fetch_wordpress "${dir}"
 
+    # 站点目录的父目录。**不是 OS_DEFAULT_WP_ROOT** —— `--path` 可以指到任何
+    # 地方，只建默认根解决不了「`--path=/srv/web/blog` 而 /srv/web 不存在」，
+    # 那时失败会推迟到下面的 mv，报出来的却是「就位站点目录失败」。
+    local parent=${path%/*}
+    [[ -n ${parent} ]] || parent='/'
+    os::run '创建站点父目录' -- mkdir -p "${parent}" || os::die 1 "创建 ${parent} 失败"
+
+    # **解包落在站点目录旁边，不落 os::tmpdir 的 tmpfs。**
+    #
+    # `/run` 是 tmpfs，systemd 默认只给它内存的 10% —— 1 GB 的机器上实测 104 MB，
+    # 而压缩包约 25 MB 加上解包后的约 90 MB 正好塞不下：tar 写到一半以
+    # 「No space left on device」失败、退出码 2，而屏幕上只有一句「解包失败」。
+    # 真机上稳定复现，且内存越小越必然。
+    #
+    # 落在同一个文件系统还顺带修掉第二件事：从 tmpfs 挪到 /var/www 是**跨设备**
+    # 的 mv，实际是复制加删除，既不是原子替换，也要再占一份 90 MB。
+    #
+    # 压缩包本身仍留在 tmpfs：它只有 25 MB 上下，1 GB 以上的机器放得下，而它是
+    # 下载来的临时物，不落盘更干净。内存低到 /run 连它都装不下的机器，跑
+    # WordPress + MariaDB + PHP 本来就不成立，不为那个场景把下载也搬到盘上。
+    # `${parent%/}` 是给 parent 就是 `/` 的情形（`--path=/blog`）准备的：
+    # 直接拼会得到 `//.oneserver-wp.<pid>`，能用，但日志里那个双斜杠很扎眼
+    local staging="${parent%/}/.oneserver-wp.$$"
     os::record_change "在 ${path} 部署了 WordPress"
-    os::run '解包 WordPress' -- tar -xzf "${dir}/wordpress.tar.gz" -C "${dir}"
-    os::run '创建站点父目录' -- mkdir -p "${OS_DEFAULT_WP_ROOT}"
+    os::run '创建解包暂存目录' -- mkdir -p "${staging}" || os::die 1 "创建 ${staging} 失败"
+    os::defer os::run --allow-fail '回滚：清理解包暂存目录' -- rm -rf -- "${staging}"
+    # --strip-components=1 剥掉包里那层 `wordpress/`，staging 本身就是站点内容。
+    #
+    # **`|| os::die 1` 不能省。** tar 用退出码 2 表示 fatal error，而 §8 里 2 是
+    # 「参数错误 · 未变更」—— 让它穿到进程出口，框架就会认定什么都没发生而跳过
+    # 回滚，此时库和账号已经建好了。框架现在会兜住这种矛盾（变更清单非空的
+    # 2/3/4 一律归一为 1），但兜底是最后一道，不是免于在这里写对的理由。
+    os::run '解包 WordPress' -- \
+        tar -xzf "${dir}/wordpress.tar.gz" -C "${staging}" --strip-components=1 \
+        || os::die 1 "解包 WordPress 失败（${staging} 所在文件系统的空间是否够？需要约 100 MB）"
 
     if [[ ${overwrite} -eq 1 ]]; then
         # 确认过了才走到这里（上面的 destroy_confirm）。
@@ -361,7 +398,7 @@ main() {
         os::critical_begin '替换站点目录'
         local -i rc=0
         os::run '暂存原有站点目录' -- mv -T "${path}" "${stash}" || rc=$?
-        [[ ${rc} -eq 0 ]] && { os::run '就位站点目录' -- mv -T "${dir}/wordpress" "${path}" || rc=$?; }
+        [[ ${rc} -eq 0 ]] && { os::run '就位站点目录' -- mv -T "${staging}" "${path}" || rc=$?; }
         [[ ${rc} -eq 0 ]] && { os::run '删除原站点目录的暂存副本' -- rm -rf -- "${stash}" || rc=$?; }
         os::critical_end
         if [[ ${rc} -ne 0 ]]; then
@@ -369,7 +406,7 @@ main() {
             os::die 1 '部署中止'
         fi
     else
-        os::run '就位站点目录' -- mv -T "${dir}/wordpress" "${path}"
+        os::run '就位站点目录' -- mv -T "${staging}" "${path}"
     fi
 
     # --- wp-config.php ---

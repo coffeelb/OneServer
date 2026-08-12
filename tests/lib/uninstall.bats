@@ -35,7 +35,6 @@ os_footprint() {
 /var/backups/oneserver
 /run/oneserver
 /run/oneserver-public
-/var/tmp/oneserver
 /usr/local/bin/oneserver
 /usr/local/bin/os
 /etc/logrotate.d/oneserver
@@ -68,9 +67,10 @@ os_fresh_install() {
 @test "落点清单：paths.sh 里程序目录之外的路径常量，卸载器逐个都要处理" {
     local un="${OS_TEST_REPO_ROOT}/uninstall.sh"
     local v
-    # OS_ROOT 之外的落点。少一个就是卸完留一份垃圾，而现场没有任何报错
+    # OS_ROOT 之外的落点。少一个就是卸完留一份垃圾，而现场没有任何报错。
+    # OS_TMP_ROOT 不在这张表里：D244 之后它在 OS_ROOT 底下，随程序目录一起收走
     for v in OS_ETC_DIR OS_LOG_DIR OS_BACKUP_DIR OS_RUN_DIR OS_PUBLIC_DIR \
-        OS_TMP_EXEC_ROOT OS_SECURE_CONF OS_ROOT; do
+        OS_SECURE_CONF OS_ROOT; do
         grep -q "\${${v}}" "${un}" || {
             printf 'uninstall.sh 没有处理 %s\n' "${v}" >&2
             return 1
@@ -107,14 +107,13 @@ os_fresh_install() {
 
     # 造出全部落点。程序目录由 os_fresh_install 装好，其余按清单铺开
     mkdir -p /etc/oneserver /var/log/oneserver /var/backups/oneserver/archives \
-        /run/oneserver /run/oneserver-public /var/tmp/oneserver \
+        /run/oneserver /run/oneserver-public \
         /etc/logrotate.d /etc/bash_completion.d
     printf 'db.password=s3cret\n' >/opt/oneserver/secure.conf
     printf 'x\n' >/etc/oneserver/oneserver.conf
     printf 'x\n' >/var/log/oneserver/oneserver.log
     printf 'x\n' >/var/backups/oneserver/archives/keep.tar.gz
     printf 'x\n' >/run/oneserver-public/probe.tsv
-    printf 'x\n' >/var/tmp/oneserver/leftover
     printf 'x\n' >/etc/logrotate.d/oneserver
     printf 'x\n' >/etc/bash_completion.d/oneserver
     ln -sf /opt/oneserver/bin/oneserver /usr/local/bin/oneserver

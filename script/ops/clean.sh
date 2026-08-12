@@ -164,17 +164,17 @@ scan_apt() {
 # **判据是「存在即孤儿」，不看时间戳。** 正常路径下 os::tmpdir 建的目录由
 # errors.sh 的每一条退出路径清掉（正常 / 失败 / 信号），能留下来的只有进程被
 # SIGKILL 或机器掉电那两种。而本脚本是 `@privilege root`——它**持着全局锁**，
-# 此刻不可能有第二条 oneserver 命令正在用这些目录（采集器是 root-nolock，
-# 但它不碰 /var/tmp 这条 --exec 通道）。
+# 此刻不可能有第二条 oneserver 命令正在用这些目录。
 #
-# /run/oneserver/tmp 不在这里管：那是 tmpfs，重启即空，清它没有意义。
+# D244 之后 os::tmpdir 只剩这一条通道（从前默认落 /run 的 tmpfs，那条重启即空、
+# 不需要扫）—— 于是**所有**残留都在这里，扫描范围比过去大了，也才真的扫得全。
 scan_tmp() {
     CL_TMP_KB=0
     CL_TMP_DIRS=''
-    [[ -d ${OS_TMP_EXEC_ROOT} ]] || return 0
+    [[ -d ${OS_TMP_ROOT} ]] || return 0
     local out=''
     os::query --timeout "${OS_DEFAULT_SCAN_TIMEOUT}" -- \
-        find "${OS_TMP_EXEC_ROOT}" -mindepth 1 -maxdepth 1 && out=${OS_RUN_OUTPUT}
+        find "${OS_TMP_ROOT}" -mindepth 1 -maxdepth 1 && out=${OS_RUN_OUTPUT}
     [[ -n ${out} ]] || return 0
     CL_TMP_DIRS=${out}
     local d
@@ -391,7 +391,7 @@ action_tmp() {
     scan_tmp
     os::section '清理孤儿临时目录'
     if [[ -z ${CL_TMP_DIRS} ]]; then
-        os::info "${OS_TMP_EXEC_ROOT} 下没有残留"
+        os::info "${OS_TMP_ROOT} 下没有残留"
         os::output 0 freed_kb=0
         return 0
     fi

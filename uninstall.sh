@@ -278,7 +278,6 @@ self_lines() {
     lines+=("日志目录 ${OS_LOG_DIR}")
     lines+=("面板数据 ${OS_PUBLIC_DIR}")
     lines+=("运行时目录 ${OS_RUN_DIR}（锁与临时文件）")
-    lines+=("可执行临时目录 ${OS_TMP_EXEC_ROOT}")
     lines+=("logrotate 配置 ${OS_LOGROTATE_FILE}")
     lines+=("bash 补全 ${OS_COMPLETION_FILE}")
     lines+=('本工具自带的 systemd unit（备份 timer 与面板采集 timer）')
@@ -324,7 +323,6 @@ remove_self() {
     os::run --allow-fail '删除 bash 补全' -- rm -f -- "${OS_COMPLETION_FILE}" || true
     os::run --allow-fail '删除 logrotate 配置' -- rm -f -- "${OS_LOGROTATE_FILE}" || true
     os::run --allow-fail '删除面板数据目录' -- rm -rf -- "${OS_PUBLIC_DIR}" || true
-    os::run --allow-fail '删除可执行临时目录' -- rm -rf -- "${OS_TMP_EXEC_ROOT}" || true
 
     if [[ ${UN_ARCHIVES} -eq 1 ]]; then
         os::run --allow-fail '删除备份归档' -- rm -rf -- "${OS_BACKUP_DIR}" || true

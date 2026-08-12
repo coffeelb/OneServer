@@ -260,6 +260,62 @@ exit 130
     [[ "${output}" == *'确认点放晚'* ]]
 }
 
+# 撞码：tar 用 2 表示 fatal error，而 §8 里 2 是「参数错误 · 未变更」。
+# 让它穿到出口，框架就会按「前置检查拦下的」处理而**跳过回滚** —— 真机上的
+# 后果是 WordPress 解包失败后，已经建好的库与账号全都留在机器上。
+@test "退出码 2 但已有变更时归一为 1 并跑回滚" {
+    local marker="${BATS_TEST_TMPDIR}/rolled-back"
+    # 不写 `exit 2`，让它走真实路径：os::run 原样返回被调命令的 2，
+    # set -e 把它带到进程出口 —— 这正是 deploy_wordpress 踩到的那条线
+    run os_run_script "
+os::record_change '建了库与账号'
+os::defer bash -c 'echo x >> \"${marker}\"'
+os::run '模拟 tar 的 fatal error' -- bash -c 'exit 2'
+"
+    [ "${status}" -eq 1 ]
+    [ -f "${marker}" ]
+    grep -q '声称未变更，但变更清单里有 1 项' "${OS_LOG_DIR}/case.log"
+}
+
+# 反面：没有变更时 2/3/4 仍然是「前置检查拦下的」，不能因为这条兜底
+# 就把所有 2 都变成 1 —— 那会把「参数打错了」也说成执行失败
+@test "退出码 2 且没有变更时保持 2，不回滚" {
+    local marker="${BATS_TEST_TMPDIR}/should-not-exist"
+    run os_run_script "
+os::defer bash -c 'echo x >> \"${marker}\"'
+exit 2
+"
+    [ "${status}" -eq 2 ]
+    [ ! -f "${marker}" ]
+}
+
+# dry-run 下 os::run 一条都没真跑，而 record_change 照记（清单那时表达的是
+# 「将会发生什么」）。拿它当「已经改了」的证据，会把一次正常的预演参数错
+# 说成执行失败
+@test "dry-run 下退出码 2 不被归一，也不回滚" {
+    local marker="${BATS_TEST_TMPDIR}/dry-should-not-exist"
+    run os_run_script "
+OS_DRYRUN=1
+os::record_change '预演里将要做的事'
+os::defer bash -c 'echo x >> \"${marker}\"'
+exit 2
+"
+    [ "${status}" -eq 2 ]
+    [ ! -f "${marker}" ]
+}
+
+@test "退出码 3 与 4 同样按变更清单判定" {
+    run os_run_script "
+os::record_change '已经改了东西'
+exit 3
+"
+    [ "${status}" -eq 1 ]
+    run os_run_script "
+exit 3
+"
+    [ "${status}" -eq 3 ]
+}
+
 @test "进程出口把外部未知退出码归一为 1，原始码仍进日志" {
     run os_run_script "
 os::run '模拟外部失败' -- bash -c 'exit 7'
@@ -400,8 +456,8 @@ EOF
     mkdir -p "${fake_root}"
     chmod 0777 "${fake_root}"
     chown 65534 "${fake_root}" 2>/dev/null || skip '当前环境不允许 chown 到任意 uid'
-    OS_TMP_EXEC_ROOT="${fake_root}"
-    run os::tmpdir d --exec
+    OS_TMP_ROOT="${fake_root}"
+    run os::tmpdir d
     [ "${status}" -ne 0 ]
     # 没有被强行改成 root：函数必须拒绝，而不是 chown 抢管理权
     [ "$(stat -c '%u' "${fake_root}")" = '65534' ]
@@ -411,10 +467,10 @@ EOF
 # 路径要写回调用方的变量 —— 用 run 的话拿到的是 status 和 output，恰好绕开了
 # 要验的那件事，改回 stdout 返回也照样绿。
 @test "tmpdir: 目录属主是 root 时把路径写进调用方的变量" {
-    [ "$(id -u)" -eq 0 ] || skip '需要 root 权限运行 os::tmpdir --exec'
-    OS_TMP_EXEC_ROOT="${BATS_TEST_TMPDIR}/clean-var-tmp/oneserver"
+    [ "$(id -u)" -eq 0 ] || skip '需要 root 权限运行 os::tmpdir'
+    OS_TMP_ROOT="${BATS_TEST_TMPDIR}/clean-var-tmp/oneserver"
     local d=''
-    os::tmpdir d --exec
+    os::tmpdir d
     [ -n "${d}" ]
     [ -d "${d}" ]
 }

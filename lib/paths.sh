@@ -137,15 +137,32 @@ OS_FROM_MENU_ID="${OS_FROM_MENU:-0}"
 OS_FROM_MENU_ID="${OS_FROM_MENU_ID//[!0-9]/}"
 OS_MENU_BACK_FLAG="${OS_RUN_DIR}/.menu-back.${OS_FROM_MENU_ID:-0}"
 
-# 临时目录放 /run 而不是 /tmp 或 /opt：/run 是 tmpfs，凭据临时文件
-# （`--defaults-extra-file` 那种 0600 文件）**永远不落盘**，重启即消失。
-# 目录本身 0750 且属主 root，也顺带避开了 K5 的软链问题。
-OS_TMP_ROOT="${OS_RUN_DIR}/tmp"
-
-# 要**现场执行**的临时文件放这里，不能放上面那个：systemd 给 /run 挂 noexec，
-# 下载的二进制在 tmpfs 上 chmod +x 之后依然是 Permission denied（退出码 126）。
-# 在磁盘上，因此**禁止放凭据** —— 凭据仍然只走 OS_TMP_ROOT。
-OS_TMP_EXEC_ROOT='/var/tmp/oneserver'
+# 临时目录在**磁盘**上，不在 /run（D244）。
+#
+# 从前分两条：默认落 /run 的 tmpfs（理由是「凭据临时文件永不落盘」），要现场
+# 执行的走 /var/tmp。两条都撤了，因为那个理由站不住 ——
+#
+#   * 凭据的**真身**就明文躺在 secure.conf 上（0600 root，无加密，业界常规）。
+#     同一个密码的临时副本避不避开磁盘，不改变任何攻击者的处境。
+#   * tmpfs 的页面**照样会被换出到 swap**，落到一个既定位不了也擦不掉的地方。
+#     「放 /run 就永不落盘」这个前提本身就不成立。
+#
+# 而代价是实打实的：systemd 默认只给 /run 内存的 10%，1 GB 的机器上 104 MB，
+# 装不下 WordPress 解包（90 MB）、Node.js 发布包、备份暂存区（可能几 GB）——
+# 同一个坑 restore.sh 绕开过一次、deploy_wordpress.sh 炸过一次、backup.sh
+# 还等着。用一层象征性的保护换三个真实故障，不划算。
+#
+# **落在程序目录下，不在 /var/tmp 或 /tmp。** 那两个都是 1777 sticky，任何本地
+# 用户都能抢先把 `oneserver` 这个目录名建出来 —— os::tmpdir 的属主校验会因此
+# 拒绝使用它（不 chown 抢过来，那只是给攻击者控制的目录换个主人），可后果就是
+# **几乎每条命令都停摆**。从前这条路只有 `--exec` 走，影响面小；落点合并之后
+# 它是唯一通道，那个抢占就从「装 Caddy 失败」放大成「工具整个不能用」。
+# `/opt/oneserver` 是 root 拥有的 0755，本地用户建不进去，`mkdir -p` 出来的属主
+# 天然正确；systemd 的 tmpfiles 也不会像清 /var/tmp 那样定期清它。
+#
+# 更新切换器只替换 lib/templates/packaging/script/bin 五个目录，不碰这里；
+# 卸载删掉整棵 OS_ROOT，也就顺带收走了它。
+OS_TMP_ROOT="${OS_ROOT}/tmp"
 
 # --- 用户可覆盖的配置 ---
 #

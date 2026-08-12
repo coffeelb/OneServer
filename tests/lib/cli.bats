@@ -406,15 +406,15 @@ menu_num() {
 
 @test "clean overview 是只读的：跑完什么都没少" {
     [ -d /opt/oneserver ] || skip '需要装好的 /opt/oneserver'
-    mkdir -p /var/tmp/oneserver
-    printf 'x\n' >/var/tmp/oneserver/leftover
+    mkdir -p /opt/oneserver/tmp
+    printf 'x\n' >/opt/oneserver/tmp/leftover
     run bash -c '/opt/oneserver/bin/oneserver clean --action=overview --non-interactive'
     [ "${status}" -eq 0 ]
     # 默认动作只报告。它要是动了手，这个文件就没了
-    [ -f /var/tmp/oneserver/leftover ]
+    [ -f /opt/oneserver/tmp/leftover ]
     [[ "${output}" == *'可以直接清'* ]]
     [[ "${output}" == *'只报告，不在这里删'* ]]
-    rm -rf /var/tmp/oneserver
+    rm -rf /opt/oneserver/tmp
 }
 
 @test "clean 的 json 信封字段齐全" {
