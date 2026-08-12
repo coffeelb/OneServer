@@ -272,7 +272,22 @@ main() {
     fi
 
     # --- 装 ---
-    local -a pkgs=(podman)
+    #
+    # **nftables 必须显式装。** podman 4+ 的网络后端是 netavark，它要调 `nft`
+    # 才配得出容器网络，而 netavark 对 nftables 只是 `Recommends` ——
+    # **偏偏 os::pkg_install 一律带 `--no-install-recommends`**（那是有意的：
+    # 不让 apt 顺手拖进一堆没人要的东西）。两条一凑，任何机器上装完 podman
+    # 都缺 `nft`：引擎装得好好的、`podman run` 却必然失败，现场只有一句
+    # `status=127`，真正的原因 `netavark: unable to execute nft` 埋在
+    # journalctl 里三层深。真机上就是这么撞出来的。
+    #
+    # **aardvark-dns 同理**：netavark 的另一条 `Recommends`，容器网络的 DNS
+    # 解析靠它。缺了它容器之间没法按名字互访（`db` 连不上，只能写 IP），
+    # 而单容器连宿主时又一切正常 —— 于是这个坑要等到建第二个容器才现形。
+    #
+    # 同类风险不止这一处：凡是靠 `Recommends` 才完整的组件，在本工具下都得
+    # 显式列出来。加新组件时值得先 `apt-cache depends` 看一眼。
+    local -a pkgs=(podman nftables aardvark-dns)
     [[ ${want_compose} == y ]] && pkgs+=(podman-compose)
     [[ ${docker_alias} == y ]] && pkgs+=(podman-docker)
 
@@ -417,6 +432,11 @@ main() {
     local p
     while IFS= read -r p; do
         [[ -n ${p} ]] || continue
+        # **nftables 不登记**（D103：通用依赖不能因卸载一个组件被 purge）。
+        # 上面为了 netavark 把它显式装上，但它同时是防火墙的一部分 ——
+        # UFW 在 Debian 12+ 走的正是 nft 后端。卸载 podman 时把它 purge 掉，
+        # 用户的防火墙会跟着塌，而那与「卸载容器引擎」毫无关系。
+        [[ ${p} == nftables ]] && continue
         os::state_resource_add "${COMPONENT_ID}" pkg "${p}"
     done < <(os::pkg_installed_names)
 
