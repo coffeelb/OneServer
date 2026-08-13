@@ -160,12 +160,13 @@ OS_DEFAULT_NODE_CURRENT_VERSION='25'
 # 不带 `=` 的项说明为空，老格式的覆盖照样能用。
 #
 # 模块路径第一段不含点时自动补 `github.com/`，所以 `caddy-dns/cloudflare`
-# 与全路径都认。十项**逐个 + 整体**都在官方接口上编译验证过。
+# 与全路径都认。清单里的项**逐个 + 整体**都要能在官方接口上编译，且构建仓库
+# 的预构建里也得有同一组 —— 少一个，verify_binary 就会把兜底那条路整个拒掉。
 #
 # **两个换过路径的**（原选项在官方接口上 400，写在这里免得下次又踩）：
 #   caddy-dns/dnspod    → caddy-dns/tencentcloud   官方构建持续失败
 #   poepas/caddy-geoip2 → zhangjiayin/caddy-geoip2 未登记在 Caddy 的插件注册表里
-OS_DEFAULT_CADDY_PLUGINS='github.com/caddy-dns/cloudflare=Cloudflare DNS 验证 —— 泛域名证书、无 80/443 也能签,github.com/caddy-dns/alidns=阿里云 DNS 验证,github.com/caddy-dns/tencentcloud=腾讯云 DNS 验证（DNSPod 已并入腾讯云）,github.com/mholt/caddy-ratelimit=按 IP / 路径限流 —— 防刷接口、防暴力破解,github.com/greenpau/caddy-security=给没有登录功能的内网服务加 Web 登录 / OAuth2,github.com/mholt/caddy-l4=四层 TCP/UDP 代理 —— 443 复用与伪装、转发 SSH/数据库,github.com/mholt/caddy-dynamicdns=DDNS，公网 IP 变了自动同步到 DNS 服务商,github.com/mholt/caddy-webdav=WebDAV 网盘 —— Obsidian / Zotero 同步,github.com/caddyserver/cache-handler=边缘缓存，降后端与数据库负载,github.com/zhangjiayin/caddy-geoip2=GeoIP 分流 —— 按国家阻断或路由'
+OS_DEFAULT_CADDY_PLUGINS='github.com/caddy-dns/cloudflare=Cloudflare DNS 验证 —— 泛域名证书、无 80/443 也能签,github.com/caddy-dns/alidns=阿里云 DNS 验证,github.com/caddy-dns/tencentcloud=腾讯云 DNS 验证（DNSPod 已并入腾讯云）,github.com/mholt/caddy-ratelimit=按 IP / 路径限流 —— 防刷接口、防暴力破解,github.com/greenpau/caddy-security=给没有登录功能的内网服务加 Web 登录 / OAuth2,github.com/mholt/caddy-l4=四层 TCP/UDP 代理 —— 443 复用与伪装、转发 SSH/数据库,github.com/mholt/caddy-dynamicdns=DDNS，公网 IP 变了自动同步到 DNS 服务商,github.com/mholt/caddy-webdav=WebDAV 网盘 —— Obsidian / Zotero 同步,github.com/caddyserver/cache-handler=边缘缓存，降后端与数据库负载,github.com/zhangjiayin/caddy-geoip2=GeoIP 分流 —— 按国家阻断或路由,github.com/WeidiDeng/caddy-cloudflare-ip=自动更新 Cloudflare 回源 IP 段清单 —— 给 trusted_proxies 用、免去手工维护'
 
 # 官方按需构建要现场编译，慢是常态。超过这个秒数就当它够不着，
 # 回落到仓库的预构建 —— 「官方慢就跳过」的自动版本。

@@ -57,7 +57,7 @@ readonly CADDY_LOG_DIR='/var/log/caddy'
 readonly BUILD_REPO='qichiyuhub/caddy-custom-build'
 readonly OFFICIAL_API='https://caddyserver.com/api/download'
 
-# 完整的 Caddy 二进制是几十 MB（带十个插件时 70 MB 上下）。5 MB 是个宽松下界，
+# 完整的 Caddy 二进制是几十 MB（带上整份默认清单时 70 MB 上下）。5 MB 是个宽松下界，
 # 只用来把错误页和截断的响应挡在外面，不是版本相关的精确判据
 readonly CADDY_MIN_BIN_BYTES=5000000
 
@@ -166,7 +166,7 @@ fetch_from_github() {
 #   CADDY_OPTIONS      喂给 os::multiselect 的选项数组，值是**短名**
 #   CADDY_DEFAULT_SET  归一化排序后的默认组合，用来判「用户动过清单没有」
 #
-# 选单里显示短名（剥掉 `github.com/`）：十行全路径又长又难扫，而 `+全路径`
+# 选单里显示短名（剥掉 `github.com/`）：满屏全路径又长又难扫，而 `+全路径`
 # 与 `+短名` 经 plugin_module_path 归一到同一个字符串，去重不会漏掉任何一种写法。
 CADDY_OPTIONS=()
 CADDY_DEFAULT_SET=''
