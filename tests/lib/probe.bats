@@ -844,6 +844,87 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+# ufw_rules 只在防火墙**启用时**有内容：停用时 `ufw status numbered` 只打
+# 一行 `Status: inactive`，规则一条都读不出来 —— 而它们全都还在 /etc/ufw 里。
+# 面板据此显示过一份空规则表，与「停用不删规则」那句提示当场矛盾。
+# 这一项是那条路的替代，容器里没装 ufw，能验的是「探不到时不崩、有 status」
+@test "ufw_added_rules 没装时也答得出来" {
+    os_is_root || skip '非 root'
+    run probe::ufw_added_rules
+    [ "${status}" -eq 0 ]
+    probe::ufw_added_rules
+    [ -n "${OS_PROBE_STATUS}" ]
+    [ -n "$(probe::describe)" ]
+}
+
+# 防火墙界面拿它区分「启用后会被挡住」与「只听本地、根本不受影响」。
+# 分错的后果是单向的坏：把 127.0.0.1 上的服务列进「将无法从外部访问」，
+# 用户会照着提示去放行一个本来就进不来的端口 —— 真机上 12 个警告里 7 个是这么来的
+@test "listening_scoped 把监听端口分成对外与仅本地两拨" {
+    os_is_root || skip '非 root'
+    run probe::listening_scoped
+    [ "${status}" -eq 0 ]
+    probe::listening_scoped
+    [ -n "${OS_PROBE_STATUS}" ]
+
+    # 拆分**不能用 `IFS=$'\t' read`**：TAB 是 IFS 空白，前导的那个会被吃掉，
+    # 于是「一个对外端口都没有」时本地端口会被读进 pub 那一侧
+    local pub=${OS_PROBE_VALUE%%$'\t'*} loc=''
+    [[ ${OS_PROBE_VALUE} == *$'\t'* ]] && loc=${OS_PROBE_VALUE#*$'\t'}
+
+    # 两边都只能是端口号。混进地址或 `[::1]` 这样的残片，
+    # 说明地址与端口的拆分错了位。
+    # **显式按空格切成数组**：这两侧是空格分隔的，而 lib 把 IFS 设成了
+    # $'\n\t'，裸 `for p in ${pub}` 会把「22 80」当成一个词整体 ——
+    # 单端口的机器上照样绿，多端口时才炸，是条会骗人的用例
+    local -a pubs=() locs=()
+    IFS=' ' read -ra pubs <<<"${pub}" || true
+    IFS=' ' read -ra locs <<<"${loc}" || true
+
+    local p
+    for p in ${pubs[@]+"${pubs[@]}"} ${locs[@]+"${locs[@]}"}; do
+        [[ ${p} =~ ^[0-9]+$ ]]
+        ((p >= 1 && p <= 65535))
+    done
+
+    # 不相交：同一个端口既听 0.0.0.0 又听 127.0.0.1 时算对外 ——
+    # 只要有一条对外的监听，防火墙的开关就影响得到它
+    local q
+    for p in ${pubs[@]+"${pubs[@]}"}; do
+        for q in ${locs[@]+"${locs[@]}"}; do
+            [ "${p}" != "${q}" ]
+        done
+    done
+}
+
+# 起一个真的只听 127.0.0.1 的监听器，验分类不是靠运气蒙对的。
+# 没有 python3 就跳过 —— 这项验的是分类逻辑，不该为它引一个新依赖
+@test "listening_scoped 把只听 127.0.0.1 的端口归进仅本地那一拨" {
+    os_is_root || skip '非 root'
+    command -v python3 >/dev/null 2>&1 || skip '没有 python3'
+
+    python3 -c "
+import socket, time, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', 45671))
+s.listen(1)
+time.sleep(8)
+" &
+    local pid=$!
+    sleep 2
+
+    probe::listening_scoped
+    # 拆分方式同上一条：`IFS=$'\t' read` 会吃掉前导 TAB，
+    # 「一个对外端口都没有」时 loc 会被读进 pub，断言就成了自欺
+    local pub=${OS_PROBE_VALUE%%$'\t'*} loc=''
+    [[ ${OS_PROBE_VALUE} == *$'\t'* ]] && loc=${OS_PROBE_VALUE#*$'\t'}
+    kill "${pid}" 2>/dev/null || true
+
+    [[ " ${loc} " == *' 45671 '* ]]
+    [[ " ${pub} " != *' 45671 '* ]]
+}
+
 @test "ssh_port 探不到时给空值加 status，不给一个瞎猜的 22" {
     os_is_root || skip '非 root'
     run probe::ssh_port

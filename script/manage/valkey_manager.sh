@@ -135,17 +135,13 @@ action_allow_containers() {
     local -a nets=()
     mapfile -t nets <<<"${subnets}"
 
-    os::section '将要放行的容器网段'
-    local n
-    local -a cells=()
-    for n in "${nets[@]}"; do
-        cells+=("${n}" "$(vk_subnet_allowed "${n}" "${port}" && printf '已放行' || printf '本次新增')")
-    done
-    os::table '网段' '状态' -- "${cells[@]}"
-    os::info "放行之后，这些网段里的容器可以连宿主的 ${port} 端口；其余来源仍被防火墙拒绝"
-
     # §15：放宽访问来源必须在同一步落实补偿控制。补偿控制有三条 ——
     # 放行范围只到实际网段、防火墙本身真的挡得住、以及 Valkey 自带的访问密码。
+    #
+    # **这一关必须排在下面那张表之前**，理由同 db_manager 的同一处：表里
+    # 「已放行 / 本次新增」出自 os::ufw_allowed，而它读的规则文本来自
+    # `ufw status` —— 防火墙停用时那条命令读不出任何规则，于是每个网段都会
+    # 被标成「本次新增」，紧接着才是一句「防火墙没启用」。
     probe::ufw_active
     [[ ${OS_PROBE_VALUE} == yes ]] \
         || os::die 3 '防火墙没启用，放行无从谈起（而监听地址会因此对全网开放）。先执行 oneserver firewall enable'
@@ -154,6 +150,15 @@ action_allow_containers() {
         deny | reject) ;;
         *) os::die 3 "防火墙默认入站是 ${OS_PROBE_VALUE}，此时「只放行容器网段」没有意义 —— 没被规则覆盖的来源同样进得来。先把默认入站改成 deny" ;;
     esac
+
+    os::section '将要放行的容器网段'
+    local n
+    local -a cells=()
+    for n in "${nets[@]}"; do
+        cells+=("${n}" "$(vk_subnet_allowed "${n}" "${port}" && printf '已放行' || printf '本次新增')")
+    done
+    os::table '网段' '状态' -- "${cells[@]}"
+    os::info "放行之后，这些网段里的容器可以连宿主的 ${port} 端口；其余来源仍被防火墙拒绝"
 
     # Valkey 没有传输加密，密码在链路上是明文。容器网段内是本机虚拟网络，
     # 风险可接受；但这件事必须说出来，而不是等用户哪天把网段填宽了才发现

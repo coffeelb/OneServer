@@ -65,6 +65,17 @@ readonly DOCKER_ID='docker'
 # **只列不删**：删防火墙规则不可逆，而且这些规则未必都是入站放行 ——
 # 「From 是容器网段」的那条是容器出网，删了所有容器连不上网。哪条该留只有人知道。
 list_forward_rules() {
+    # **先看防火墙开没开。** `ufw status` 在未启用时只打一行 `Status: inactive`，
+    # 一条 FWD 规则都读不出来 —— 于是下面那个循环收不到东西、静默返回，
+    # 用户拿到的是「没有规则会绕过转发策略」这个印象。而真相要严重得多：
+    # 防火墙没启用时**整条转发策略都不生效**，不是被个别规则绕过。
+    probe::ufw_active
+    if [[ ${OS_PROBE_VALUE} != yes ]]; then
+        os::warn '防火墙未启用，刚设的转发策略此刻一点约束力都没有 —— 容器转发一律放行。要它生效，先 oneserver firewall enable'
+        os::info '公网定位的另一半（容器端口只绑 127.0.0.1）不依赖防火墙，那一半照常生效'
+        return 0
+    fi
+
     probe::ufw_rules
     [[ -n ${OS_PROBE_VALUE} ]] || return 0
 

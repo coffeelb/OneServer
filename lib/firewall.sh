@@ -48,6 +48,17 @@ firewall::_check_port() {
 #
 # 规则文本取自 `probe::ufw_rules`，每行形如 `[ 1] 8730/tcp   ALLOW IN  Anywhere`。
 #
+# **调用方必须先确认防火墙是启用的。** `ufw status` 在未启用时只打一行
+# `Status: inactive` —— 规则一条都读不出来，而它们全都还在 /etc/ufw 里。
+# 拿那份空文本进来，这里会把**每一条**都判成「没放行」，且没有任何迹象表明
+# 判定依据是空的。四个调用点里有两处的预览表曾经排在状态门控之前，于是
+# 停用态下整张表把已放行的网段全标成「本次新增」。
+#
+# 判定本身不接管这个前提：它不依赖 probe（见文件头的分层约束），也就无从
+# 知道传进来的文本为什么是空的。要在两种状态下都读得到规则，
+# 用 `probe::ufw_added_rules`（`ufw show added`）—— 但那份文本没有序号、
+# 格式也不同，这里的正则不认，需要另写判定。
+#
 # **按序号加端口认，不做子串匹配**：`*8730*` 会被 18730 或某条注释蒙混过去。
 #
 # **协议后面那个锚点不能省。** 少了它 `(/tcp)?` 匹配空串也算数，于是一条
@@ -55,9 +66,18 @@ firewall::_check_port() {
 # 生成的规则行就是 `443`，它同时覆盖 tcp 与 udp —— 所以协议那一段是可选的，
 # 判 udp 时 `443` 与 `443/udp` 都算放行过，`443/tcp` 不算。
 #
-# **来源为空时只认端口**，不看 ALLOW IN 后面是什么：调用方问的是「这个端口
-# 通不通」，一条限了网段的规则也让它通（只是通的范围窄），再放行一条
+# **来源为空时只认端口与动作**，不看 `ALLOW IN` 再后面那一列是什么：调用方问的是
+# 「这个端口通不通」，一条限了网段的规则也让它通（只是通的范围窄），再放行一条
 # Anywhere 才是真正的放宽，那必须由调用方自己决定，不能被这里判成「已放行」。
+#
+# **动作那一段不能省。** 从前来源为空的分支匹配到端口后面的空白就收尾了，
+# 于是 `DENY IN`、`REJECT IN`、`ALLOW OUT`、`ALLOW FWD` 一律被读成「已放行」——
+# 方向正好反了：一条明确拦截的规则会让调用方以为端口通着，于是跳过放行、
+# 也不提示，而这个模块的全部风险就是「判错了不报错」。web.sh 与 install_caddy
+# 传的正是空来源，撞上一条 DENY 就是「面板打不开、屏幕上一句话都没有」。
+#
+# `LIMIT` 与 `ALLOW` 一并认：`ufw limit 22/tcp` 是放行加限速，规则行里写作
+# `LIMIT IN`，把它判成没放行会让调用方重复放行一条 Anywhere，反倒把限速绕开。
 os::ufw_allowed() {
     local rules=${1-} port=${2-} proto=${3-} from=${4-}
     firewall::_check_proto "${proto}" || return 2
@@ -69,10 +89,10 @@ os::ufw_allowed() {
     local line
     while IFS= read -r line; do
         if [[ -z ${from} ]]; then
-            [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/${proto})?([[:space:]]|$) ]] \
+            [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/${proto})?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]] \
                 && return 0
         else
-            [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/${proto})?[[:space:]]+ALLOW[[:space:]]+IN[[:space:]]+${want}([[:space:]]|$) ]] \
+            [[ ${line} =~ ^\[[[:space:]]*[0-9]+\][[:space:]]+${port}(/${proto})?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN[[:space:]]+${want}([[:space:]]|$) ]] \
                 && return 0
         fi
     done <<<"${rules}"

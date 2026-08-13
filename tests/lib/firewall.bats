@@ -59,6 +59,53 @@ RULES='Status: active
     [ "${status}" -eq 1 ]
 }
 
+# 动作那一列。**从前来源为空的分支匹配到端口后面的空白就收尾**，于是下面
+# 四种规则一律被读成「已放行」—— 方向正好反了：一条明确拦截的规则会让调用方
+# 以为端口通着，跳过放行也不提示。web.sh 与 install_caddy 传的正是空来源。
+ACTIONS='Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 3306/tcp                   DENY IN     Anywhere
+[ 2] 5432/tcp                   REJECT IN   Anywhere
+[ 3] 8080/tcp                   ALLOW OUT   Anywhere
+[ 4] 9000/tcp                   ALLOW FWD   10.88.0.0/16
+[ 5] 22/tcp                     LIMIT IN    Anywhere'
+
+@test "DENY IN 不是放行 —— 拦截规则被读成已放行，方向正好反了" {
+    run os::ufw_allowed "${ACTIONS}" 3306 tcp
+    [ "${status}" -eq 1 ]
+}
+
+@test "REJECT IN 不是放行" {
+    run os::ufw_allowed "${ACTIONS}" 5432 tcp
+    [ "${status}" -eq 1 ]
+}
+
+# 出站规则管的是本机往外连，跟「外面能不能连进来」无关
+@test "ALLOW OUT 不是入站放行" {
+    run os::ufw_allowed "${ACTIONS}" 8080 tcp
+    [ "${status}" -eq 1 ]
+}
+
+# 转发规则走 FORWARD 链，管的是过路流量，不代表本机这个端口通
+@test "ALLOW FWD 不是本机端口放行" {
+    run os::ufw_allowed "${ACTIONS}" 9000 tcp
+    [ "${status}" -eq 1 ]
+}
+
+# `ufw limit` 是放行加限速。判成没放行的话，调用方会再补一条 Anywhere，
+# 反倒把限速绕过去了
+@test "LIMIT IN 算放行" {
+    os::ufw_allowed "${ACTIONS}" 22 tcp
+}
+
+# 限来源那条路同样要认 LIMIT
+@test "限来源时 LIMIT IN 也算放行" {
+    local rules='[ 1] 3306/tcp                   LIMIT IN    10.88.0.0/16'
+    os::ufw_allowed "${rules}" 3306 tcp '10.88.0.0/16'
+}
+
 # `ufw allow 53`（不带协议）生成的规则行就是 `53`，它同时覆盖 tcp 与 udp
 @test "不带协议的规则同时算 tcp 与 udp 放行了" {
     os::ufw_allowed "${RULES}" 53 tcp

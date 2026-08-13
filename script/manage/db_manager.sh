@@ -586,6 +586,24 @@ action_allow_containers() {
     local -a nets=()
     mapfile -t nets <<<"${subnets}"
 
+    # §15：放宽访问来源必须在同一步落实补偿控制，落实不了就拒绝执行。
+    # 这里的补偿控制有两条 —— 放行范围只到实际网段（不是 Anywhere），
+    # 以及要求防火墙本身真的挡得住。后者用与 install_mariadb 同一条判据。
+    #
+    # **这一关必须排在下面那张表之前。** 表里「已放行 / 本次新增」那一列出自
+    # os::ufw_allowed，而它读的规则文本来自 `ufw status` —— 防火墙停用时那条
+    # 命令一条规则都读不出来（只有一行 `Status: inactive`），于是每个网段都会
+    # 被标成「本次新增」，哪怕它早就放行过。从前门控排在表之后：用户先看到
+    # 一张全错的表，再收到一句「防火墙没启用」。
+    probe::ufw_active
+    [[ ${OS_PROBE_VALUE} == yes ]] \
+        || os::die 3 '防火墙没启用，放行无从谈起（而数据库会因此对全网监听）。先执行 oneserver firewall enable'
+    probe::ufw_default_incoming
+    case ${OS_PROBE_VALUE} in
+        deny | reject) ;;
+        *) os::die 3 "防火墙默认入站是 ${OS_PROBE_VALUE}，此时「只放行容器网段」没有意义 —— 没被规则覆盖的来源同样进得来。先把默认入站改成 deny" ;;
+    esac
+
     os::section '将要放行的容器网段'
     local n
     local -a cells=()
@@ -595,18 +613,6 @@ action_allow_containers() {
     os::table '网段' '状态' -- "${cells[@]}"
     os::info "放行之后，这些网段里的容器可以连宿主的 ${MARIADB_PORT} 端口；其余来源仍被防火墙拒绝"
     os::info '本工具登记过的数据库账号会同时补上这些网段作为来源（密码不变，原来的本机来源保留）'
-
-    # §15：放宽访问来源必须在同一步落实补偿控制，落实不了就拒绝执行。
-    # 这里的补偿控制有两条 —— 放行范围只到实际网段（不是 Anywhere），
-    # 以及要求防火墙本身真的挡得住。后者用与 install_mariadb 同一条判据。
-    probe::ufw_active
-    [[ ${OS_PROBE_VALUE} == yes ]] \
-        || os::die 3 '防火墙没启用，放行无从谈起（而数据库会因此对全网监听）。先执行 oneserver firewall enable'
-    probe::ufw_default_incoming
-    case ${OS_PROBE_VALUE} in
-        deny | reject) ;;
-        *) os::die 3 "防火墙默认入站是 ${OS_PROBE_VALUE}，此时「只放行容器网段」没有意义 —— 没被规则覆盖的来源同样进得来。先把默认入站改成 deny" ;;
-    esac
 
     os::warn "数据库的监听地址会改成 0.0.0.0（容器要够得着），此后挡在外面的只有防火墙"
     os::confirm --arg allow-containers '确认放行以上网段？' n \

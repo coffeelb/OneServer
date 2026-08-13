@@ -913,6 +913,80 @@ probe::listening_ports() {
     return 0
 }
 
+# probe::listening_scoped   监听端口按「防火墙管不管得到」分成两拨
+#
+# OS_PROBE_VALUE 为 `对外端口<TAB>仅本地端口`，两侧各自空格分隔、去重升序。
+#
+# **probe::listening_ports 把 `127.0.0.1:3306` 和 `0.0.0.0:80` 一样只取端口号**，
+# 于是防火墙界面会把一堆只听 loopback 的服务列进「启用后将无法从外部访问」。
+# 真机实测：12 个监听端口里 7 个是 127.0.0.1，纯噪音 —— 而真正危险的那个
+# （对外监听的 3306）混在里面，长得跟它们一模一样。更糟的是界面据此建议
+# 「要放行就带上 --ports=…」，照做等于把 MySQL 开到公网。
+#
+# 判据是**非 loopback 即受管**：绑到内网 IP（192.168.x.x）的服务同样走 INPUT
+# 链，防火墙拦得到它，所以算「对外」那一拨 —— 这里区分的是「防火墙管不管得到」，
+# 不是「能不能从公网访问」，后者还取决于路由与云厂商安全组，探不出来也不该猜。
+#
+# 同一个端口既听 0.0.0.0 又听 127.0.0.1 时归入对外：只要有一条对外的监听，
+# 防火墙的开关就影响得到它。
+#
+# 原 listening_ports 保留不动：safe status 与面板采集还在用它，
+# 而它们要的正是「所有在听的端口」这个不分地址的口径。
+probe::listening_scoped() {
+    probe::_probe 'net.listening_scoped' "${OS_DEFAULT_PROBE_TIMEOUT}" \
+        -- sh -c "ss -Hltn | awk '{addr=\$4; port=addr; sub(/.*:/, \"\", port); sub(/:[^:]*\$/, \"\", addr); if (port ~ /^[0-9]+\$/) print (addr ~ /^127\./ || addr ~ /^\[?::1\]?\$/) ? \"L\" : \"P\", port}'"
+
+    local raw=${OS_PROBE_VALUE}
+    OS_PROBE_VALUE=''
+    [[ -n ${raw} ]] || return 0
+
+    # **按词两两配对，不按行读。** 探测的原始输出是 `L|P<空格>端口` 一行一条，
+    # 但缓存落盘时换行会被换成空格（见 probe::snapshot_flush），非 root 从
+    # 快照读回来的就是挤成一行的同一串词。按行读的话，那一行会被当成
+    # 「一个 scope + 一个叫『80 L 6379』的端口」—— 拼进界面就是个垃圾值。
+    # 词序在两种形态下是一样的，所以配对是唯一对两者都成立的读法。
+    #
+    # 每个端口仍单独验一次是不是数字：快照那条路上的值经过脱敏通道，
+    # 万一被改动过，宁可少算一个端口，也不要把一串非数字当端口显示出去。
+    # 先把换行抹平成空格，再一次读成词数组：`toks=(${raw})` 那种裸展开
+    # 会顺带做一次路径扩展，快照里万一混进个 `*` 就变成读目录了
+    local flat=${raw//$'\n'/ }
+    local -a toks=()
+    IFS=$' \t' read -ra toks <<<"${flat}" || true
+
+    local scope port p hit
+    local -i i
+    local -a pub=() loc=()
+    for ((i = 0; i + 1 < ${#toks[@]}; i += 2)); do
+        scope=${toks[i]}
+        port=${toks[i + 1]}
+        [[ ${port} =~ ^[0-9]+$ ]] || continue
+        [[ ${scope} == 'P' ]] && pub+=("${port}")
+    done
+    for ((i = 0; i + 1 < ${#toks[@]}; i += 2)); do
+        scope=${toks[i]}
+        port=${toks[i + 1]}
+        [[ ${scope} == 'L' && ${port} =~ ^[0-9]+$ ]] || continue
+        hit=''
+        for p in ${pub[@]+"${pub[@]}"}; do
+            [[ ${p} == "${port}" ]] && {
+                hit=1
+                break
+            }
+        done
+        [[ -n ${hit} ]] || loc+=("${port}")
+    done
+
+    # 不带参数的 printf 会照样吐一个空行，空数组因此会变成 ("")，
+    # 拼进消息里就是一个凭空多出来的空端口
+    [[ ${#pub[@]} -gt 0 ]] && mapfile -t pub < <(printf '%s\n' "${pub[@]}" | sort -nu)
+    [[ ${#loc[@]} -gt 0 ]] && mapfile -t loc < <(printf '%s\n' "${loc[@]}" | sort -nu)
+
+    local IFS=' '
+    OS_PROBE_VALUE="${pub[*]}"$'\t'"${loc[*]}"
+    return 0
+}
+
 # probe::dir_size_kb <路径>   这个目录占多少（KB），算不出来为空
 #
 # 面板要显示容器卷有多大。**超时给 5 秒，而且算不出来时返回空而不是 0**：
@@ -1323,9 +1397,27 @@ probe::reboot_required() {
 
 # probe::ufw_rules   ufw 带编号的规则列表原文
 #
-# 带编号的规则列表，删除前要原样展示给用户看
+# 带编号的规则列表，删除前要原样展示给用户看。
+#
+# **只在 ufw 已启用时有内容**：未启用时 `ufw status numbered` 只打一行
+# `Status: inactive`。要在两种状态下都读得到规则，用 probe::ufw_added_rules。
 probe::ufw_rules() {
     probe::_probe 'ufw.rules' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw status numbered
+}
+
+# probe::ufw_added_rules   已添加的规则原文，**停用状态下也读得到**
+#
+# `ufw status numbered` 在未启用时只打一行 `Status: inactive` —— 规则一条都
+# 读不出来，而它们全都还在 /etc/ufw/user.rules 里。停用撤的是 netfilter 链，
+# 不是规则本身（`ufw disable` 自己的措辞就是 "Firewall stopped"，不是 removed）。
+# 拿 status 当规则表的话，用户停用防火墙之后回到面板会看到一份空清单，
+# 与停用时那句「规则仍保留，重新启用即生效」正面冲突 —— 实测撞出来的。
+#
+# `ufw show added` 不受启用状态影响。代价是它**没有序号**，而且把 v4/v6
+# 合并成一条显示（status numbered 里它们是分开编号的两条）。所以按序号删
+# 仍然只能用 ufw_rules，这个探测的用途是「让用户看见规则还在、长什么样」。
+probe::ufw_added_rules() {
+    probe::_probe 'ufw.added_rules' "${OS_DEFAULT_PROBE_TIMEOUT}" -- ufw show added
 }
 
 # probe::container_subnets   两个引擎所有容器网络的网段，一行一个，已去重

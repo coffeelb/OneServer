@@ -102,6 +102,7 @@
 - `probe::port_listening <端口>` —— 该 TCP 端口是否有进程监听
 - `probe::port_families <端口>` —— 该 TCP 端口正在监听的地址族，空格分隔（v4 / v6）
 - `probe::listening_ports` —— 全部监听中的 TCP 端口，空格分隔
+- `probe::listening_scoped` —— 监听端口按「防火墙管不管得到」分成两拨
 - `probe::dir_size_kb <路径>` —— 这个目录占多少（KB），算不出来为空
 - `probe::disk_free_kb [路径]` —— 该路径所在文件系统的可用空间（KB），默认 /
 - `probe::disk_total_kb [路径]` —— 该路径所在文件系统的总容量（KB），默认 /
@@ -129,6 +130,7 @@
 - `probe::auto_upgrades` —— APT::Periodic::Unattended-Upgrade 的生效值
 - `probe::reboot_required` —— 是否需要重启，值为 yes / no
 - `probe::ufw_rules` —— ufw 带编号的规则列表原文
+- `probe::ufw_added_rules` —— 已添加的规则原文，**停用状态下也读得到**
 - `probe::container_subnets` —— 两个引擎所有容器网络的网段，一行一个，已去重
 - `probe::ufw_default_incoming` —— ufw 的默认入站策略，值为 deny / reject / allow / unknown
 - `probe::ufw_port_guarded <端口>` —— 该端口是否真的被防火墙挡着，值为 yes / no
