@@ -762,6 +762,14 @@ EOF
     [ "${OS_PROBE_VALUE}" -gt 0 ]
 }
 
+@test "cpu_model 从 cpuinfo 取得非空型号" {
+    os_is_root || skip '非 root'
+    probe::cpu_model
+    [ "${OS_PROBE_STATUS}" = ok ]
+    [ -n "${OS_PROBE_VALUE}" ]
+    [[ ${OS_PROBE_VALUE} != *$'\n'* ]]
+}
+
 # 累计计数只有满足「空闲 ≤ 总量」才做得了差分：反过来的话消费者会算出
 # 大于 100% 的使用率，而那种数字在图上是一根戳穿顶的假峰
 @test "cpu_jiffies 给出总量与空闲两个累计数，且单调不减" {
@@ -972,6 +980,9 @@ EOF
     want=$(cut -d' ' -f1-3 /proc/loadavg)
     [ "${OS_PROBE_VALUE}" = "${want}" ]
 
+    probe::cpu_model
+    [ -n "${OS_PROBE_VALUE}" ]
+
     probe::cpu_jiffies
     [[ "${OS_PROBE_VALUE}" =~ ^[0-9]+\ [0-9]+$ ]]
     local total=${OS_PROBE_VALUE%% *} idle=${OS_PROBE_VALUE##* }
@@ -988,6 +999,7 @@ EOF
     for ((i = 0; i < 20; i++)); do
         probe::loadavg
         probe::mem_total_kb
+        probe::cpu_model
     done
     after=$(bash -c 'echo $BASHPID')
     # 40 次探测若各起 3 个进程（子 shell + timeout + awk）就是 120 个 PID。

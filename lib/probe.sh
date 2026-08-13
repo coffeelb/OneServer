@@ -240,6 +240,7 @@ probe::_probe() {
 #   `line:<前缀>:<第几列>`  取以该前缀开头那一行的第 N 个空白分隔字段
 #   `intfield:<第几列>`     取第一行第 N 个字段并截掉小数部分
 #   `range:<起>:<止>`       取第一行的第 起..止 个字段，空格连接
+#   `cpumodel`              /proc/cpuinfo：按架构兼容字段取 CPU 型号
 #   `cpustat`               /proc/stat 首行：`总时间 空闲时间`（空闲含 iowait）
 #   `kv:<字段名>`           `KEY=值` 形态的配置文件（/etc/os-release），剥外层引号
 #
@@ -305,6 +306,23 @@ probe::_probe_proc() {
                     esac
                 fi
                 break
+            done
+            ;;
+        cpumodel)
+            # x86 用 model name；arm64 机器还会见到 Model / Hardware / Processor；
+            # s390 常见 machine。按信息精确度找，不按它们在文件里的偶然顺序取。
+            for want in 'model name' Model Hardware Processor machine; do
+                local IFS=$'\n'
+                for line in ${content}; do
+                    case ${line} in
+                        "${want}"[[:space:]]:* | "${want}":*) out=${line#*:} ;;
+                        "${want}"[[:space:]]=*) out=${line#*=} ;;
+                        *) continue ;;
+                    esac
+                    while [[ ${out} == [[:space:]]* ]]; do out=${out#?}; done
+                    while [[ ${out} == *[[:space:]] ]]; do out=${out%?}; done
+                    break 2
+                done
             done
             ;;
         intfield:* | range:* | cpustat)
@@ -958,6 +976,13 @@ probe::loadavg() {
 # 负载没有分母就读不懂：load 4 在 1 核上是排队排疯了，在 16 核上是闲着。
 probe::cpu_count() {
     probe::_probe 'cpu.count' 2 -- sh -c "nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo"
+}
+
+# probe::cpu_model   CPU 型号
+probe::cpu_model() {
+    probe::_probe_proc 'cpu.model' /proc/cpuinfo 'cpumodel'
+    [[ ${OS_PROBE_STATUS} != ok || -n ${OS_PROBE_VALUE} ]] || OS_PROBE_STATUS='missing'
+    return 0
 }
 
 # probe::cpu_jiffies   `总时间 空闲时间` 两个累计计数（单位 jiffy）

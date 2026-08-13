@@ -28,7 +28,7 @@
 - `os::ask_secret [--confirm] <提示> <变量名>`
 - `os::confirm --arg <name> <提示> [y|n]`
 - `os::flag --arg <name>` —— 命令行给了这个开关就返回 0
-- `os::select [--required] [--reask] [--keep-screen] [--return <值>] --arg <name> <提示> <变量名> <选项>...` —— 从清单里挑一个，选项可写 `值=说明`
+- `os::select [--required] [--reask] [--keep-screen] [--return <值>] --arg <name> <提示> <变量名> <选项>...` —— 从清单里挑一个；选项可写 `值=说明`，`__...__=说明` 不显示内部值
 - `os::multiselect [--reask] --arg <name> <提示> <变量名> <选项>...` —— 从清单里挑一个子集，结果排序去重
 - `os::action_menu [--overview <函数>] --arg <name> <提示> <分发函数> <选项>...` —— 动作型命令的常驻二级菜单
 - `os::destroy_confirm --arg <name> <确认串> -- <清单行>...`
@@ -110,6 +110,7 @@
 - `probe::uptime_seconds` —— 系统已运行秒数
 - `probe::loadavg` —— 1 / 5 / 15 分钟平均负载，空格分隔的三个数
 - `probe::cpu_count` —— 在线 CPU 核心数
+- `probe::cpu_model` —— CPU 型号
 - `probe::cpu_jiffies` —— `总时间 空闲时间` 两个累计计数（单位 jiffy）
 - `probe::podman_running` —— 运行中的容器数
 - `probe::podman_total` —— 容器总数，含已停止

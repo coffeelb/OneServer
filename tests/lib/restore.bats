@@ -165,7 +165,7 @@ archive_main_run() {
         main
     '
     [ "${status}" -eq 3 ]
-    [[ "${output}" == *'本机 state 里没有站点 wordpress'* ]]
+    [[ "${output}" == *'本机没有登记站点 wordpress'* ]]
     [[ "${output}" == *'未做任何改动'* ]]
     if [[ -f ${TRACE} ]]; then
         ! grep -Eq 'TAR|MYSQL|tar|mysql' "${TRACE}"
@@ -199,8 +199,7 @@ archive_main_run() {
     '
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'ARG=<--required>'* ]]
-    [[ "${output}" == *'本机的 wordpress（库 wp_wordpress1 · 目录 /srv/live-wordpress）'* ]]
-    [[ "${output}" != *'按归档原样恢复'* ]]
+    [[ "${output}" == *'本机站点 wordpress（库 wp_wordpress1 · 目录 /srv/live-wordpress）'* ]]
     [[ "${output}" == *'DEST=wp_wordpress1|/srv/live-wordpress'* ]]
 }
 
@@ -211,18 +210,18 @@ archive_main_run() {
         RS_MF_DB=forgejo
 
         os::require_cmd() { return 0; }
-        ex_db_exists() { [[ "${1}" == target_b ]]; }
+        ex_db_exists() { [[ "${1}" == forgejo || "${1}" == target_b ]]; }
         os::sql_query() {
             OS_RUN_OUTPUT=$'"'"'forgejo\ntarget_a\ntarget_b'"'"'
             return 0
         }
         os::select() {
             case "$*" in
-                *恢复到哪个落点*)
+                *恢复到哪个数据库*)
                     printf "FIRST_ARG=%s\n" "$@"
                     printf -v "${4}" "%s" __pick_db__
                     ;;
-                *覆盖本机哪个数据库*)
+                *选择要覆盖的本机数据库*)
                     printf "SECOND_ARG=%s\n" "$@"
                     printf -v "${6}" "%s" db:target_b
                     ;;
@@ -233,8 +232,8 @@ archive_main_run() {
         printf "DEST=%s|CREATE=%s\n" "${EX_DEST_DB}" "${RS_DEST_DB_CREATE}"
     '
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *'FIRST_ARG=db:forgejo=恢复为数据库 forgejo'* ]]
-    [[ "${output}" == *'FIRST_ARG=__pick_db__=覆盖本机现有数据库'* ]]
+    [[ "${output}" == *'FIRST_ARG=db:forgejo=本机同名数据库 forgejo（覆盖现有内容）'* ]]
+    [[ "${output}" == *'FIRST_ARG=__pick_db__=本机其他数据库（下一步选择）'* ]]
     [[ "${output}" != *'FIRST_ARG=db:target_a=target_a'* ]]
     [[ "${output}" == *'SECOND_ARG=db:target_a=target_a'* ]]
     [[ "${output}" == *'SECOND_ARG=db:target_b=target_b'* ]]
@@ -272,7 +271,7 @@ archive_main_run() {
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'PLAN=forgejo|CREATE=1'* ]]
     [[ "${output}" == *'LOCK=release'*'LOCK=acquire'* ]]
-    [[ "${output}" == *'CREATE_ARG=通过数据库管理创建恢复落点'* ]]
+    [[ "${output}" == *'CREATE_ARG=通过数据库管理创建恢复目标'* ]]
     [[ "${output}" == *'CREATE_ARG=mariadb'* ]]
     [[ "${output}" == *'CREATE_ARG=create'* ]]
     [[ "${output}" == *'CREATE_ARG=--name=forgejo'* ]]
@@ -281,7 +280,7 @@ archive_main_run() {
     [[ "${output}" == *'CREATE_ARG=--auto-password=y'* ]]
     [[ "${output}" == *'CREATE_ARG=--output=json'* ]]
     [[ "${output}" == *'CREATE_ARG=--non-interactive'* ]]
-    [[ "${output}" == *'CHANGE=通过数据库管理创建了恢复落点 db:forgejo'* ]]
+    [[ "${output}" == *'CHANGE=通过数据库管理创建了恢复目标 db:forgejo'* ]]
     [[ "${output}" == *'DEFER_ARG=rs_remove_created_database'* ]]
     [[ "${output}" == *'DEFER_ARG=forgejo'* ]]
 }
@@ -353,8 +352,8 @@ archive_main_run() {
         printf "DEST=%s\n" "${EX_DEST_DIR}"
     '
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *'path:forgejo-data=恢复到原路径 /srv/forgejo'* ]]
-    [[ "${output}" == *'__pick_path__=恢复到其他已登记路径'* ]]
+    [[ "${output}" == *'path:forgejo-data=备份中记录的路径 /srv/forgejo'* ]]
+    [[ "${output}" == *'__pick_path__=本机其他已登记路径（下一步选择）'* ]]
     [[ "${output}" != *wordpress* ]]
     [[ "${output}" == *'DEST=/srv/forgejo'* ]]
 }
@@ -404,7 +403,7 @@ archive_main_run() {
     local dest="${BATS_TEST_TMPDIR}/site-x-invalid"
     archive_main_run x wp_x "${dest}" "${BATS_TEST_TMPDIR}/archive-wordpress" site:missing
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *'指定的恢复落点无效'* ]]
+    [[ "${output}" == *'指定的恢复目标无效'* ]]
     if [[ -f ${TRACE} ]]; then
         ! grep -Eq 'SQL=|FILES=|RUN=' "${TRACE}"
     fi

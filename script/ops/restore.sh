@@ -8,8 +8,8 @@
 # @order        20
 # @privilege    root
 # @requires_lib >= 4.3
-# @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--into=<类型:名字>] [--file=<归档文件名>] [--mode=<all|db|files>] [--only=<归档内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
-# @description  从归档或外部备份恢复，覆盖前自动留副本
+# @args         [--from=<local|remote|external>] [--target=<类型:名字>] [--into=<类型:名字>] [--file=<备份文件名>] [--mode=<all|db|files>] [--only=<备份内相对路径>] [--source=<路径[,路径]>] [--subdir=<来源内相对路径>] [--site-url=<地址>] [--strip-db-statements=<y|n>] [--confirm-restore=<类型:名字>]
+# @description  从本机、远端或外部备份恢复，覆盖前自动留副本
 #
 
 set -Eeuo pipefail
@@ -374,7 +374,7 @@ verify_archive() {
     local file=${1}
     if [[ ! -f ${file}.sha256 ]]; then
         os::err "缺少校验文件：${file}.sha256"
-        os::info '本工具生成的归档旁边一定有一份同名 .sha256，从别处拷过来时要两个文件一起拷。'
+        os::info '本工具生成的备份文件旁边一定有一份同名 .sha256，从别处拷过来时要两个文件一起拷。'
         os::info '如果这本来就是别处（宝塔 / cPanel / 手工打包）来的备份，那条路是：'
         os::info '  oneserver restore --from=external'
         return 1
@@ -386,10 +386,10 @@ verify_archive() {
     os::query --timeout 3600 -- sha256sum "${file}" || return 1
     local actual=${OS_RUN_OUTPUT%%[[:space:]]*}
     if [[ -z ${expected} || ${expected} != "${actual}" ]]; then
-        os::err "校验失败：归档已损坏或被改动（期望 ${expected:-空}，实得 ${actual}）"
+        os::err "校验失败：备份已损坏或被改动（期望 ${expected:-空}，实得 ${actual}）"
         return 1
     fi
-    os::ok '归档校验通过'
+    os::ok '备份校验通过'
     return 0
 }
 
@@ -399,7 +399,7 @@ fetch_archive() {
     if [[ ${from} == local ]]; then
         RS_ARCHIVE="${OS_ARCHIVE_DIR}/${type}/${name}/${file}"
         [[ -f ${RS_ARCHIVE} ]] || {
-            os::err "本地没有这份归档：${RS_ARCHIVE}"
+            os::err "本机没有这份备份：${RS_ARCHIVE}"
             return 1
         }
         return 0
@@ -428,11 +428,11 @@ read_manifest() {
     local dir
     os::tmpdir dir || return 1
     os::query --timeout 300 -- tar -xzf "${file}" -C "${dir}" manifest || {
-        os::err '归档里没有 manifest —— 它不是 oneserver 生成的归档，或者版本太老'
+        os::err '备份中没有信息文件 manifest —— 它不是 oneserver 生成的备份，或者版本太老'
         return 1
     }
     [[ -f ${dir}/manifest ]] || {
-        os::err '归档里没有 manifest'
+        os::err '备份中没有信息文件 manifest'
         return 1
     }
 
@@ -456,11 +456,11 @@ read_manifest() {
     # 版本比自己新的 manifest **拒绝处理**：字段含义可能已经变了，
     # 按旧理解去恢复比不恢复危险
     if [[ ${schema} =~ ^[0-9]+$ ]] && ((schema > 1)); then
-        os::err "这份归档的 manifest 版本是 ${schema}，本机的 restore 只认到 1 —— 请先更新 oneserver"
+        os::err "这份备份的 manifest 版本是 ${schema}，本机的 restore 只认到 1 —— 请先更新 oneserver"
         return 1
     fi
     [[ -n ${RS_MF_TYPE} ]] || {
-        os::err 'manifest 里没有类型字段，归档不完整'
+        os::err 'manifest 里没有类型字段，备份信息不完整'
         return 1
     }
 
@@ -470,15 +470,15 @@ read_manifest() {
     # 存储，SHA256 只保证没被传输改动，不保证内容可信——一份被动过手脚的
     # manifest 不该有能力执行任意命令或覆盖 /etc 之类的系统目录。
     if [[ -n ${RS_MF_DB} ]] && ! valid_db_name "${RS_MF_DB}"; then
-        os::err "manifest 里的 db_name「${RS_MF_DB}」不是合法的数据库名，拒绝处理（归档可能被篡改）"
+        os::err "manifest 里的 db_name「${RS_MF_DB}」不是合法的数据库名，拒绝处理（备份可能被篡改）"
         return 1
     fi
     if [[ -n ${RS_MF_ROOT} ]] && ! valid_archive_root "${RS_MF_ROOT}"; then
-        os::err "manifest 里的 archive_root「${RS_MF_ROOT}」不是合法的单段目录名，拒绝处理（归档可能被篡改）"
+        os::err "manifest 里的 archive_root「${RS_MF_ROOT}」不是合法的单段目录名，拒绝处理（备份可能被篡改）"
         return 1
     fi
     if [[ -n ${RS_MF_SOURCE} ]] && ! valid_source_path "${RS_MF_SOURCE}"; then
-        os::err "manifest 里的 source_path「${RS_MF_SOURCE}」不是可接受的路径（相对路径、路径穿越或系统目录），拒绝处理（归档可能被篡改）"
+        os::err "manifest 里的 source_path「${RS_MF_SOURCE}」不是可接受的路径（相对路径、路径穿越或系统目录），拒绝处理（备份可能被篡改）"
         return 1
     fi
     return 0
@@ -572,7 +572,7 @@ rs_audit_tree() {
     os::query --timeout 600 -- \
         find "${root}" ! -type f ! -type d ! -type l -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
-        os::warn '归档里含设备节点/FIFO/socket 这类特殊文件，已按原样恢复：'
+        os::warn '备份中含设备节点/FIFO/socket 这类特殊文件，已按原样恢复：'
         os::info "${OS_RUN_OUTPUT}"
     fi
 
@@ -587,9 +587,9 @@ rs_audit_tree() {
     os::query --timeout 600 -- find "${root}" -type f -links +1 -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
         if [[ ${will_chown} == yes ]]; then
-            os::warn '归档里含硬链接，而这棵树落地时要整体改权限——改一个名字的权限会带到另一个名字上：'
+            os::warn '备份中含硬链接，而这棵树落地时要整体改权限——改一个名字的权限会带到另一个名字上：'
         else
-            os::warn '归档里含硬链接，已按原样保留：'
+            os::warn '备份中含硬链接，已按原样保留：'
         fi
         os::info "${OS_RUN_OUTPUT}"
     fi
@@ -600,7 +600,7 @@ rs_audit_tree() {
     #    剥掉它不影响站点跑，而放进去就是一条 root 提权。
     os::query --timeout 600 -- find "${root}" -type f -perm /6000 -print || return 1
     if [[ -n ${OS_RUN_OUTPUT} ]]; then
-        os::warn '归档里有带 setuid/setgid 位的文件，已剥掉那些位：'
+        os::warn '备份中有带 setuid/setgid 位的文件，已剥掉那些位：'
         os::info "${OS_RUN_OUTPUT}"
         os::run '剥掉特权位' -- find "${root}" -type f -perm /6000 -exec chmod a-s -- {} + || return 1
     fi
@@ -618,7 +618,7 @@ rs_audit_tree() {
         # 同样只告警。递归 chown/chmod 默认不跟随符号链接，所以这些链接不会
         # 让权限变更穿到树外；真正跟随它们的是随后访问站点的那个进程，
         # 那是站点内容的事，不该由恢复命令替用户否决。
-        os::warn '归档里有指向树外的符号链接，已按原样恢复：'
+        os::warn '备份中有指向树外的符号链接，已按原样恢复：'
         os::info "${escaped}"
     fi
 
@@ -673,7 +673,7 @@ rs_safe_extract() {
         __rs_tar_opts=(--no-same-owner --no-same-permissions)
         __rs_will_chown='yes'
     fi
-    if ! os::run '解出归档到隔离目录' -- \
+    if ! os::run '解出备份到隔离目录' -- \
         tar -xzf "${__rs_archive}" ${__rs_tar_opts[@]+"${__rs_tar_opts[@]}"} -C "${__rs_stage}" "${__rs_root}"; then
         # 空间不足是这一步最常见的失败，而 tar 的报错指向的是文件不是磁盘。
         # 把可用空间说出来，省掉一轮「为什么解不开」的排查
@@ -728,7 +728,7 @@ rs_normalize_owner() {
         return 0
     fi
     if [[ ${kind} != wordpress ]]; then
-        os::debug "落点类型 ${kind:-未声明} 没有属主模型，按归档原样保留属主与权限"
+        os::debug "恢复目标类型 ${kind:-未声明} 没有属主模型，按备份记录保留属主与权限"
         return 0
     fi
     # 站点：与 deploy_wordpress 落地时同一套
@@ -774,7 +774,7 @@ restore_db() {
         _ "${OS_DEFAULT_DB_CHARSET}" "${db}" "${sqlfile}" "${strip}" \
         || {
             if [[ ${fresh} -eq 1 ]]; then
-                os::err '导入失败。新建落点可能只含部分数据，将通过失败回滚撤销'
+                os::err '导入失败。新建的恢复目标可能只含部分数据，将通过失败回滚撤销'
             else
                 os::err "导入失败。当前库已被清空，用上面那份恢复前副本可以回到原状"
             fi
@@ -836,7 +836,7 @@ fixup_credentials() {
     if [[ -z ${db} || -z ${db_user} ]] || ! os::secure_load "${secret_key}" pass; then
         os::err "本机凭据库里没有 ${id} 的数据库账号或密码，无法把配置对齐到这台机器"
         os::info '先跑 oneserver deploy wordpress 部署好这个站，再恢复；'
-        os::info '或者用 --into=site:<本机已有的站点> 指定一个落点'
+        os::info '或者用 --into=site:<本机已有的站点> 指定恢复目标'
         return 1
     fi
     [[ ${check} -eq 0 ]] || return 0
@@ -844,7 +844,7 @@ fixup_credentials() {
     local conf="${source}/wp-config.php"
     if [[ ! -f ${conf} ]]; then
         os::err "恢复出来的站点里没有 wp-config.php：${conf}"
-        os::info "归档里本来就不含它。恢复前副本在 ${RS_PRE_DIR}"
+        os::info "备份中本来就不含它。恢复前副本在 ${RS_PRE_DIR}"
         return 1
     fi
 
@@ -930,7 +930,7 @@ fixup_cache() {
     if wp_has_define "${conf}" WP_CACHE; then
         os::replace_line "${conf}" "^define\( *'WP_CACHE'" \
             "define( 'WP_CACHE', false );" || return 1
-        os::warn '本机没有可用的 Valkey，归档带来的缓存配置已停用（WP_CACHE = false）'
+        os::warn '本机没有可用的 Valkey，备份带来的缓存配置已停用（WP_CACHE = false）'
     fi
 
     # **WP_CACHE 关不掉对象缓存**，所以这一步不能因为上面没改成而跳过：那个
@@ -958,11 +958,11 @@ restore_files() {
     local archive=${1} source=${2} root=${3} only=${4}
 
     [[ -n ${root} ]] || {
-        os::err '这份归档里没有文件（只有数据库）'
+        os::err '这份备份中没有文件（只有数据库）'
         return 1
     }
     [[ -n ${source} ]] || {
-        os::err '没有落点目录，无法确定恢复到哪'
+        os::err '恢复目标没有目录，无法确定写入位置'
         return 1
     }
 
@@ -1013,7 +1013,7 @@ restore_files() {
     # `--only` 会先把用户的 uploads 挪走，然后 tar 报「找不到」——现场是
     # 「恢复失败，而且媒体库不见了」
     os::query --timeout 600 -- tar -tzf "${archive}" "${root}/${sub}" || {
-        os::err "归档里没有这个子路径：${sub}"
+        os::err "备份中没有这个子路径：${sub}"
         return 1
     }
     # `--only` 是部分恢复：live 必须**严格落在站点目录之内**。子路径由用户给、
@@ -1137,7 +1137,7 @@ ex_split_source() {
             # 明摆着是归档、只是压缩格式不认识。同 *.sql.* 那条：落到下面的
             # 「当单个文件处理」会把 .tar.zst 原样拷进站点目录、报成功，而站点是空的
             *.tar.* | *.txz | *.tbz | *.tbz2 | *.tzst)
-                os::err "归档只支持 .tar / .tar.gz / .tgz / .zip，收到 ${item##*/}"
+                os::err "压缩备份只支持 .tar / .tar.gz / .tgz / .zip，收到 ${item##*/}"
                 os::info '先解开再导入，例如：unxz / bunzip2 / unzstd'
                 return 1
                 ;;
@@ -1173,13 +1173,13 @@ ex_resolve_dest() {
     local spec=${1-}
     EX_DEST_DIR='' EX_DEST_DB='' EX_SITE_TYPE='' EX_SITE_NAME=''
     if [[ ${spec} != *:* ]]; then
-        os::err "落点要写成 <类型>:<名字>，收到「${spec}」"
+        os::err "恢复目标要写成 <类型>:<名字>，收到「${spec}」"
         os::info 'site:<站点名> 整站 · db:<库名> 只灌库 · path:<别名或绝对路径> 任意目录或文件'
         return 1
     fi
     local type=${spec%%:*} name=${spec#*:}
     [[ -n ${name} ]] || {
-        os::err '落点缺少名字'
+        os::err '恢复目标缺少名字'
         return 1
     }
 
@@ -1205,7 +1205,7 @@ ex_resolve_dest() {
             EX_DEST_DIR=$(os::state_get "${EX_SITE_TYPE}:${name}" path)
             EX_DEST_DB=$(os::state_get "${EX_SITE_TYPE}:${name}" db)
             [[ -n ${EX_DEST_DIR} ]] || {
-                os::err "state 里的 ${EX_SITE_TYPE}:${name} 没有 path 键，定不出落点目录"
+                os::err "state 里的 ${EX_SITE_TYPE}:${name} 没有 path 键，定不出恢复目录"
                 return 1
             }
             ;;
@@ -1234,12 +1234,12 @@ ex_resolve_dest() {
                 EX_DEST_DIR=$(os::state_get "backup-path:${name}" source)
             fi
             [[ -n ${EX_DEST_DIR} ]] || {
-                os::err '解析不出落点路径'
+                os::err '解析不出恢复目标路径'
                 return 1
             }
             ;;
         *)
-            os::err "未知的落点类型「${type}」，可用：site db path"
+            os::err "未知的恢复目标类型「${type}」，可用：site db path"
             return 1
             ;;
     esac
@@ -1247,7 +1247,7 @@ ex_resolve_dest() {
     # 落点是本机将被覆盖的路径，与 manifest 的 source_path 同一条规则：
     # 挡掉相对路径、路径穿越与系统关键目录
     if [[ -n ${EX_DEST_DIR} ]] && ! valid_source_path "${EX_DEST_DIR}"; then
-        os::err "落点路径不可接受：${EX_DEST_DIR}（相对路径、路径穿越，或系统关键目录）"
+        os::err "恢复目标路径不可接受：${EX_DEST_DIR}（相对路径、路径穿越，或系统关键目录）"
         return 1
     fi
     return 0
@@ -1266,7 +1266,7 @@ ex_read_members() {
     case ${EX_KIND} in
         tar)
             os::query --timeout 3600 -- tar -tvf "${EX_SRC_FILES}" || {
-                os::err "读不出归档清单：${EX_SRC_FILES}（不是 tar 包，或者已损坏）"
+                os::err "读不出备份文件清单：${EX_SRC_FILES}（不是 tar 包，或者已损坏）"
                 return 1
             }
             # `tar -tv` 一行是「权限 属主/组 大小 日期 时间 名字」。名字可能带空格，
@@ -1358,7 +1358,7 @@ ex_audit_members() {
     # 站点目录下的 .sql 是能被公网直接下载的 —— 里面有全站数据
     [[ -z ${sql} ]] || {
         os::warn "来源里含 SQL 转储：${sql}"
-        os::info '它会跟着解到落点目录里。要灌库请把它单独指给 --source（逗号分隔），'
+        os::info '它会跟着解到恢复目录里。要灌库请把它单独指给 --source（逗号分隔），'
         os::info '并在导入后删掉解出来的那一份。'
     }
     return 0
@@ -1477,7 +1477,7 @@ ex_locate_root() {
     if [[ ${bd} -lt 0 ]]; then
         if [[ -n ${EX_SITE_TYPE} ]]; then
             os::warn '来源里没有 WordPress 标志文件，整份内容将按普通目录覆盖站点目录'
-            os::info '只迁 wp-content 之类的部分内容时，落点应当写成 path:<那个子目录的绝对路径>'
+            os::info '只迁 wp-content 之类的部分内容时，恢复目标应当写成 path:<那个子目录的绝对路径>'
         fi
         return 0
     fi
@@ -1902,9 +1902,9 @@ import_files() {
     # 归「必须回滚」：撤销用 rmdir 不是 rm -rf —— 后面真失败时目录里已经有内容了，
     # rmdir 会失败并把它留下，这是对的。
     if [[ ! -d ${parent} ]]; then
-        os::run '创建落点父目录' -- mkdir -p "${parent}" || return 1
+        os::run '创建恢复目标的父目录' -- mkdir -p "${parent}" || return 1
         os::defer rmdir -- "${parent}"
-        os::run '确保落点父目录可进入' -- chmod 0755 "${parent}" || return 1
+        os::run '确保恢复目标的父目录可进入' -- chmod 0755 "${parent}" || return 1
     fi
 
     # 单个文件：没有清单、没有站点根，直接换掉
@@ -1950,15 +1950,15 @@ ex_preview() {
         kv+=('来源内的根' "${EX_ROOT:-（整份来源）}" '解包后约' "$((EX_SIZE_KB / 1024)) MB")
     fi
     [[ -n ${EX_SRC_SQL} ]] && kv+=('SQL 转储' "${EX_SRC_SQL}")
-    kv+=('落点' "${target}")
-    [[ -n ${EX_DEST_DIR} ]] && kv+=('落点目录' "${EX_DEST_DIR}")
-    [[ -n ${EX_DEST_DB} ]] && kv+=('落点数据库' "${EX_DEST_DB}")
+    kv+=('恢复目标' "${target}")
+    [[ -n ${EX_DEST_DIR} ]] && kv+=('恢复目录' "${EX_DEST_DIR}")
+    [[ -n ${EX_DEST_DB} ]] && kv+=('恢复数据库' "${EX_DEST_DB}")
     os::kv "${kv[@]}"
 
     # 路径打错一个字母就会静静地建出一个新目录，导入「成功」而站点纹丝不动。
     # 在确认之前把这件事说出来，是唯一能拦住它的时机。
     if [[ -n ${EX_DEST_DIR} && ! -e ${EX_DEST_DIR} ]]; then
-        os::warn "落点 ${EX_DEST_DIR} 当前不存在，导入时会新建它 —— 路径没写错吧？"
+        os::warn "恢复目标 ${EX_DEST_DIR} 当前不存在，导入时会新建它 —— 路径没写错吧？"
     fi
 
     if [[ -n ${EX_SRC_FILES} && ${EX_KIND} != file ]]; then
@@ -2014,16 +2014,16 @@ import_external() {
 
     # 来源与落点要配得上
     [[ -z ${EX_SRC_SQL} || -n ${EX_DEST_DB} ]] \
-        || os::die 2 "落点 ${target} 上没有数据库，SQL 转储无处可灌"
+        || os::die 2 "恢复目标 ${target} 没有数据库，SQL 转储无处可灌"
     [[ -z ${EX_SRC_FILES} || -n ${EX_DEST_DIR} ]] \
-        || os::die 2 "落点 ${target} 只有数据库，文件来源无处可放"
+        || os::die 2 "恢复目标 ${target} 只有数据库，文件来源无处可放"
 
     # 单个文件落到一个已经存在的目录上：现有做法会把整个目录挪进 pre-restore、
     # 再放一个文件进去，而用户十有八九想的是「放进这个目录里」。
     # **这种破坏性歧义不猜**，让他把话说全。
     if [[ ${EX_KIND} == 'file' && -d ${EX_DEST_DIR} ]]; then
-        os::err "落点 ${EX_DEST_DIR} 是一个已存在的目录，而来源是单个文件"
-        os::die 2 "把落点写成完整的目标文件路径，例如：--target=path:${EX_DEST_DIR}/${EX_SRC_FILES##*/}"
+        os::err "恢复目标 ${EX_DEST_DIR} 是一个已存在的目录，而来源是单个文件"
+        os::die 2 "把恢复目标写成完整的文件路径，例如：--target=path:${EX_DEST_DIR}/${EX_SRC_FILES##*/}"
     fi
 
     if [[ -n ${EX_SRC_FILES} && ${EX_KIND} != 'file' ]]; then
@@ -2045,13 +2045,13 @@ import_external() {
     # 站点目录里的配置本来就是本机的，没有要对齐的东西
     [[ -z ${EX_SITE_TYPE} || -z ${EX_SRC_FILES} ]] \
         || fixup_credentials --check "${EX_SITE_TYPE}" "${EX_SITE_NAME}" \
-        || os::die 3 '落点站点的凭据不全，未做任何改动'
+        || os::die 3 '恢复目标站点的凭据不全，未做任何改动'
 
     local site_url=''
     if [[ -n ${EX_SITE_TYPE} ]]; then
         os::ask --match '^$|^https?://[^[:space:]]+$' \
-            --hint '换服务器不换域名就留空 —— 转储里带来的地址本来就是对的' \
-            --arg site-url '站点的新域名（留空 = 不动 siteurl / home）' site_url ''
+            --hint '迁移后仍使用原地址就留空' \
+            --arg site-url '站点的新地址（含 http:// 或 https://；留空则保留备份中的地址）' site_url ''
     fi
 
     ex_preview "${target}"
@@ -2144,7 +2144,7 @@ rs_site_dest_candidates() {
             path=$(os::state_get "${id}" path)
             [[ -n ${path} ]] || continue
             db=$(os::state_get "${id}" db)
-            entries_text+="site:${n}=本机的 ${n}（库 ${db:-（无）} · 目录 ${path}）"$'\n'
+            entries_text+="site:${n}=本机站点 ${n}（库 ${db:-（无）} · 目录 ${path}）"$'\n'
         done < <(os::state_list "${type}")
     done
     RS_ENTRIES=${entries_text%$'\n'}
@@ -2158,7 +2158,7 @@ rs_site_dest_candidates() {
 rs_db_dest_candidates() {
     RS_ENTRIES=''
     os::require_cmd mysql
-    os::sql_query '列出可恢复的数据库落点' -- \
+    os::sql_query '列出可用的恢复数据库' -- \
         "SELECT schema_name FROM information_schema.schemata
          WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys')
          ORDER BY schema_name;" || return 1
@@ -2226,12 +2226,12 @@ rs_create_database() {
 
     os::lock_release
     local -i rc=0
-    os::run_out --allow-fail '通过数据库管理创建恢复落点' -- "${cmd[@]}" || rc=$?
+    os::run_out --allow-fail '通过数据库管理创建恢复目标' -- "${cmd[@]}" || rc=$?
     local -i skipped=${OS_RUN_SKIPPED}
     # 子命令已经成功，此刻即使重新取锁失败，父进程的 EXIT trap 也必须知道系统
     # 发生了什么并能撤销。登记不能放到 lock_acquire 之后。
     if [[ ${rc} -eq 0 && ${skipped} -ne 1 ]]; then
-        os::record_change "通过数据库管理创建了恢复落点 db:${db}"
+        os::record_change "通过数据库管理创建了恢复目标 db:${db}"
         os::defer rs_remove_created_database "${db}"
     fi
     os::lock_acquire
@@ -2241,7 +2241,7 @@ rs_create_database() {
         return 1
     }
     if [[ ${skipped} -eq 1 ]]; then
-        os::info "[dry-run] 将通过 oneserver mariadb create --name=${db} 创建恢复落点"
+        os::info "[dry-run] 将通过 oneserver mariadb create --name=${db} 创建恢复目标"
         return 0
     fi
     ex_db_exists "${db}" || {
@@ -2274,26 +2274,27 @@ rs_plan_dest() {
             spath=$(os::state_get "${RS_MF_SITE_TYPE}:${RS_MF_NAME}" path)
             if [[ ${sdb} != "${RS_MF_DB}" || ${spath} != "${RS_MF_SOURCE}" ]]; then
                 self_ok=0
-                os::warn "本机的站点 ${RS_MF_NAME} 与归档对不上"
+                os::warn "本机站点 ${RS_MF_NAME} 与备份记录对不上"
                 os::kv '本机' "库 ${sdb:-（无）} · 目录 ${spath}" \
-                    '归档' "库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}"
+                    '备份' "库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}"
             fi
         elif [[ -z ${RS_MF_SITE_TYPE} ]]; then
             self_ok=0
-            os::warn "这份归档没说自己是哪一类站点，对不上本机的任何实例"
+            os::warn "这份备份没有记录站点类型，对不上本机的任何站点"
         else
             self_ok=0
-            os::warn "本机 state 里没有站点 ${RS_MF_NAME}（这份归档属于 ${self}）"
-            os::info '照归档原样恢复只会建出一套与本机任何站点都无关的库和目录，站点不会因此跑起来'
+            os::warn "本机没有登记站点 ${RS_MF_NAME}（这份备份属于 ${self}）"
+            os::info '按备份中记录的位置恢复，只会建出一套与本机任何站点都无关的库和目录，站点不会因此运行'
         fi
     fi
 
     local -a opts=() nested=()
-    local line
+    local line dest_prompt='恢复到哪里'
     case ${RS_MF_TYPE} in
         site)
+            dest_prompt='恢复到哪个本机站点'
             [[ ${self_ok} -eq 0 ]] \
-                || opts+=("${self}=按归档原样恢复（库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}）")
+                || opts+=("${self}=本机同名站点 ${RS_MF_NAME}（库 ${RS_MF_DB:-（无）} · 目录 ${RS_MF_SOURCE:-（无）}）")
             if rs_site_dest_candidates; then
                 while IFS= read -r line; do
                     [[ -n ${line} ]] || continue
@@ -2305,47 +2306,49 @@ rs_plan_dest() {
             fi
             ;;
         db)
+            dest_prompt='恢复到哪个数据库'
             [[ -n ${RS_MF_DB} ]] || {
-                os::err '数据库归档的 manifest 里没有数据库名'
+                os::err '数据库备份的信息里没有数据库名'
                 return 1
             }
             os::require_cmd mysql
             if ex_db_exists "${RS_MF_DB}"; then
-                opts+=("${self}=覆盖原数据库 ${RS_MF_DB}")
+                opts+=("${self}=本机同名数据库 ${RS_MF_DB}（覆盖现有内容）")
             else
-                opts+=("${self}=恢复为数据库 ${RS_MF_DB}（不存在则创建）")
+                opts+=("${self}=本机同名数据库 ${RS_MF_DB}（将新建）")
                 RS_DEST_DB_CREATE=1
             fi
             if rs_db_dest_candidates; then
                 while IFS= read -r line; do
                     [[ -n ${line} ]] && nested+=("${line}")
                 done <<<"${RS_ENTRIES}"
-                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_db__=覆盖本机现有数据库')
+                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_db__=本机其他数据库（下一步选择）')
             fi
             ;;
         path)
+            dest_prompt='恢复到哪个路径'
             [[ -n ${RS_MF_SOURCE} ]] || {
-                os::err '路径归档的 manifest 里没有源路径'
+                os::err '路径备份的信息里没有源路径'
                 return 1
             }
-            opts+=("${self}=恢复到原路径 ${RS_MF_SOURCE}")
+            opts+=("${self}=备份中记录的路径 ${RS_MF_SOURCE}")
             if rs_path_dest_candidates; then
                 while IFS= read -r line; do
                     [[ -n ${line} ]] && nested+=("${line}")
                 done <<<"${RS_ENTRIES}"
-                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_path__=恢复到其他已登记路径')
+                [[ ${#nested[@]} -eq 0 ]] || opts+=('__pick_path__=本机其他已登记路径（下一步选择）')
             fi
             ;;
         *)
-            os::err "归档类型 ${RS_MF_TYPE} 没有可用的恢复落点逻辑"
+            os::err "备份类型 ${RS_MF_TYPE} 没有可用的恢复目标"
             return 1
             ;;
     esac
     [[ ${#opts[@]} -gt 0 ]] || {
-        os::err '本机没有任何可用的恢复落点'
+        os::err '本机没有任何可用的恢复目标'
         return 1
     }
-    [[ ${#opts[@]} -gt 1 ]] || os::info '只有一个可用落点，下面这一项是唯一选择'
+    [[ ${#opts[@]} -gt 1 ]] || os::info '只有下面这一项可选'
 
     # 自身落点成立时它是首项，非交互下取首项即「原样恢复」，是安全的默认。
     # 不成立时**没有**安全默认：非交互下必须以 2 停下，绝不能替用户从清单里
@@ -2353,11 +2356,11 @@ rs_plan_dest() {
     local -a req=()
     [[ ${self_ok} -eq 1 ]] || req=(--required)
     local into=''
-    os::select ${req[@]+"${req[@]}"} --arg into '恢复到哪个落点' into "${opts[@]}"
+    os::select ${req[@]+"${req[@]}"} --arg into "${dest_prompt}" into "${opts[@]}"
     if [[ ${into} == __pick_db__ ]]; then
-        os::select --reask --required --arg into '覆盖本机哪个数据库' into "${nested[@]}"
+        os::select --reask --required --arg into '选择要覆盖的本机数据库' into "${nested[@]}"
     elif [[ ${into} == __pick_path__ ]]; then
-        os::select --reask --required --arg into '恢复到哪个已登记路径' into "${nested[@]}"
+        os::select --reask --required --arg into '选择要恢复到的本机路径' into "${nested[@]}"
     fi
     EX_DEST_SPEC=${into}
 
@@ -2390,8 +2393,8 @@ main() {
     os::require_cmd tar gzip sha256sum find
 
     local from=''
-    os::select --arg from '从哪里恢复' from \
-        'local=本地归档' 'remote=rclone 远端' 'external=外部文件（别的面板或主机迁来的备份）'
+    os::select --arg from '选择备份来源' from \
+        'local=本机备份' 'remote=rclone 远端备份' 'external=外部备份（从其他工具或主机迁入）'
     case ${from} in
         local | remote | external) ;;
         *) os::die 2 "--from 只能是 local / remote / external，收到「${from}」" ;;
@@ -2407,15 +2410,15 @@ main() {
     # --- 1. 选目标 ---
     if [[ ${from} == remote ]]; then
         load_remote || os::die 3 '还没有配置远端，先跑 oneserver backup remote'
-        remote_targets || os::die 3 "远端 ${RS_REMOTE}:${RS_REMOTE_DIR} 下没有任何归档"
+        remote_targets || os::die 3 "远端 ${RS_REMOTE}:${RS_REMOTE_DIR} 下没有任何备份"
     else
-        local_targets || os::die 3 "本地没有任何归档（${OS_ARCHIVE_DIR}）"
+        local_targets || os::die 3 "本机没有任何备份（${OS_ARCHIVE_DIR}）"
     fi
 
     local -a targets=()
     mapfile -t targets <<<"${RS_ENTRIES}"
     local target=''
-    os::select --arg target '恢复哪个目标' target "${targets[@]}"
+    os::select --arg target '选择要恢复的备份项目' target "${targets[@]}"
 
     local ok=''
     local t
@@ -2424,15 +2427,15 @@ main() {
     done
     [[ -n ${ok} ]] || {
         local IFS=' '
-        os::die 2 "没有这个目标：${target}（可用：${targets[*]}）"
+        os::die 2 "没有这个备份项目：${target}（可用：${targets[*]}）"
     }
     local type=${target%%:*} name=${target#*:}
 
     # --- 2. 选归档 ---
     if [[ ${from} == remote ]]; then
-        remote_archives "${type}" "${name}" || os::die 3 "远端 ${target} 下没有归档"
+        remote_archives "${type}" "${name}" || os::die 3 "远端 ${target} 下没有备份"
     else
-        local_archives "${type}" "${name}" || os::die 3 "本地 ${target} 下没有归档"
+        local_archives "${type}" "${name}" || os::die 3 "本机 ${target} 下没有备份"
     fi
     local -a archives=()
     mapfile -t archives <<<"${RS_ENTRIES}"
@@ -2456,20 +2459,20 @@ main() {
     done
     # 选项天然只收清单里的值，填错原地重问；非交互下取第一项，也就是最新那份
     local file=''
-    os::select --arg file '恢复哪一份（最新的在最前）' file "${choices[@]}"
+    os::select --arg file '选择备份版本（最新的在前）' file "${choices[@]}"
 
     # --- 3. 取回 + 校验 + 读 manifest ---
-    fetch_archive "${from}" "${type}" "${name}" "${file}" || os::die 1 '取回归档失败'
-    verify_archive "${RS_ARCHIVE}" || os::die 1 '归档校验未通过，未做任何改动'
+    fetch_archive "${from}" "${type}" "${name}" "${file}" || os::die 1 '取回备份失败'
+    verify_archive "${RS_ARCHIVE}" || os::die 1 '备份校验未通过，未做任何改动'
     # **说清这次校验证明了什么、没证明什么。** `.sha256` 与归档来自同一个地方，
     # 能改归档的人同样能改那个哈希 —— 它保证的是「传输过程中没坏」，不是
     # 「内容可信」。挡住恶意归档的是解包时那道成员审查，不是这一步。
     [[ ${from} == local ]] \
-        || os::warn '注意：校验用的 .sha256 与归档来自同一个远端，它只证明传输完整，不证明内容可信'
-    read_manifest "${RS_ARCHIVE}" || os::die 1 '读不出归档的 manifest，未做任何改动'
+        || os::warn '注意：校验用的 .sha256 与备份来自同一个远端，它只证明传输完整，不证明内容可信'
+    read_manifest "${RS_ARCHIVE}" || os::die 1 '读不出备份信息，未做任何改动'
 
-    os::section '这份归档是什么'
-    os::kv '目标' "${RS_MF_TYPE}:${RS_MF_NAME}" \
+    os::section '这份备份的信息'
+    os::kv '备份项目' "${RS_MF_TYPE}:${RS_MF_NAME}" \
         '生成于' "${RS_MF_CREATED}" \
         '来自主机' "${RS_MF_HOST}" \
         '源路径' "${RS_MF_SOURCE:-（无文件）}" \
@@ -2478,7 +2481,7 @@ main() {
     # 归档的自我声明与「用户挑的是哪个目录」不一致时停下：多半是目录被人手工
     # 挪过归档，按 manifest 恢复会写到一个用户没预期的地方
     if [[ ${RS_MF_TYPE} != "${type}" || ${RS_MF_NAME} != "${name}" ]]; then
-        os::warn "归档自称是 ${RS_MF_TYPE}:${RS_MF_NAME}，而它躺在 ${target} 下"
+        os::warn "备份记录的项目是 ${RS_MF_TYPE}:${RS_MF_NAME}，但文件位于 ${target} 下"
         os::info '以 manifest 为准继续，源路径见上'
     fi
 
@@ -2496,8 +2499,8 @@ main() {
     rs_plan_dest || dest_rc=$?
     case ${dest_rc} in
         0) ;;
-        2) os::die 2 '指定的恢复落点无效，未做任何改动' ;;
-        *) os::die 3 '定不出落点，未做任何改动' ;;
+        2) os::die 2 '指定的恢复目标无效，未做任何改动' ;;
+        *) os::die 3 '无法确定恢复目标，未做任何改动' ;;
     esac
 
     # --- 6. 选模式 ---
@@ -2511,17 +2514,17 @@ main() {
     [[ -n ${RS_MF_DB} && -n ${EX_DEST_DB} ]] && modes+=('db=仅数据库')
     [[ -n ${RS_MF_ROOT} && -n ${EX_DEST_DIR} ]] && modes+=('files=仅文件')
     [[ ${#modes[@]} -gt 0 ]] \
-        || os::die 3 '这份归档里的内容与落点对不上（归档只有库而落点只有目录，或者反过来）'
-    [[ ${#modes[@]} -gt 1 ]] || os::info '这份归档里只有一种内容，下面这一项是唯一选择'
+        || os::die 3 '这份备份的内容与恢复目标对不上（备份只有数据库而目标只有目录，或者反过来）'
+    [[ ${#modes[@]} -gt 1 ]] || os::info '当前只有下面这一种恢复内容可选'
 
     local mode=''
     # os::select 天然只收清单里的值：填错原地重问，命令行给错的值以 2 停下。
     # 因此这里不需要再补一遍「mode 是不是合法」的判断。
-    os::select --arg mode '恢复什么' mode "${modes[@]}"
+    os::select --arg mode '选择要恢复的内容' mode "${modes[@]}"
 
     local only=''
     if [[ ${mode} != db ]]; then
-        os::ask --arg only '只恢复归档内的某个子路径（留空 = 整份，例：wp-content/uploads）' only ''
+        os::ask --arg only '只恢复备份中的某个子路径（留空 = 整份，例：wp-content/uploads）' only ''
     fi
     # 库整份回到备份那一刻、文件只回一段，两边讲的就不是同一个时间点的事了。
     # 典型后果：文章在库里存在，附件却还是现在这份（或者反过来）。
@@ -2537,8 +2540,8 @@ main() {
     local site_url=''
     if [[ -n ${EX_SITE_TYPE} && ${mode} != files ]]; then
         os::ask --match '^$|^https?://[^[:space:]]+$' \
-            --hint '换服务器不换域名就留空 —— 归档里带来的地址本来就是对的' \
-            --arg site-url '站点的新域名（留空 = 不动 siteurl / home）' site_url ''
+            --hint '迁移后仍使用原地址就留空' \
+            --arg site-url '站点的新地址（含 http:// 或 https://；留空则保留备份中的地址）' site_url ''
     fi
 
     # 这次会不会改配置，到这里才定得下来。完整文件恢复一定覆盖 wp-config；
@@ -2556,17 +2559,17 @@ main() {
     fi
     [[ ${fixup} -eq 0 ]] \
         || fixup_credentials --check "${EX_SITE_TYPE}" "${EX_SITE_NAME}" \
-        || os::die 3 '落点站点的凭据不全，未做任何改动'
+        || os::die 3 '恢复目标站点的凭据不全，未做任何改动'
 
     # --- 7. 确认。覆盖是不可逆的，走规范那一套 ---
     #
     # **清单里写的是落点，不是归档里那两个名字。** 归档自称什么已经在上面
-    # 「这份归档是什么」里说过了；这里回答的是唯一要紧的那个问题：
+    # 「这份备份的信息」里说过了；这里回答的是唯一要紧的那个问题：
     # 按下确认之后，这台机器上的哪个库、哪个目录会没。
     local -a items=()
     if [[ ${mode} == all || ${mode} == db ]] && [[ -n ${EX_DEST_DB} ]]; then
         if [[ ${RS_DEST_DB_CREATE} -eq 1 ]]; then
-            items+=("通过数据库管理创建数据库 ${EX_DEST_DB} 与关联账号，再导入归档数据")
+            items+=("通过数据库管理创建数据库 ${EX_DEST_DB} 与关联账号，再导入备份数据")
         else
             items+=("数据库 ${EX_DEST_DB} 的当前内容（会先自动备一份）")
         fi
@@ -2599,7 +2602,7 @@ main() {
     # 必须在最终确认之后，避免用户只是浏览恢复选项就凭空多出一个数据库和账号。
     if [[ (${mode} == all || ${mode} == db) && ${RS_DEST_DB_CREATE} -eq 1 ]]; then
         rs_create_database "${EX_DEST_DB}" \
-            || os::die 1 '创建数据库恢复落点失败，归档尚未导入'
+            || os::die 1 '创建数据库恢复目标失败，备份尚未导入'
     fi
 
     # --- 8. 解出内容并恢复 ---
@@ -2609,7 +2612,7 @@ main() {
         local dir
         os::tmpdir dir || os::die 1 '无法创建临时目录'
         os::query --timeout 3600 -- tar -xzf "${RS_ARCHIVE}" -C "${dir}" database.sql \
-            || os::die 1 '归档里取不出 database.sql'
+            || os::die 1 '备份中取不出 database.sql'
         restore_db "${EX_DEST_DB}" "${dir}/database.sql" 0 "${RS_DEST_DB_CREATE}" || rc=1
     fi
     if [[ ${rc} -eq 0 && (${mode} == all || ${mode} == files) ]] && [[ -n ${EX_DEST_DIR} ]]; then
@@ -2631,7 +2634,7 @@ main() {
         if [[ ${RS_PRE_CREATED} -eq 1 ]]; then
             os::die 1 "恢复未完成。恢复前副本在 ${RS_PRE_DIR}"
         fi
-        os::die 1 '恢复未完成；本次新建的数据库落点将按已登记的回滚撤销'
+        os::die 1 '恢复未完成；本次新建的恢复数据库将按已登记的回滚撤销'
     fi
 
     # 库来自归档、而文件这次没恢复（--mode=db）时，站点目录里的 wp-config

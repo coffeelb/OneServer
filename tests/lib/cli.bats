@@ -392,6 +392,19 @@ menu_num() {
     [[ "${output}" != *"（实时）"* ]]
 }
 
+@test "菜单状态面板把 CPU 型号放在第二项" {
+    local screen system_line cpu_line uptime_line
+    screen=$(menu_screen '\n')
+    system_line=$(grep -n '系统' <<<"${screen}" | head -1)
+    cpu_line=$(grep -n 'CPU' <<<"${screen}" | head -1)
+    uptime_line=$(grep -n '已运行' <<<"${screen}" | head -1)
+    [ -n "${system_line}" ]
+    [ -n "${cpu_line}" ]
+    [ -n "${uptime_line}" ]
+    [ "${system_line%%:*}" -lt "${cpu_line%%:*}" ]
+    [ "${cpu_line%%:*}" -lt "${uptime_line%%:*}" ]
+}
+
 @test "菜单按编号派发" {
     # 两层的编号都按各自屏幕从 1 数起，900 是夹具的 @order，绝不能当输入编号
     local tb echo_n

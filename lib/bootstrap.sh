@@ -739,7 +739,7 @@ os::flag() {
     esac
 }
 
-# os::select [--required] [--reask] [--keep-screen] [--return <值>] --arg <name> <提示> <变量名> <选项>...   从清单里挑一个，选项可写 `值=说明`
+# os::select [--required] [--reask] [--keep-screen] [--return <值>] --arg <name> <提示> <变量名> <选项>...   从清单里挑一个；选项可写 `值=说明`，`__...__=说明` 不显示内部值
 #
 # `--keep-screen` 不清屏，留给「总览在上、菜单在下」那种同屏组合（os::action_menu）；
 # `--return <值>` 让回车不落到第一个动作上，而是把该值写进变量、离开本菜单。
@@ -848,7 +848,13 @@ os::select() {
                 # **说明进主列，值降次列。** 菜单是中文界面，而值天生是英文标识
                 # （ls / prune / on-failure）。把 token 摆在视觉重心上、中文说明
                 # 反倒成了灰色附注，读起来是反的。值仍然可以直接输入。
-                __os_menu_args+=(--item "$((__os_i + 1))" "${__os_descs[__os_i]}" "${__os_labels[__os_i]}")
+                # `__...__` 是调用方用于进入下一层菜单的内部控制值，界面只提供编号，
+                # 不把它泄露到界面；返回值与后续分支逻辑保持不变。
+                if [[ ${__os_vals[__os_i]} == __*__ ]]; then
+                    __os_menu_args+=(--item "$((__os_i + 1))" "${__os_descs[__os_i]}")
+                else
+                    __os_menu_args+=(--item "$((__os_i + 1))" "${__os_descs[__os_i]}" "${__os_labels[__os_i]}")
+                fi
             else
                 __os_menu_args+=(--item "$((__os_i + 1))" "${__os_labels[__os_i]}")
             fi

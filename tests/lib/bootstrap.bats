@@ -1009,6 +1009,19 @@ echo ok
     [ "${status}" -eq 0 ]
 }
 
+@test "select: 内部控制值不显示但仍按序号返回" {
+    local f
+    f=$(make_script '
+os::select --arg value "选择" picked "__pick_db__=本机其他数据库（下一步选择）"
+[ "${picked}" = "__pick_db__" ] || exit 21
+echo ok
+')
+    run bash "${f}" <<<'1'
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'本机其他数据库（下一步选择）'* ]]
+    [[ "${output}" != *'__pick_db__'* ]]
+}
+
 @test "select: 返回提示由回车触发且不显示 0 号菜单项" {
     local f
     f=$(make_script '

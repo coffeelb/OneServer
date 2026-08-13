@@ -95,7 +95,7 @@ human_duration() {
     return 0
 }
 
-# 状态面板 —— **只放不起进程就能答出来的行**：发行版与内核、已运行多久。
+# 状态面板 —— **只放不起进程就能答出来的行**：发行版与内核、CPU 型号、已运行多久。
 #
 # 判据是成本，不是重要性。主屏是每次进菜单、每跑完一条命令回来都要重画的一屏，
 # 它上面每一行的代价都要乘以一天进多少次菜单。/proc 是纯读，整屏合起来是毫秒
@@ -123,6 +123,9 @@ show_panel() {
     local data_source=${OS_PROBE_SOURCE}
     probe::kernel
     menu_row '系统' "${pretty} · 内核 ${OS_PROBE_VALUE:-未知}"
+
+    probe::cpu_model
+    menu_row 'CPU' "${OS_PROBE_VALUE:-未知}"
 
     probe::uptime_seconds
     if [[ ${OS_PROBE_STATUS} == ok ]]; then

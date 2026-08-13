@@ -433,8 +433,8 @@ make_archive() {
 
     check_space "${source}" "${db}" || return 1
 
-    os::run '创建归档目录' -- mkdir -p "${dir}"
-    os::run '收紧归档目录权限' -- chmod 0700 "${dir}"
+    os::run '创建备份目录' -- mkdir -p "${dir}"
+    os::run '收紧备份目录权限' -- chmod 0700 "${dir}"
 
     # **先扫掉上一次留下的半成品。**
     #
@@ -529,18 +529,18 @@ make_archive() {
     # **tar 的退出码 1 不是失败。** 活动站点上「文件在读取过程中变了」是常态
     # （PHP 写 session、日志滚动），GNU tar 为此返回 1 并把归档正常写完。
     # 把 1 当失败，等于「越忙的站点越备不成」。只有 >=2 才是真出错。
-    os::run --allow-fail '打包归档' -- tar "${targs[@]}"
+    os::run --allow-fail '生成备份文件' -- tar "${targs[@]}"
     local -i rc=${OS_RUN_STATUS}
     if ((rc == 1)); then
-        os::warn "打包期间有文件发生变化（活动站点上属正常），归档仍然可用"
+        os::warn "打包期间有文件发生变化（活动站点上属正常），备份仍然可用"
     elif ((rc >= 2)); then
-        os::run --allow-fail '清理未完成的归档' -- rm -f "${out}.partial"
+        os::run --allow-fail '清理未完成的备份文件' -- rm -f "${out}.partial"
         os::err "${type}:${name} 打包失败（tar 退出码 ${rc}）"
         return 1
     fi
 
     if [[ ${OS_RUN_SKIPPED} -eq 1 ]]; then
-        os::info "[dry-run] 会生成归档 ${out}"
+        os::info "[dry-run] 会生成备份文件 ${out}"
         BK_ARCHIVE=${out}
         return 0
     fi
@@ -551,13 +551,13 @@ make_archive() {
     # os::query 本来就把 stdout 收进变量、不往屏幕上打，所以不需要
     # `sh -c '… > /dev/null'` —— 少一层 shell，路径也就不用拼进脚本文本
     os::query --timeout 3600 -- tar -tzf "${out}.partial" || {
-        os::run --allow-fail '清理损坏的归档' -- rm -f "${out}.partial"
-        os::err "${type}:${name} 的归档自检未通过，已删除"
+        os::run --allow-fail '清理损坏的备份文件' -- rm -f "${out}.partial"
+        os::err "${type}:${name} 的备份文件自检未通过，已删除"
         return 1
     }
 
-    os::run '启用归档' -- mv -f "${out}.partial" "${out}"
-    os::run '收紧归档权限' -- chmod 0600 "${out}"
+    os::run '启用备份文件' -- mv -f "${out}.partial" "${out}"
+    os::run '收紧备份文件权限' -- chmod 0600 "${out}"
     # `.sha256` 里存的是**相对文件名**，所以要先 cd 过去；重定向也只有 shell 能做，
     # 内层 shell 在这里省不掉。但值一律经位置参数进去，不拼进脚本文本（规范 §10）：
     # 这两个值眼下由本脚本自己构造、不含元字符，而「值恰好安全」是会在重构里
@@ -568,7 +568,7 @@ make_archive() {
     # `\$1` 在双引号里同样不展开，两种写法送进内层 shell 的字节一模一样 ——
     # 唯一要守的是那几个反斜杠：去掉任何一个，值就在**外层**展开了，
     # 这一句也就退回成规范禁止的那种拼接。
-    os::run '生成归档的 SHA256 校验文件' -- sh -c \
+    os::run '生成备份文件的 SHA256 校验文件' -- sh -c \
         "cd \"\$1\" && sha256sum \"\$2\" >\"\$2.sha256\"" sh "${dir}" "${ts}.tar.gz"
 
     BK_ARCHIVE=${out}
@@ -607,7 +607,7 @@ push_remote() {
     local base=${file##*/}
     local dest="${BK_REMOTE}:${BK_REMOTE_DIR}/${type}/${name}"
 
-    os::run '上传备份归档' -- rclone copy "${file}" "${dest}" --stats-one-line || return 1
+    os::run '上传备份文件' -- rclone copy "${file}" "${dest}" --stats-one-line || return 1
     os::run '上传 SHA256 校验文件' -- rclone copy "${file}.sha256" "${dest}" || return 1
 
     if [[ ${OS_RUN_SKIPPED} -eq 1 ]]; then
@@ -628,10 +628,10 @@ push_remote() {
     [[ -n ${local_sum} ]] || return 1
 
     if [[ -z ${remote_sum} || ${remote_sum} != "${local_sum}" ]]; then
-        os::err "远端的 SHA256 与本地不一致（远端 ${remote_sum:-空}，本地 ${local_sum}）"
+        os::err "远端的 SHA256 与本机不一致（远端 ${remote_sum:-空}，本机 ${local_sum}）"
         return 1
     fi
-    os::ok '远端归档校验通过'
+    os::ok '远端备份校验通过'
     return 0
 }
 
@@ -672,11 +672,11 @@ prune_local() {
     ((total > keep)) || return 0
 
     local -i n=$((total - keep)) i
-    os::record_change "删除了 ${n} 份 ${type}:${name} 的旧本地备份"
+    os::record_change "删除了 ${n} 份 ${type}:${name} 的旧本机备份"
     for ((i = 0; i < n; i++)); do
-        os::run '删除旧本地备份' -- rm -f "${dir}/${all[i]}" "${dir}/${all[i]}.sha256"
+        os::run '删除旧本机备份' -- rm -f "${dir}/${all[i]}" "${dir}/${all[i]}.sha256"
     done
-    os::ok "${type}:${name} 已清理 ${n} 份旧本地备份"
+    os::ok "${type}:${name} 已清理 ${n} 份旧本机备份"
     return 0
 }
 
@@ -731,7 +731,7 @@ prune_remote() {
 target_legend() {
     os::kv 'site:<名字>' '站点 —— 目录与它的数据库打进同一个包' \
         'db:<库名>' '单个数据库' \
-        'path:<别名>' '用「添加备份目标」登记过的目录或文件' \
+        'path:<别名>' '用「登记要备份的目录或文件」添加的目录或文件' \
         'oneserver:self' '本工具自身 —— 配置、state 与凭据库'
     return 0
 }
@@ -750,7 +750,7 @@ path_targets_show() {
         os::kv "path:${name}" "${src}${exclude:+   排除 ${exclude}}"
         n+=1
     done < <(os::state_list backup-path)
-    [[ ${n} -gt 0 ]] || os::info '还没有登记任何 path 目标（用「添加备份目标」加）'
+    [[ ${n} -gt 0 ]] || os::info '还没有登记任何 path 目标（用「登记要备份的目录或文件」添加）'
     return 0
 }
 
@@ -766,12 +766,12 @@ action_run() {
     target_legend
     os::ask --validate resolve_targets \
         --arg target \
-        '备份哪些目标？（逗号分隔；名字位写 * = 该类全部，all = 四类全要）' \
+        '备份哪些目标？（多个用逗号分隔；把名字写成 * 表示该类全部，all 表示四类全部）' \
         spec "${default_spec}"
 
     local local_keep='' remote_keep='' exclude=''
     os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg local-keep \
-        '本地保留几份' local_keep \
+        '本机备份保留几份' local_keep \
         "$(os::state_get backup local_keep "${OS_DEFAULT_BACKUP_LOCAL_KEEP}")"
     os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg remote-keep \
         '远端保留几份' remote_keep \
@@ -787,13 +787,13 @@ action_run() {
         os::require_cmd rclone
         detect_crypt
         if [[ ${BK_REMOTE_CRYPT} -eq 1 ]]; then
-            os::info "远端：${BK_REMOTE}:${BK_REMOTE_DIR}（rclone crypt，归档在远端是加密的）"
+            os::info "远端：${BK_REMOTE}:${BK_REMOTE_DIR}（rclone crypt，备份在远端是加密的）"
         else
             os::info "远端：${BK_REMOTE}:${BK_REMOTE_DIR}"
-            os::warn '这个远端不是 crypt 类型，归档在对端是明文的（rclone config 里建一个 crypt remote 可以解决）'
+            os::warn '这个远端不是 crypt 类型，备份在对端是明文的（rclone config 里建一个 crypt remote 可以解决）'
         fi
     else
-        os::info '没有配置远端（oneserver backup remote），本次只做本地备份'
+        os::info '没有配置远端（oneserver backup remote），本次只做本机备份'
     fi
     # 新名字。旧名 `--allow-plaintext-secrets` 保留一个主版本作为弃用别名
     # （§14 的兼容做法）——它描述的是「凭据」，而现在这条闸门管的是**全部**
@@ -832,7 +832,7 @@ action_run() {
             # 一份都拿不到 —— 那不是加固，是把备份本身弄没了。不加密备份是明确
             # 的产品选择，非 crypt 远端的告警在 load_remote 里已经打过一次。
             if [[ ${sensitive} -eq 1 && ${BK_REMOTE_CRYPT} -eq 0 && ${allow_plain} -eq 0 ]]; then
-                os::warn "${type}:${name} 含 secure.conf，不会上传到非加密远端；本地那份已生成"
+                os::warn "${type}:${name} 含 secure.conf，不会上传到非加密远端；本机备份已生成"
                 os::info '要么在 rclone 里建一个 crypt remote，要么显式加 --allow-plaintext-backup'
                 skip_n+=1
             elif push_remote "${type}" "${name}" "${BK_ARCHIVE}"; then
@@ -840,7 +840,7 @@ action_run() {
             else
                 # 远端失败不算这个目标白备了：本地那份是好的。但必须计入失败，
                 # 否则定时任务天天报成功，而远端一份都没有
-                os::err "${type}:${name} 上传远端失败，本地归档仍然可用：${BK_ARCHIVE}"
+                os::err "${type}:${name} 上传远端失败，本机备份仍然可用：${BK_ARCHIVE}"
                 fail_n+=1
             fi
         fi
@@ -858,8 +858,8 @@ action_run() {
     os::state_set backup last="${ts}" last_status=ok \
         local_keep="${local_keep}" remote_keep="${remote_keep}"
     os::ok "备份完成：${ok_n} 个目标"
-    os::info "归档在 ${OS_ARCHIVE_DIR}/<类型>/<名字>/，每份旁边有一份同名 .sha256"
-    os::info '要用它恢复：oneserver restore    ·    定期确认归档没坏：oneserver backup verify'
+    os::info "备份文件保存在 ${OS_ARCHIVE_DIR}/<类型>/<名字>/，每份旁边有一份同名 .sha256"
+    os::info '要用它恢复：oneserver restore    ·    定期确认备份完好：oneserver backup verify'
     os::output 0 ok="${ok_n}" failed=0 skipped="${skip_n}" changed=yes
     return 0
 }
@@ -927,7 +927,7 @@ action_overview() {
             '下次执行' "${next}" \
             '定时任务上次结果' "${result_text}" \
             '定时目标' "${targets}" \
-            '本地保留' "每个目标 ${local_keep} 份" \
+            '本机保留' "每个目标 ${local_keep} 份" \
             '远端保留' "每个目标 ${remote_keep} 份"
         if [[ -n ${result} && ${result} != success ]]; then
             os::warn '上一次定时备份没有成功 —— 用「查看备份日志」看原因'
@@ -938,7 +938,7 @@ action_overview() {
     # --- 二、远端 ---
     os::section '远端'
     if [[ -z ${remote} ]]; then
-        os::info '未配置，只做本地备份（用「配置 rclone 远端」添加）'
+        os::info '未配置，只做本机备份（用「配置 rclone 远端」添加）'
     else
         os::kv '远端' "${remote}:${remote_dir}"
         # 版本要显示出来：上传失败最常见的原因就是这台机器上的 rclone 太旧，
@@ -948,9 +948,9 @@ action_overview() {
             os::kv 'rclone' "${OS_PROBE_VALUE}"
             detect_crypt
             if [[ ${BK_REMOTE_CRYPT} -eq 1 ]]; then
-                os::kv '加密' 'rclone crypt —— 归档在对端是密文'
+                os::kv '加密' 'rclone crypt —— 备份在对端是密文'
             else
-                os::kv '加密' '无 —— 归档在对端是明文'
+                os::kv '加密' '无 —— 备份在对端是明文'
             fi
         fi
         os::info "对端实际有几份要联网查，总览不做：rclone lsf ${remote}:${remote_dir}"
@@ -965,7 +965,7 @@ action_overview() {
     os::query --timeout 60 -- du -sh "${OS_ARCHIVE_DIR}" || true
     local used=${OS_RUN_OUTPUT%%[[:space:]]*}
     probe::disk_free_kb "${OS_BACKUP_DIR}"
-    os::kv '归档占用' "${used:-0}" \
+    os::kv '备份占用' "${used:-0}" \
         '所在分区可用' "$((${OS_PROBE_VALUE:-0} / 1048576)) GB" \
         '目录' "${OS_ARCHIVE_DIR}"
 
@@ -1063,7 +1063,7 @@ overview_targets() {
     # 备份工具最危险的失败不是备份失败，是用户以为自己被保护着 —— 而手工建的库、
     # 手工放进 /var/www 的目录，这份清单一个都发现不了。说清楚它才是一份诚实的总览。
     os::info '这里只列本工具知道的东西：部署过的站点、mariadb create 建的库、登记过的 path。'
-    os::info '手工建的库、手工放的目录不会自己出现 —— 用「添加备份目标」把它们登记进来。'
+    os::info '手工建的库、手工放的目录不会自己出现 —— 用「登记要备份的目录或文件」把它们登记进来。'
     return 0
 }
 
@@ -1094,7 +1094,7 @@ action_log() {
     return 0
 }
 
-# 校验本地归档。
+# 校验本机备份。
 #
 # **归档只在上传那一刻被校验过一次**，此后躺在盘上再没人看它一眼。
 # bit rot、磁盘故障、被误删一半 —— 等真要恢复才发现就已经晚了。
@@ -1104,7 +1104,7 @@ action_verify() {
         -name '*.tar.gz' || true
     local archives=${OS_RUN_OUTPUT}
     if [[ -z ${archives} ]]; then
-        os::info '没有任何本地归档'
+        os::info '没有任何本机备份'
         os::output 0 checked=0 bad=0
         return 0
     fi
@@ -1112,7 +1112,7 @@ action_verify() {
     local -i total=0
     total=$(printf '%s\n' "${archives}" | grep -c . || true)
 
-    os::section '校验本地归档'
+    os::section '校验本机备份'
     local -i checked=0 bad=0 nosum=0
     local f want got
     while IFS= read -r f; do
@@ -1145,9 +1145,9 @@ action_verify() {
     os::kv '已校验' "${checked} 份" '不通过' "${bad} 份" '缺校验文件' "${nosum} 份"
     if [[ ${bad} -gt 0 ]]; then
         os::output 1 checked="${checked}" bad="${bad}" nosum="${nosum}"
-        os::die 1 "${bad} 份归档校验不通过，它们已经不可靠了"
+        os::die 1 "${bad} 份备份校验不通过，它们已经不可靠了"
     fi
-    os::ok "全部 ${checked} 份归档校验通过"
+    os::ok "全部 ${checked} 份备份校验通过"
     os::output 0 checked="${checked}" bad=0 nosum="${nosum}"
     return 0
 }
@@ -1185,14 +1185,14 @@ action_remove() {
     os::ask --validate bk_path_registered --hint '要是上面列出的别名之一' \
         --arg name '要注销哪个（只影响 path:<别名>，站点与数据库不在此列）' name
 
-    if ! os::confirm --arg confirm-remove "注销 path:${name}？（已有归档不会删除）" n; then
+    if ! os::confirm --arg confirm-remove "注销 path:${name}？（已有备份不会删除）" n; then
         os::info '已取消'
         os::output 0 changed=no
         return 0
     fi
     os::state_del "backup-path:${name}"
     os::ok "已注销 path:${name}"
-    os::info "它的归档还在：${OS_ARCHIVE_DIR}/path/${name}"
+    os::info "它的备份还在：${OS_ARCHIVE_DIR}/path/${name}"
     os::output 0 changed=yes
     return 0
 }
@@ -1329,7 +1329,7 @@ action_remote() {
         os::info '在这台机器上建：rclone config    （OneDrive / S3 / B2 / WebDAV / Google Drive 都在里面）'
         os::info '服务器没有浏览器时：在自己电脑上装 rclone，跑 rclone config 完成授权，'
         os::info '  再把 rclone config file 指出的那份文件内容复制到服务器的 ~/.config/rclone/rclone.conf'
-        os::info '想让归档在对端是加密的：再建一个 type=crypt 的 remote 包住前一个，这里选它'
+        os::info '想让备份在对端是加密的：再建一个 type=crypt 的 remote 包住前一个，这里选它'
         os::info '建好之后再跑一次：oneserver backup remote'
         os::die 3 '没有可用的 rclone remote'
     fi
@@ -1366,7 +1366,7 @@ action_remote() {
     os::kv 'remote' "${chosen}" '远端目录' "${rdir}" \
         '加密' "$([[ ${BK_REMOTE_CRYPT} -eq 1 ]] && printf '是（rclone crypt）' || printf '否（对端是明文）')"
     [[ ${BK_REMOTE_CRYPT} -eq 1 ]] \
-        || os::warn '归档在对端是明文。里面有数据库转储与站点配置，建议改用 type=crypt 的 remote'
+        || os::warn '备份在对端是明文。里面有数据库转储与站点配置，建议改用 type=crypt 的 remote'
     os::ok '远端配置已保存'
     os::output 0 remote="${chosen}" remote_dir="${rdir}" crypt="${BK_REMOTE_CRYPT}" changed=yes
     return 0
@@ -1381,20 +1381,20 @@ action_schedule() {
     os::ask --match '^([01][0-9]|2[0-3]):[0-5][0-9]$' --hint '形如 04:00' --arg at '执行时间 HH:MM（本机时区）' at '04:00'
 
     local weekday=''
-    os::ask --match '^[0-6]$' --hint '0-6' --arg weekday '每周几执行（0=周日 … 6=周六，仅 weekly 用）' weekday '0'
+    os::ask --match '^[0-6]$' --hint '0-6' --arg weekday '每周几执行（0=周日 … 6=周六；仅选择“每周”时使用）' weekday '0'
 
     # 当场解析：配错的目标要在这里报，不要等到凌晨四点没人看着的时候
     local targets=''
     target_legend
     os::ask --validate resolve_targets --arg targets \
-        '定时备份哪些目标？（逗号分隔；名字位写 * = 该类全部，all = 四类全要）' targets \
+        '定时备份哪些目标？（多个用逗号分隔；把名字写成 * 表示该类全部，all 表示四类全部）' targets \
         "$(os::state_get backup targets "${OS_DEFAULT_BACKUP_TARGETS}")"
 
     # 定时任务不该暗中继承「上次手动备份」的保留数。在设置定时时显式确认，
     # 后续 timer 调用 backup run --non-interactive 时就从 state 取这两个值。
     local local_keep='' remote_keep=''
     os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg local-keep \
-        '每个目标的本地备份保留几份' local_keep \
+        '每个目标的本机备份保留几份' local_keep \
         "$(os::state_get backup local_keep "${OS_DEFAULT_BACKUP_LOCAL_KEEP}")"
     os::ask --match '^[1-9][0-9]*$' --hint '要正整数' --arg remote-keep \
         '每个目标的远端备份保留几份' remote_keep \
@@ -1427,7 +1427,7 @@ action_schedule() {
     os::state_set backup schedule="${freq}" at="${at}" oncalendar="${oncal}" targets="${targets}" \
         local_keep="${local_keep}" remote_keep="${remote_keep}"
     os::kv '频率' "${freq}" '时间' "${at}" 'OnCalendar' "${oncal}" '目标' "${targets}" \
-        '本地保留' "每个目标 ${local_keep} 份" '远端保留' "每个目标 ${remote_keep} 份" \
+        '本机保留' "每个目标 ${local_keep} 份" '远端保留' "每个目标 ${remote_keep} 份" \
         '查看下次执行' 'systemctl list-timers oneserver-backup.timer'
     os::ok '定时备份已启用'
     os::output 0 frequency="${freq}" at="${at}" targets="${targets}" \
@@ -1471,8 +1471,8 @@ main() {
     fi
 
     os::action_menu --overview action_overview --arg action '操作' dispatch \
-        'run=立即备份' 'log=查看备份日志' 'verify=校验本地归档' \
-        'add=添加备份目标' 'remove=移除备份目标' 'remote=配置 rclone 远端' \
+        'run=立即备份' 'log=查看备份日志' 'verify=校验本机备份' \
+        'add=登记要备份的目录或文件' 'remove=取消目录或文件的备份登记' 'remote=配置 rclone 远端' \
         'schedule=设置定时备份' 'unschedule=取消定时备份'
 }
 

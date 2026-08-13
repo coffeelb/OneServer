@@ -83,7 +83,7 @@ backup_run() {
     # 留最新的那一份，另外两份连同校验和一起走
     [[ "${output}" == *'LEFT=20260811-010101.tar.gz 20260811-010101.tar.gz.sha256 '* ]]
     # 报给用户的份数必须是真删掉的份数
-    [[ "${output}" == *'CHANGE=删除了 2 份 site:test 的旧本地备份'* ]]
+    [[ "${output}" == *'CHANGE=删除了 2 份 site:test 的旧本机备份'* ]]
 }
 
 @test "清理旧本地备份：份数没超过保留数就一份都不删" {
@@ -109,7 +109,7 @@ backup_run() {
                 *执行时间*) printf -v "${8}" "%s" 03:15 ;;
                 *每周几*) printf -v "${8}" "%s" 0 ;;
                 *定时备份哪些目标*) printf -v "${6}" "%s" db:forgejo ;;
-                *本地备份保留几份*) printf -v "${8}" "%s" 7 ;;
+                *本机备份保留几份*) printf -v "${8}" "%s" 7 ;;
                 *远端备份保留几份*) printf -v "${8}" "%s" 13 ;;
                 *) return 2 ;;
             esac
@@ -133,7 +133,7 @@ backup_run() {
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'STATE_ARG=local_keep=7'* ]]
     [[ "${output}" == *'STATE_ARG=remote_keep=13'* ]]
-    [[ "${output}" == *'KV_ARG=本地保留'*'KV_ARG=每个目标 7 份'* ]]
+    [[ "${output}" == *'KV_ARG=本机保留'*'KV_ARG=每个目标 7 份'* ]]
     [[ "${output}" == *'KV_ARG=远端保留'*'KV_ARG=每个目标 13 份'* ]]
     [[ "${output}" == *'OUTPUT_ARG=local_keep=7'* ]]
     [[ "${output}" == *'OUTPUT_ARG=remote_keep=13'* ]]
