@@ -13,7 +13,7 @@ DISTRO ?= debian13
 help:
 	@echo "OneServer 开发任务"
 	@echo
-	@echo "  make lint                                   静态检查二十项"
+	@echo "  make lint                                   静态检查二十一项"
 	@echo "  make lint-selftest                          反例自检：证明那些检查真的会红"
 	@echo "  make fmt                                    按 .editorconfig 就地格式化"
 	@echo "  make test [DISTRO=...]                      在容器里跑 lib 单元测试"
