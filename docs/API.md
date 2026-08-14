@@ -76,7 +76,7 @@
 
 ## `lib/probe.sh` · L3 能力
 
-- `probe::snapshot_flush` —— 把本次探测结果落盘为 public/probe.tsv，供非 root 读取
+- `probe::snapshot_flush` —— 把本次探测结果落盘为 /run/oneserver-public/probe.tsv，供非 root 读取
 - `probe::describe` —— 把 OS_PROBE_STATUS/SOURCE/AGE 渲染成一行来源标注
 - `probe::os_id` —— 发行版 ID（debian / ubuntu）
 - `probe::os_version` —— 发行版版本号（VERSION_ID）

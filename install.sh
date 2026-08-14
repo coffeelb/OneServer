@@ -58,7 +58,7 @@ COMPLETION_DIR='/etc/bash_completion.d'
 LOGROTATE_DIR='/etc/logrotate.d'
 
 # manifest 覆盖的顶层条目。**孤儿清理只在这几项之内进行** ——
-# state/ public/ secure.conf 也在 $ROOT 下，它们是运行时数据，
+# state/ data/ secure.conf 也在 $ROOT 下，它们是运行时数据，
 # 清理时碰它们等于把用户的组件记录和密码一起删了。
 OWNED_TOP=('bin' 'lib' 'script' 'templates' 'packaging' 'VERSION')
 

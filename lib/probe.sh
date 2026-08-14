@@ -67,7 +67,7 @@ probe::_remember() {
     return 0
 }
 
-# probe::snapshot_flush   把本次探测结果落盘为 public/probe.tsv，供非 root 读取
+# probe::snapshot_flush   把本次探测结果落盘为 /run/oneserver-public/probe.tsv，供非 root 读取
 #
 # 规范：root 执行任何命令时框架自动落一份快照 —— 这样即使
 # 用户从不启用面板的采集 timer（oneserver-web-*.timer），普通用户也能拿到
